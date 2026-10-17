@@ -1,6 +1,6 @@
 import './net.js';
 import 'dotenv/config';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import express from 'express';
 import { readFileSync } from 'node:fs';
 import { createServer as createTlsServer } from 'node:https';
@@ -29,6 +29,7 @@ import {
   deleteCacheRepo,
   deleteDownload,
   downloadFile,
+  modelsDir,
   fetchAvatar,
   imageMime,
   listDownloads,
@@ -701,6 +702,43 @@ app.post('/api/hf/download/cancel', async (req, res) => {
   }
   controller.abort();
   res.json({ cancelled: true });
+});
+
+/**
+ * Discards a paused or failed download's partial file, so the next attempt
+ * starts from scratch rather than resuming. Used by the explicit Cancel action.
+ */
+app.post('/api/hf/download/discard', async (req, res) => {
+  const repo = typeof req.body?.repo === 'string' ? req.body.repo : '';
+  const file = typeof req.body?.file === 'string' ? req.body.file : '';
+  const problem = validateRepoId(repo) ?? (file ? validateFilePath(file) : null);
+  if (problem) return res.status(400).json({ error: problem });
+  const dir = path.join(modelsDir(), repo.replace(/\//g, '--'));
+  const dest = file ? path.join(dir, ...file.split('/')) : null;
+  const tmp = dest ? `${dest}.part` : null;
+  // A repo-level discard drops every .part under that repo's directory.
+  try {
+    if (tmp) {
+      await rm(tmp, { force: true });
+    } else {
+      const { readdir } = await import('node:fs/promises');
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+      const stack = [dir];
+      while (stack.length) {
+        const d = stack.pop()!;
+        let es;
+        try { es = await readdir(d, { withFileTypes: true }); } catch { continue; }
+        for (const e of es) {
+          const full = path.join(d, e.name);
+          if (e.isDirectory()) stack.push(full);
+          else if (e.isFile() && e.name.endsWith('.part')) await rm(full, { force: true });
+        }
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+  res.json({ discarded: true });
 });
 
 /**
@@ -1824,6 +1862,7 @@ app.post('/api/hf/download', async (req, res) => {
   // the transfer and strand its .part; now the download is server-owned and a
   // client that reconnects just re-reads the progress.
   const controller = new AbortController();
+  downloadControllers.set(repo, controller);
   let clientGone = false;
   res.on('close', () => {
     clientGone = true;
@@ -1854,6 +1893,7 @@ app.post('/api/hf/download', async (req, res) => {
     finishTransfer(id, 'error', message);
     send('error', { message });
   } finally {
+    downloadControllers.delete(repo);
     if (!clientGone) res.end();
     releaseDownload(`${repo}/${file}`);
     void transfer;

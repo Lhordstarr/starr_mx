@@ -2487,13 +2487,16 @@ function renderDownloads() {
     }
     top.append(status);
 
-    // Cancel is offered while the model is still coming down.
+    // Pause is offered while the model is still coming down: it aborts the
+    // transfer but keeps the partial file, so Resume can continue from it.
     if (g.kind === 'download' && running && g.repo) {
-      const cancel = document.createElement('button');
-      cancel.type = 'button';
-      cancel.className = 'btn-ghost btn-tiny';
-      cancel.title = 'Stop this download';
-      armThenDelete(cancel, `cancel::${g.repo}`, async () => {
+      const pause = document.createElement('button');
+      pause.type = 'button';
+      pause.className = 'btn-ghost btn-tiny';
+      pause.title = 'Pause this download (progress is kept)';
+      pause.textContent = 'Pause';
+      pause.addEventListener('click', async () => {
+        pause.disabled = true;
         try {
           await api('/api/hf/download/cancel', {
             method: 'POST',
@@ -2503,9 +2506,72 @@ function renderDownloads() {
           await syncDerived();
         } catch (err) {
           notifyError(err instanceof Error ? err.message : String(err));
+        } finally {
+          pause.disabled = false;
         }
-      }, 'Cancel');
+      });
+      top.append(pause);
+
+      // Cancel discards the partial file as well.
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'btn-ghost btn-tiny';
+      cancel.title = 'Cancel and discard the partial download';
+      cancel.textContent = 'Cancel';
+      cancel.addEventListener('click', async () => {
+        cancel.disabled = true;
+        try {
+          await api('/api/hf/download/cancel', {
+            method: 'POST',
+            body: JSON.stringify({ repo: g.repo }),
+          });
+          await api('/api/hf/download/discard', {
+            method: 'POST',
+            body: JSON.stringify({ repo: g.repo }),
+          });
+          await syncTransfers();
+          await syncDerived();
+        } catch (err) {
+          notifyError(err instanceof Error ? err.message : String(err));
+        } finally {
+          cancel.disabled = false;
+        }
+      });
       top.append(cancel);
+    }
+
+    // Resume (and retry) for a paused or failed download: re-running the
+    // download skips files already on disk and resumes partials via Range.
+    if (g.kind === 'download' && !running && g.repo) {
+      const resume = document.createElement('button');
+      resume.type = 'button';
+      resume.className = 'btn-primary btn-tiny';
+      resume.title = errored ? 'Retry this download' : 'Resume this download';
+      resume.textContent = errored ? 'Retry' : 'Resume';
+      resume.addEventListener('click', async () => {
+        resume.disabled = true;
+        resume.textContent = '…';
+        try {
+          const endpoint = g.files.length === 1 ? '/api/hf/download' : '/api/hf/download-repo';
+          const body =
+            g.files.length === 1
+              ? { repo: g.repo, file: g.files[0].file }
+              : { repo: g.repo };
+          await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          await syncTransfers();
+          await syncDerived();
+        } catch (err) {
+          notifyError(err instanceof Error ? err.message : String(err));
+        } finally {
+          resume.disabled = false;
+          resume.textContent = errored ? 'Retry' : 'Resume';
+        }
+      });
+      top.append(resume);
     }
 
     // One-click removal of a whole model: only when nothing is still running,

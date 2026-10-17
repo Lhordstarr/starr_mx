@@ -525,9 +525,21 @@ export async function downloadFile(
     .split('/')
     .map((s) => encodeURIComponent(s))
     .join('/')}`;
+  const dir = path.join(modelsDir(), repo.replace(/\//g, '--'));
+  const dest = path.join(dir, ...file.split('/'));
+  const tmp = `${dest}.part`;
+  // Resume support: if a partial file is on disk, ask for the rest.
+  let existing = 0;
+  try {
+    existing = (await stat(tmp)).size;
+  } catch {
+    existing = 0;
+  }
+  const headers = { ...authHeaders() };
+  if (existing > 0) headers['Range'] = `bytes=${existing}-`;
   let res: Response;
   const dlInit = {
-    headers: authHeaders(),
+    headers,
     signal: opts.signal,
     redirect: 'follow' as const,
   };
@@ -550,22 +562,38 @@ export async function downloadFile(
     }
     throw new Error(`Download failed: HTTP ${res.status}`);
   }
-  const dir = path.join(modelsDir(), repo.replace(/\//g, '--'));
   await mkdir(dir, { recursive: true });
-  const dest = path.join(dir, ...file.split('/'));
   await mkdir(path.dirname(dest), { recursive: true });
   // Belt and suspenders with the segment validation above: never write
   // outside the downloads dir no matter what the caller passed.
   if (!path.resolve(dest).startsWith(path.resolve(dir) + path.sep)) {
     throw new Error('Invalid file name');
   }
+  // The server either honoured the Range (206, append) or sent the whole file
+  // again (200, truncate and restart). A 200 on a partial means the partial
+  // is discarded, which is the safe fallback.
+  let resumed = false;
+  if (existing > 0 && res.status === 206) {
+    resumed = true;
+  } else if (existing > 0 && res.status === 200) {
+    // Server ignored the range (or we never sent one): truncate and restart.
+    existing = 0;
+  }
   const totalHeader = res.headers.get('content-length');
-  const total = totalHeader !== null && totalHeader !== '' ? Number(totalHeader) : null;
-  const tmp = `${dest}.part`;
+  let total: number | null =
+    totalHeader !== null && totalHeader !== '' ? Number(totalHeader) : null;
+  if (resumed && total !== null) total = total + existing;
+  // Content-Range is the authoritative total when resuming.
+  const cr = res.headers.get('content-range');
+  if (cr) {
+    const m = cr.match(/\/(\d+)$/);
+    if (m) total = Number(m[0].slice(1));
+  }
+
   const { createWriteStream } = await import('node:fs');
-  let received = 0;
+  let received = existing;
   await new Promise<void>((resolve, reject) => {
-    const out = createWriteStream(tmp);
+    const out = createWriteStream(tmp, { flags: resumed ? 'a' : 'w' });
     out.on('error', reject);
     const reader = res.body!.getReader();
     const pump = async (): Promise<void> => {
@@ -592,7 +620,12 @@ export async function downloadFile(
     };
     pump();
   }).catch(async (err) => {
-    await rm(tmp, { force: true });
+    // Keep the partial file on an abort so a later Resume continues from it;
+    // only a real failure discards it.
+    const aborted =
+      opts.signal?.aborted || (err instanceof Error && err.name === 'AbortError') ||
+      /Download stopped/i.test((err as Error)?.message ?? '');
+    if (!aborted) await rm(tmp, { force: true });
     throw err;
   });
   const { rename: renameFile } = await import('node:fs/promises');
