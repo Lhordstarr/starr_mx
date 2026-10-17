@@ -310,6 +310,7 @@ export function openAIChatTools(
   baseUrl: string,
   headers: () => Record<string, string>,
   label: string,
+  extraBody?: Record<string, unknown>,
 ): ChatToolsFn {
   const toWire = (t: AgentTurn): unknown => {
     if (t.role === 'assistant' && t.calls?.length) {
@@ -344,6 +345,7 @@ export function openAIChatTools(
           : {}),
         stream: true,
         temperature,
+        ...extraBody,
       }),
       signal,
     });

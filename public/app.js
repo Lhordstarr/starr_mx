@@ -2202,7 +2202,10 @@ els.composer.addEventListener('submit', (e) => {
   e.preventDefault();
   closeToolMenu();
   const text = els.input.value.trim();
-  if (!text || activeStream()) return;
+  // A file on its own is a complete message: text files fold into the body and
+  // images become content parts, so there is no reason to demand typed text.
+  if (!text && !attachments.items().length) return;
+  if (activeStream()) return;
   send(text);
 });
 

@@ -1396,7 +1396,7 @@ function restoreDevice() {
   }
 }
 
-function renderRuntimeGroups(groups, installed, blocked = []) {
+function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}) {
   const blockedBy = new Map(blocked.map((b) => [b.id, b]));
 
   // Reconcile the selection with reality. Anything already installed, blocked
@@ -1465,6 +1465,20 @@ function renderRuntimeGroups(groups, installed, blocked = []) {
       // so any package without an `unlocks` list left an empty span in the
       // document — invisible, but markup that means nothing.
       meta.append(state);
+      // A better build is available for this machine (e.g. Vulkan instead of
+      // the CPU build). Offer a one-click reinstall that swaps it in.
+      if (isIn && upgrades[g.id]) {
+        const up = document.createElement('button');
+        up.type = 'button';
+        up.className = 'btn-ghost btn-tiny';
+        up.textContent = `Upgrade to ${upgrades[g.id] === 'vulkan' ? 'GPU (Vulkan)' : upgrades[g.id]}`;
+        up.addEventListener('click', () => {
+          rtPicked = new Set([g.id]);
+          updateRuntimeTotal(groups);
+          void runRuntimeInstall();
+        });
+        meta.append(up);
+      }
       if (Array.isArray(g.unlocks) && g.unlocks.length) {
         const unlocks = document.createElement('span');
         unlocks.className = 'rt-unlocks';
@@ -1814,7 +1828,7 @@ async function loadRuntimes({ force = false } = {}) {
     }
     renderRuntimeStatus(r);
     runtimeBlockedIds = new Set((data.blocked ?? []).map((b) => b.id));
-    renderRuntimeGroups(data.groups ?? [], r.installed ?? {}, data.blocked ?? []);
+    renderRuntimeGroups(data.groups ?? [], r.installed ?? {}, data.blocked ?? [], data.upgrades ?? {});
     // renderRuntimeGroups already disabled this when nothing is ticked; that
     // decision was being overwritten by the busy check alone, so an empty
     // selection looked installable.

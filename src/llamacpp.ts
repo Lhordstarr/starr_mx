@@ -15,13 +15,20 @@
  * report through `--alias`, so the id survives a restart of the server and the
  * file moving between the downloads directory and the HF cache.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 
 import { listDownloads } from './huggingface.js';
 import { CATALOG } from './model-catalog.js';
-import { llamaServerPath } from './runtimes.js';
+import { hasVulkan, llamaServerPath } from './runtimes.js';
+import {
+  attachChild,
+  finishProcess,
+  registerProcess,
+  registerStopHandler,
+  unregisterStopHandler,
+} from './processes.js';
 
 /**
  * Where the managed server listens. Deliberately not upstream's default of
@@ -182,6 +189,12 @@ export async function resolveGgufModel(id: string): Promise<GgufModel | null> {
 interface Serving {
   child: ChildProcess;
   model: string;
+  /** Managed-process id, so the resource manager can show and stop it. */
+  jobId?: string;
+  /** Whether the stop was asked for by the user. */
+  userStopped?: boolean;
+  /** True while a stop is in progress. */
+  stopping?: boolean;
 }
 
 /**
@@ -286,13 +299,17 @@ function touchIdle() {
  * there is nothing to flush, but a server that is mid-generation deserves the
  * chance to finish writing its log before it goes.
  */
-export async function stopLlamaServer(): Promise<void> {
+export async function stopLlamaServer(byUser = false): Promise<void> {
   const current = serving;
-  serving = null;
-  clearIdle();
   if (!current) return;
+  current.userStopped = byUser;
+  current.stopping = true;
+  clearIdle();
   const { child } = current;
-  if (child.exitCode !== null || child.signalCode) return;
+  if (child.exitCode !== null || child.signalCode) {
+    serving = null;
+    return;
+  }
   await new Promise<void>((resolve) => {
     const hard = setTimeout(() => {
       try {
@@ -313,12 +330,12 @@ export async function stopLlamaServer(): Promise<void> {
       resolve();
     }
   });
+  if (serving === current) serving = null;
 }
 
 /** Waits until the server answers its own health endpoint. */
-async function waitForReady(child: ChildProcess, model: GgufModel, onProgress: (line: string) => void) {
+async function waitForReady(child: ChildProcess, model: GgufModel) {
   const started = Date.now();
-  let lastNote = started;
   for (;;) {
     if (child.exitCode !== null || child.signalCode) {
       throw new Error(
@@ -341,10 +358,6 @@ async function waitForReady(child: ChildProcess, model: GgufModel, onProgress: (
         `${model.id} did not finish loading within ${Math.round(loadTimeoutMs() / 1000)}s${tailSuffix()}`,
       );
     }
-    if (Date.now() - lastNote > 3000) {
-      lastNote = Date.now();
-      onProgress(`Still loading ${model.id} — ${Math.round(waited / 1000)}s so far…`);
-    }
     await new Promise((r) => setTimeout(r, 400));
   }
 }
@@ -353,7 +366,6 @@ async function start(bin: string, model: GgufModel, onProgress: (line: string) =
   // One model at a time: llama-server loads exactly the file it was given.
   await stopLlamaServer();
 
-  onProgress(`Starting llama.cpp with ${model.id}…`);
   const args = [
     '--model',
     model.path,
@@ -371,6 +383,10 @@ async function start(bin: string, model: GgufModel, onProgress: (line: string) =
     // slot would double the KV cache for a queue that never needs it.
     '--parallel',
     '1',
+    // Offload as many layers as the build can: a Vulkan build uses the GPU,
+    // a CPU build ignores it. Either way the binary decides what fits.
+    '--n-gpu-layers',
+    '999',
     // Tool calls go through the model's own chat template. Enabled by default
     // in this build; passed explicitly so a default flipping upstream cannot
     // silently take tool support away.
@@ -397,18 +413,47 @@ async function start(bin: string, model: GgufModel, onProgress: (line: string) =
   });
   child.on('exit', (code, signal) => {
     const wasCurrent = serving?.child === child;
+    const jobId = serving?.jobId;
+    const userStopped = serving?.userStopped ?? false;
     if (wasCurrent) {
       serving = null;
       clearIdle();
     }
-    if (wasCurrent && code) {
+    if (jobId) {
+      unregisterStopHandler(jobId);
+      finishProcess(jobId, code ?? null, signal, userStopped);
+    }
+    if (wasCurrent && code && !userStopped) {
       console.error(`[llama.cpp] llama-server exited (${code ?? signal})${tailSuffix()}`);
     }
   });
 
-  await waitForReady(child, model, onProgress);
-  // A server that died between the health check and here would be caught above
-  // on the next call; the idle timer only starts once it is genuinely serving.
+  await waitForReady(child, model);
+  // The binary is up and the model is loaded. Register it with the resource
+  // manager so it shows up where the other long jobs do, with the model name
+  // in the row and the real server process (not the supervisor) for memory.
+  let serverPid = child.pid ?? -1;
+  for (let i = 0; i < 20 && serverPid === (child.pid ?? -1); i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    try {
+      const out = spawnSync('pgrep', ['-P', String(child.pid)], { encoding: 'utf8' });
+      const found = out.stdout.trim().split(/\\s+/).filter(Boolean)[0];
+      if (found) serverPid = Number(found);
+    } catch {
+      /* pgrep missing — the supervisor pid is still a usable handle */
+    }
+  }
+  const job = registerProcess({
+    kind: 'llm',
+    script: 'llama-server',
+    pid: serverPid > 0 ? serverPid : (child.pid ?? -1),
+    device: hasVulkan() ? 'gpu' : 'cpu',
+  });
+  serving.jobId = job.id;
+  attachChild(job.id, child);
+  registerStopHandler(job.id, () => stopLlamaServer(true));
+
+  // The idle timer only starts once the server is genuinely serving.
   touchIdle();
 }
 

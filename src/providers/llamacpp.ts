@@ -32,6 +32,9 @@ function compat(): Provider {
       keyOptional: true,
       local: true,
       stt: false,
+      // Small GGUFs (especially base models) tend to loop on their own output.
+      // A modest penalty keeps the reply readable without changing the model.
+      extraBody: { repeat_penalty: 1.1 },
     });
   }
   return inner;

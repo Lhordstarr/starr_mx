@@ -43,6 +43,7 @@ import {
 import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGen, releaseImageGen, IMAGE_FIELD_LABELS, MAX_PROMPT_LENGTH } from './imagegen.js';
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
 import { ggufModels, stopLlamaServer } from './llamacpp.js';
+import { llamaCppUpgradeKind } from './runtimes.js';
 import { allProviders, providerOrder } from './providers/index.js';
 import { discoverLocalServers, discoveredProvider, type DiscoveredServer } from './discovery.js';
 import { backendReports } from './backends.js';
@@ -951,6 +952,9 @@ app.get('/api/runtimes', async (_req, res) => {
     warning: await deviceWarning(device),
     // What the machine actually has, so Auto is not a guess.
     gpu: await detectGpu(),
+    // Runtime upgrades available for the installed build (e.g. a CPU build on a
+    // machine with a GPU). The UI offers a one-click reinstall for these.
+    upgrades: (await llamaCppUpgradeKind()) ? { 'llama-cpp': 'vulkan' } : {},
   };
   runtimesCache = payload;
   runtimesCacheAt = Date.now();

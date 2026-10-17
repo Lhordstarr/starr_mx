@@ -458,18 +458,13 @@ try {
 
   section('Chatting through llama.cpp');
   {
-    // A load slow enough to be narrated: the 503-while-loading window is what
-    // turns a multi-gigabyte model into progress lines instead of a hang.
+    // A load slow enough that the old code would have narrated it; the user
+    // asked for no 'starting llama.cpp' tag, so the transcript must stay quiet.
     writeFileSync(delayFile, '4500');
     const first = await chat(ASK('Qwen3-4B-Q4_K_M'));
     report(
-      'the load is announced',
-      notices(first).some((m) => /Starting llama\.cpp with Qwen3-4B-Q4_K_M/.test(m)),
-      notices(first).join(' | '),
-    );
-    report(
-      'a slow load keeps saying it is still working',
-      notices(first).some((m) => /Still loading Qwen3-4B-Q4_K_M/.test(m)),
+      'no "starting llama.cpp" tag is written to the transcript',
+      !notices(first).some((m) => /Starting llama\.cpp|Still loading/.test(m)),
       notices(first).join(' | '),
     );
     report('the answer streams back', deltas(first) === 'Hello from Qwen3-4B-Q4_K_M', deltas(first));

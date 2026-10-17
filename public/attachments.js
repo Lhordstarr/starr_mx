@@ -288,9 +288,10 @@ export function createAttachments({ els, notifyWarning }) {
   function updateAttachHint() {
     if (!els.attach) return;
     const state = visionState();
-    // Text files work on every model, so the button is only ever fully blocked
-    // when the provider positively reports that the model takes no images.
-    const blocked = state === 'no';
+    // Text files work on every model, so the button is never fully blocked: a
+    // model that takes no images still takes a JSON or a log file. Only the
+    // tooltip changes to say so.
+    const blocked = false;
     els.attach.disabled = blocked;
     els.attach.title =
       state === 'yes'

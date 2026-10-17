@@ -22,7 +22,7 @@
  * a current distro is newer — so Kokoro gets a second environment built on the
  * newest compatible interpreter this machine has.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { needsPrivilege } from './drivers.js';
 import { readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
@@ -260,9 +260,10 @@ export const RUNTIME_GROUPS: RuntimeGroup[] = [
     label: 'llama.cpp',
     blurb:
       'The GGUF inference engine, installed as a pinned prebuilt binary into ' +
-      'this app’s own folder — no root, no Python, no compiler. Download the ' +
-      'quantized chat models in Get models (Qwen3, Llama 3.2, Gemma) and they ' +
-      'show up in the chat provider picker, run on this machine.',
+      'this app’s own folder — no root, no Python, no compiler. Vulkan build ' +
+      'when a GPU is usable, CPU build otherwise. Download the quantized chat ' +
+      'models in Get models (Qwen3, Llama 3.2, Gemma) and they show up in the ' +
+      'chat provider picker, run on this machine.',
     unlocks: ['text'],
     // Not a pip package either: the upstream project ships prebuilt CPU
     // tarballs per build. Kept beside Ollama so "the two chat runtimes" read
@@ -1091,6 +1092,38 @@ export function llamaServerPath(): string | null {
 }
 
 /** True when the pinned server binary exists — llama.cpp's own "installed". */
+/** Which backend the installed build actually has, read off the shared
+ *  libraries beside the binary rather than off its name. */
+function installedLlamaKind(): 'vulkan' | 'cpu' | null {
+  const p = llamaServerPath();
+  if (!p) return null;
+  try {
+    const dir = path.dirname(p);
+    const entries = readdirSync(dir);
+    if (entries.some((n) => /^libggml-vulkan/i.test(n))) return 'vulkan';
+    return 'cpu';
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a Vulkan-capable GPU is actually usable on this machine. */
+export function hasVulkan(): boolean {
+  // A render node is the real signal that a GPU is present; vulkaninfo being
+  // on PATH means the ICD (driver) is installed, which is what llama.cpp's
+  // Vulkan backend needs. Either missing → the CPU build, which always works.
+  try {
+    if (!readdirSync('/dev/dri').some((n) => /^renderD\d+$/.test(n))) return false;
+  } catch {
+    return false;
+  }
+  try {
+    return spawnSync('vulkaninfo', ['--summary'], { stdio: 'ignore' }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function llamaCppInstalled(): Promise<boolean> {
   const p = llamaServerPath();
   if (!p) return false;
@@ -1102,11 +1135,22 @@ async function llamaCppInstalled(): Promise<boolean> {
   }
 }
 
-/** CPU asset for this machine, or null when upstream has no build for it. */
-function llamaCpuAsset(): string | null {
+/** Non-null when a better (GPU) build is available than the one installed. */
+export async function llamaCppUpgradeKind(): Promise<'vulkan' | null> {
+  if (!hasVulkan()) return null;
+  const kind = installedLlamaKind();
+  if (kind === null) return null; // nothing installed yet — install handles it
+  return kind === 'cpu' ? 'vulkan' : null;
+}
+
+/** The build to fetch for this machine: Vulkan when a GPU is usable, the CPU
+ *  build otherwise. Null when upstream has no build for this platform (macOS
+ *  and Windows are not scripted yet). */
+function llamaAsset(): { name: string; kind: 'vulkan' | 'cpu' } | null {
   if (process.platform !== 'linux') return null;
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  return `llama-${LLAMA_BUILD}-bin-ubuntu-${arch}.tar.gz`;
+  if (hasVulkan()) return { name: `llama-${LLAMA_BUILD}-bin-ubuntu-vulkan-${arch}.tar.gz`, kind: 'vulkan' };
+  return { name: `llama-${LLAMA_BUILD}-bin-ubuntu-${arch}.tar.gz`, kind: 'cpu' };
 }
 
 /** One venv's answer to the probe, or null when that venv has no interpreter.
@@ -1823,19 +1867,36 @@ function platformLabel(): string {
  * the system `tar`, so nothing is piped into a shell.
  */
 async function installLlamaCpp(onProgress: (line: string) => void): Promise<void> {
-  if (await llamaCppInstalled()) {
+  if (await llamaCppInstalled() && !(await llamaCppUpgradeKind())) {
     onProgress('llama.cpp is already installed.');
     return;
   }
-  const asset = llamaCpuAsset();
-  if (!asset) {
+  if (await llamaCppInstalled()) {
+    onProgress('Upgrading llama.cpp to the GPU build…');
+  }
+  const picked = llamaAsset();
+  if (!picked) {
     throw new Error(
       'The bundled llama.cpp installer is Linux-only (the project publishes ' +
-        'per-platform CPU builds; see its releases for macOS and Windows).',
+        'per-platform builds; see its releases for macOS and Windows).',
     );
   }
+  const asset = picked.name;
 
-  onProgress(`Fetching llama.cpp ${LLAMA_BUILD} (CPU build)…`);
+  // A previous build (CPU when a GPU is now available, or the other way round)
+  // would otherwise shadow the new one: the discovery below takes the first
+  // llama-* directory that holds the binary, and the stale one would win.
+  try {
+    for (const e of await readdir(runtimesDir(), { withFileTypes: true })) {
+      if (e.isDirectory() && /^llama-/.test(e.name)) {
+        await rm(path.join(runtimesDir(), e.name), { recursive: true, force: true });
+      }
+    }
+  } catch {
+    /* runtimes dir may not exist yet */
+  }
+
+  onProgress(`Fetching llama.cpp ${LLAMA_BUILD} (${picked.kind === 'vulkan' ? 'Vulkan' : 'CPU'} build)…`);
   const url = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${asset}`;
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) throw new Error(`Could not download ${asset} (HTTP ${res.status}).`);

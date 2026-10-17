@@ -18,7 +18,7 @@
 import type { ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
-export type ProcessKind = 'stt' | 'tts' | 'image';
+export type ProcessKind = 'stt' | 'tts' | 'image' | 'llm';
 export type ProcessState = 'running' | 'stopping' | 'exited';
 
 export interface ManagedProcess {
@@ -74,10 +74,26 @@ const SCRIPT_RUNTIMES: Record<string, string[]> = {
   'transcribe.py': ['torch', 'transformers'],
   'speak.py': ['torch', 'kokoro'],
   'generate.py': ['torch', 'diffusers'],
+  'llama-server': ['llama-cpp'],
 };
 
 let seq = 0;
 const live = new Map<string, { entry: ManagedProcess; child: ChildProcess }>();
+
+/**
+ * Some processes cannot be signalled by their child handle alone: llama.cpp
+ * runs under a supervisor whose stdin is the death watch, so stopping it means
+ * killing the supervisor and letting it reap the server. Registering a handler
+ * here lets stopProcess delegate instead of sending a bare SIGTERM that would
+ * leave the server behind.
+ */
+const stopHandlers = new Map<string, () => Promise<void>>();
+export function registerStopHandler(id: string, fn: () => Promise<void>): void {
+  stopHandlers.set(id, fn);
+}
+export function unregisterStopHandler(id: string): void {
+  stopHandlers.delete(id);
+}
 
 /** Finished jobs stay listed briefly so the UI can show the transition. */
 const recent: ManagedProcess[] = [];
@@ -169,6 +185,7 @@ export function finishProcess(
   id: string,
   code: number | null,
   signal?: NodeJS.Signals | null,
+  stoppedByUser?: boolean,
 ): ManagedProcess | null {
   const slot = live.get(id);
   if (!slot) return null;
@@ -176,7 +193,8 @@ export function finishProcess(
   entry.state = 'exited';
   entry.endedAt = Date.now();
   entry.exitCode = code;
-  if (signal) entry.stoppedByUser = true;
+  if (stoppedByUser !== undefined) entry.stoppedByUser = stoppedByUser;
+  else if (signal) entry.stoppedByUser = true;
   live.delete(id);
   recent.unshift({ ...entry });
   while (recent.length > RECENT_MAX) recent.pop();
@@ -191,8 +209,17 @@ export function finishProcess(
 export async function stopProcess(id: string): Promise<ManagedProcess | null> {
   const slot = live.get(id);
   if (!slot) return null;
-  const { entry, child } = slot;
+  const { entry } = slot;
 
+  const handler = stopHandlers.get(id);
+  if (handler) {
+    entry.state = 'stopping';
+    entry.stoppedByUser = true;
+    await handler();
+    return entry;
+  }
+
+  const { child } = slot;
   if (!child || child.pid === undefined) {
     // Spawned but not yet bound, or already gone. Either way there is nothing
     // left to signal; drop it so it stops appearing as running.

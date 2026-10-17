@@ -19,6 +19,8 @@ export interface OpenAICompatConfig {
   extraHeaders?: Record<string, string>;
   /** Set when the provider exposes an OpenAI-style /audio/transcriptions API. */
   stt?: boolean;
+  /** Extra fields merged into every chat/completions request body. */
+  extraBody?: Record<string, unknown>;
   /**
    * True when the server runs on this machine. The UI badges every such
    * provider identically; getting this wrong is what made Ollama appear
@@ -164,6 +166,7 @@ export function openAICompatible(cfg: OpenAICompatConfig): Provider {
           messages: messages.map((m) => ({ role: m.role, content: toOpenAIFormat(m.content) })),
           stream: true,
           temperature,
+          ...cfg.extraBody,
         }),
         signal,
       });
@@ -186,6 +189,7 @@ export function openAICompatible(cfg: OpenAICompatConfig): Provider {
       cfg.baseUrl,
       () => ({ ...authHeader(), ...cfg.extraHeaders }),
       cfg.label,
+      cfg.extraBody,
     ),
   };
 
