@@ -1,0 +1,36 @@
+{
+  "name": "local-online-llm-chat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Web chat UI that streams from local Ollama and online LLM providers",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "desktop": "electron desktop/main.mjs",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test:stt": "tsx scripts/stt-selftest.ts",
+    "test:attachments": "tsx scripts/attachments-selftest.ts",
+    "test:tools": "tsx scripts/tools-selftest.ts",
+    "test:ui-tools": "node scripts/ui-tools-selftest.mjs",
+    "test:ollama-models": "tsx scripts/ollama-models-selftest.ts",
+    "test:processes": "tsx scripts/processes-selftest.ts",
+    "test:hf": "tsx scripts/hf-selftest.ts",
+    "test:runnable": "tsx scripts/runnable-selftest.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.18",
+    "@langchain/ollama": "^1.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "electron": "^44.8.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

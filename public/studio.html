@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Studio — STARR Matrix</title>
+  <script src="/theme-init.js"></script>
+  <link rel="stylesheet" href="/theme.css" />
+  <link rel="stylesheet" href="/nav.css" />
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/studio.css" />
+  <link rel="stylesheet" href="/viewer.css" />
+</head>
+<body>
+  <!-- Field for the glass chrome to blur. -->
+  <canvas id="shader-bg" class="shader-bg" aria-hidden="true"></canvas>
+
+  <header class="topbar glass">
+    <button id="sidebar-toggle" class="icon-btn sidebar-toggle" title="Toggle model rail"
+            aria-label="Toggle model rail" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M4 6h16M4 12h16M4 18h10" />
+      </svg>
+    </button>
+    <a class="brand" href="/studio">
+      <span class="brand-mark">◆</span>
+    <span class="brand-container" role="img" aria-label="STARR Matrix">
+      <span class="brand-starr" aria-hidden="true">STARR</span>
+      <span class="brand-matrix" aria-hidden="true">Matrix</span>
+    </span>
+    </a>
+
+    <div class="chip-wrap">
+      <!-- A readout of the rail's Provider select, not a second control: the
+           choosing happens on the rail, so a popover here would be a duplicate
+           with an identical list. -->
+      <span class="chip chip-provider is-static" title="Image provider">
+        <span class="dot-mark" aria-hidden="true"></span>
+        <span id="chip-provider">—</span>
+      </span>
+    </div>
+    <span class="chip chip-model is-static" id="chip-model" title="Active image model">—</span>
+
+    <div class="topbar-right">
+      <span id="status-dot" class="dot" aria-hidden="true"></span>
+      <span id="status-blob" class="sp-22__blob status-blob" aria-hidden="true"></span>
+      <span id="status" class="status-text">ready</span>
+      <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="chat">
+    <!-- Left rail: history + model rail + resources. Mirrors the chat sidebar
+         so the app reads as one place, not two. -->
+    <aside class="sidebar glass" id="sidebar" aria-label="Conversation history">
+      <div class="nav-mount nav-mount--sidebar" data-nav-mount></div>
+
+      <div class="drawer-head">
+        <span class="drawer-title">History</span>
+        <button type="button" id="sidebar-close" class="icon-btn" aria-label="Close conversation history">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+
+      <ul id="history-list" class="history-list" aria-label="Past sessions"></ul>
+      <p class="hint history-hint" id="history-hint"></p>
+
+      <!-- The model picker for the Transcribe tab. The Image tab's model
+           choice lives in the composer pill, like the chat page's. -->
+      <div class="studio-rail__section" id="studio-models-section" hidden>
+        <div class="studio-rail__pick" id="stt-pick"></div>
+      </div>
+
+      <!-- Image settings live here on the Image tab: where to generate and how
+           big. Which model is the composer pill's job. -->
+      <div class="studio-rail__section studio-rail__image-settings" id="studio-image-settings" hidden>
+        <div class="studio-rail__label">Image</div>
+        <label class="img-field">Provider
+          <select id="studio-img-provider" aria-label="Image provider"></select>
+        </label>
+        <label class="img-field">Size
+          <select id="studio-img-size" aria-label="Image size"></select>
+        </label>
+        <span class="img-status" id="img-status" role="status" aria-live="polite"></span>
+      </div>
+
+      <!-- Telemetry: how busy the machine is and what it is doing. Built by the
+           same module as the chat sidebar so the two cannot drift. -->
+      <div class="studio-rail__section studio-rail__resources">
+        <div data-resource-mount aria-label="Resource usage"></div>
+      </div>
+
+      <div class="studio-rail__note" id="studio-rail-note">
+        Choose what each job runs on in
+        <a href="/settings#models/local">Your models</a>.
+      </div>
+
+      <button id="new-chat" class="btn-primary sidebar-new">＋ New session</button>
+    </aside>
+
+    <div class="chat-body">
+      <nav class="studio-tabs" role="tablist" aria-label="Studio">
+        <button type="button" class="studio-tab" role="tab" data-task="image"
+                id="tab-image" aria-controls="panel-image" aria-selected="true"
+                tabindex="0">Image</button>
+        <button type="button" class="studio-tab" role="tab" data-task="stt"
+                id="tab-stt" aria-controls="panel-stt" aria-selected="false"
+                tabindex="-1">Transcribe</button>
+      </nav>
+
+      <div class="messages" id="messages">
+        <div class="welcome" id="welcome">
+          <h1 class="welcome-title" id="welcome-title">What should we make?</h1>
+          <p class="welcome-sub" id="welcome-sub">Describe an image and hit Generate. Pollinations and
+            Stable&nbsp;Horde need no account; Cloudflare and Hugging&nbsp;Face work off a free token
+            from Settings.</p>
+        </div>
+      </div>
+
+      <!-- Transcription: pick a downloaded speech-to-text model, or record here.
+           The audio picker borrows the chat composer's attachment layout — a
+           paperclip that opens the dialog, and the chosen file as a chip with
+           its name and size — instead of a bare file input in the controls
+           row, which printed "No file chosen" and nothing else. -->
+      <section class="studio-panel" id="panel-stt" role="tabpanel" aria-labelledby="tab-stt" tabindex="0" hidden>
+        <div class="attach-box" id="stt-attach-box" hidden>
+          <div class="attach-list" id="stt-attach-list" aria-label="Audio to transcribe"></div>
+        </div>
+        <div class="studio-controls">
+          <input type="file" id="stt-file" accept="audio/*" hidden />
+          <button type="button" id="stt-attach" class="attach-btn" title="Add an audio file"
+                  aria-label="Add an audio file">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21.4 11.05 12.25 20.2a5.5 5.5 0 0 1-7.78-7.78l9.2-9.19a3.67 3.67 0 0 1 5.18 5.18l-9.2 9.2a1.83 1.83 0 1 1-2.59-2.6l8.49-8.48" />
+            </svg>
+          </button>
+          <button type="button" class="btn-ghost" id="stt-record">Record</button>
+          <button type="button" class="btn-primary" id="stt-go" disabled>Transcribe</button>
+          <span class="img-status" id="stt-status" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <!-- Image generation: cloud services plus whatever diffusers model is on
+           this machine. The local entry is what makes this a Studio rather than
+           a front end for somebody else's API. Left truly empty — the `:empty`
+           rule below is what keeps it from painting as a blank card. -->
+      <section class="studio-panel" id="panel-image" role="tabpanel" aria-labelledby="tab-image" tabindex="0"></section>
+
+      <form class="composer" id="composer">
+        <!-- The glass box the chat page uses, minus the controls that only
+             make sense there: jump-to-latest, attachments, the dictation mic
+             and Stop belong to a conversation stream. Studio recording has its
+             own Record button on the Transcribe tab. -->
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="A red panda in a spacesuit, studio lighting…"></textarea>
+          <div class="composer-row">
+            <!-- The chat page's model pill, kept whole: what is about to answer,
+                 opening a searchable list. Here it picks the image model for
+                 whichever provider the rail has selected. -->
+            <div class="model-select" id="model-select">
+              <button type="button" id="model-trigger" class="model-trigger"
+                      aria-haspopup="listbox" aria-expanded="false" title="Change model">
+                <span class="mt-label" id="model-current">no model selected</span>
+                <svg class="mt-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none"
+                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </button>
+              <div class="model-menu" id="model-menu" hidden>
+                <div class="mm-search">
+                  <input id="model-search" placeholder="Search models…" spellcheck="false"
+                         autocomplete="off" aria-label="Search models" />
+                </div>
+                <ul class="mm-list" id="model-list" role="listbox" aria-label="Models"></ul>
+                <div class="mm-hint" id="model-hint"></div>
+              </div>
+            </div>
+            <span class="composer-hint" id="composer-hint">
+              <kbd>Enter</kbd> to generate &middot; <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+            </span>
+            <div class="composer-actions">
+              <button type="submit" id="go" class="btn-primary" aria-label="Generate">
+                <span class="send-label">Generate</span>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                     stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M5 12h13M12 5l7 7-7 7" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <div class="backdrop" id="backdrop"></div>
+
+  <script type="module" src="/studio.js"></script>
+</body>
+</html>

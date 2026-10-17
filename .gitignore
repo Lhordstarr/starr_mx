@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.keys.json
+.prefs.json
+.providers.json
+.tools.json
+models/
+.runtimes/
+.hf-cache/
+*.log
+*.pem

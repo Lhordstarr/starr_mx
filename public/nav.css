@@ -1,0 +1,149 @@
+/* ==========================================================================
+   Primary navigation — one glass rail, present on all three pages.
+
+   Why a shared module instead of markup copied into each page: the three
+   documents are edited separately and would drift. One source, three mounts.
+
+   Everything here is drawn from the existing tokens (--glass-*, --text,
+   --text-dim, --border) so the rail is the same material as the panels beside
+   it. Deliberately achromatic, like the rest of the chrome: this app keeps
+   colour in the shader field and nowhere else, and a purple active pill would
+   be the only saturated thing in the interface.
+   ========================================================================== */
+
+.nav {
+  --nav-w: 216px;
+  /* The rail carries its own glass rather than relying on an ancestor panel.
+     On the chat page it sits inside the history sidebar, which is already
+     glass, so a second translucent layer would double the blur and darken the
+     text behind it; there it inherits. On settings and studio there is no
+     surrounding panel, and with no fill the rail was a bare box floating on the
+     shader — measured backdrop-filter: none. Applied only where it stands
+     alone. */
+  background: var(--glass-fill);
+  box-shadow: var(--glass-sheen);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  /* The width has to be driven by the variable. Declaring it and never using
+     it left the rail sized by its content, so collapsing changed the labels but
+     not the box — which reads as a broken toggle rather than a layout. */
+  width: var(--nav-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  transition: width var(--speed) var(--ease);
+}
+
+/* The rail is a flex item of the page's own row. It is not fixed-positioned,
+   so it scrolls with the page and never overlaps the composer. */
+.nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 0.84rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.nav-item svg {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+}
+
+.nav-item:hover {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.nav-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Current page. Marked with a rule down the edge rather than a filled pill:
+   a filled shape behind 0.84rem text shifts its own contrast, and the rail is
+   glass, so a solid block would also read as a hole in the blur. */
+.nav-item[aria-current='page'] {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--text-dim);
+}
+
+.nav-label {
+  overflow: hidden;
+  transition: opacity var(--speed) var(--ease);
+}
+
+/* Spacer pushes the collapse control to the bottom of the rail. */
+.nav-foot {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--glass-border);
+}
+
+
+
+
+
+/* ---- Mount ----
+   The rail lives at the top of the chat page's history column: that page
+   already has a left column, and a second one would leave the conversation
+   with almost no width. Settings and Studio carry no rail — they are reached
+   from it and have their own way back. */
+.nav-mount--sidebar {
+  flex-shrink: 0;
+}
+
+/* The history sidebar is the glass panel; the rail inside it is chrome laid on
+   chrome, so it takes no fill, no blur and no border of its own. Doubling a
+   translucent surface would blur twice and put the labels on a darker stack
+   than either surface was tuned for. */
+.sidebar .nav {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0 0 6px;
+}
+
+/* A hairline under the rail, so the history list below it does not read as
+   part of the same block. */
+.sidebar .nav-foot,
+.sidebar .nav-list {
+  margin-bottom: 6px;
+}
+
+/* ---- Reduced motion -------------------------------------------------- */
+/* Was written as a selector list ending in a trailing comma with no
+   declarations, which is a parse error — the browser dropped the whole rule,
+   so nothing below was ever suppressed. Names the three selectors in this file
+   that actually carry a transition: the rail's width, the item's colour, and
+   the label's opacity. */
+@media (prefers-reduced-motion: reduce) {
+  .nav,
+  .nav-item,
+  .nav-label {
+    transition: none;
+  }
+}

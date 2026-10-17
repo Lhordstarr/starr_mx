@@ -1,0 +1,849 @@
+/* ==========================================================================
+   theme.css — design tokens, base elements and shared components.
+   Loaded by the chat and settings pages so both stay consistent.
+
+   Glass physics follows the "re-tune, not just recolour" rule: every theme
+   redefines the whole glass recipe — blur radius, saturation, film alpha, rim
+   brightness, sheen and shadow depth — rather than only swapping the fill
+   colour. A glass surface that keeps dark-theme blur on a light background
+   reads as a grey smear, so the maths moves with the surface.
+   ========================================================================== */
+
+:root {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --radius-sm: 9px;
+  --radius: 13px;
+  --radius-lg: 20px;
+
+  --speed: 170ms;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+  /* Collapse very long turns behind a "Show more/less" toggle. The JS threshold
+     (CLAMP_AT) should be larger than this so only sufficiently long turns
+     become clamped. */
+  --bubble-clamp: 440px;
+}
+
+/* ---- Cross-document page transitions ----
+   These are separate HTML documents (chat / image studio / settings), so a
+   navigation is a full load whose first paint is a hard cut. Opting into the
+   View Transitions API lets supporting browsers cross-fade old→new instead.
+   Progressive: browsers without it ignore the at-rule and keep the default
+   instant swap. Reduced-motion users always get the instant swap. */
+@view-transition {
+  navigation: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @view-transition {
+    navigation: none;
+  }
+}
+
+/* ---- Per-provider accent ----
+   One neutral grey for every provider: this build is deliberately achromatic,
+   so a provider's identity is carried by its label, not by a hue. The
+   selector list is kept so app.js can keep setting data-provider without this
+   file caring what the value is. */
+:root,
+:root[data-provider] {
+  --prov: #6f6f6f;
+}
+
+:root {
+  --prov-soft: rgba(111, 111, 111, 0.16);
+  --prov-border: rgba(111, 111, 111, 0.45);
+  /* Used as a LABEL colour (the provider chip text), not just a dot fill, so
+     it has to clear 4.5:1 against a moving field rather than sit at #8a8a8a,
+     which measured 2.19:1 behind the brightest part of the backdrop. */
+  --prov-text: #c2c2c2;
+}
+
+/* ==========================================================================
+   Dark surface — the default.
+
+   True black throughout: background, panels and bubbles are all #000000.
+   With no shadow visible against black and no tonal difference between
+   surfaces, borders carry most of the separation, so they are deliberately
+   stronger here than a normal dark theme would use.
+
+   Glass over black needs a WHITE film. A black film on a black surface is
+   literally invisible — that is the whole reason the glass read as nothing
+   before. The film is thin because there is no light to lift; the rim and
+   sheen do the work of describing the edge.
+   ========================================================================== */
+:root {
+  --bg: #000000;
+  --panel: #000000;
+  --panel-2: #000000;
+  --panel-3: #0b0b0b;
+  --border: #4c4c4c;
+  --border-soft: #383838;
+
+  --text: #e8e8e8;
+  /* The two dim tiers were tuned against a BLACK backdrop. With the shader
+     field behind the glass they were unreadable: measured 2.30:1 and 1.15:1
+     against the brightest pixel the backdrop reached. Raised until they clear
+     4.5:1 against the dimmed field while staying below --text, so the
+     hierarchy survives. */
+  --text-dim: #c2c2c2;
+  --text-faint: #b0b0b0;
+
+  --accent: #7c7c7c;
+  --accent-hover: #939393;
+  --accent-soft: rgba(124, 124, 124, 0.16);
+  --accent-border: rgba(160, 160, 160, 0.45);
+
+  --success: #9a9a9a;
+  --warning: #b0b0b0;
+  --danger: #cfcfcf;
+  --danger-soft: rgba(207, 207, 207, 0.14);
+
+  --shadow: 0 2px 4px rgba(0, 0, 0, 0.6), 0 14px 38px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.55);
+  --bubble-ai: #000000;
+  --bubble-user: #000000;
+
+  /* ---- Glass recipe (dark) ----
+     blur: high, because black-on-black has no edge for the eye to catch and
+     the glass has to build its own.
+     saturate: raised with the field. `saturate()` is a luminance-preserving
+     matrix in theory, so it is the cheapest way to add colour to the glass —
+     but Firefox shifts the composited peaks a little in practice, so the
+     value is bounded by the composer hint and was chosen by measurement:
+     165% keeps it at 4.82:1, while 180% dropped it to 4.48:1.
+     film: a DARK translucent scrim, not white.
+     This was originally white at 6%, which lifts the surface nicely but does
+     nothing to bound the backdrop — a 6% film passes 94% of whatever is
+     behind it, and the shader peaked at 122/255 there. That left --text-faint
+     (#a8a8a8) at 1.81:1. A dark scrim over black still reads as a surface
+     (28,28,30 is not black) while cutting the field, which is what makes small
+     text survive a moving, coloured backdrop.
+     Raised from 58% to 70% when the field itself was brightened (see the
+     shader defaults). The scrim is the only knob that bounds the backdrop
+     without collapsing --text-faint into --text-dim, and at 58% the brighter
+     field put the composer hint at 3.79:1. 70% cuts the field to 30% and
+     restores 4.85:1; the open (unglassed) page still shows the brighter field.
+     rim: brighter than the film so the edge reads as an edge. */
+  --glass-blur-radius: 24px;
+  --glass-sat: 165%;
+  --glass-fill: rgba(28, 28, 30, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.15);
+  --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.11);
+  --glass-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(0, 0, 0, 0.6);
+  --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+
+  /* Syntax highlighting. Dark variants of the light theme's hues, tuned for
+     the near-black code surface — every value clears 4.5:1 against --code-bg,
+     since a dim token on black is unreadable rather than subtle. */
+  --code-bg: #0a0a0a;
+  --code-com: #8a8a8a;   /* comments — quiet grey, still readable */
+  --code-str: #9ece8f;   /* strings — green */
+  --code-num: #d9a066;   /* numbers, literals — orange */
+  --code-kw: #c678dd;   /* keywords — purple, they carry the structure */
+  --code-fn: #61afef;   /* call sites — blue */
+  --code-type: #56b6c2; /* built-in types — teal */
+  --code-var: #e06c75;  /* variables — red */
+  --code-key: #e5c07b;  /* object keys, diff headers — yellow */
+  --code-tag: #e06c75;  /* html tag names — red */
+  --code-add: #9ece8f;  /* diff additions — green */
+  --code-del: #e06c75;  /* diff removals — red */
+
+  --sidebar-w: 248px;
+
+  /* One height for every control in the top bar. Previously each control
+     derived its own box from its own font-size, so overriding font-size on
+     one chip changed its line-height and made it 1px shorter than its
+     neighbour — two identical pills side by side at 35px and 34px. A fixed
+     height plus `line-height: 1` decouples the box from the type metrics, so
+     a chip can use a different font-size without changing its size. */
+  --bar-h: 34px;
+}
+
+/* ==========================================================================
+   Light surface.
+
+   The glass recipe inverts rather than mirrors. Blur DROPS (a light surface
+   already separates from its background tonally, so a heavy blur only muddies
+   it) and saturation CLIMBS to recover the colour the thinner blur let
+   through. The film goes much denser because white-on-white needs the
+   opposite treatment to white-on-black, and the rim gets a dark hairline
+   underneath it so the edge survives against the page.
+   ========================================================================== */
+:root[data-theme='light'] {
+  --bg: #f4f6fb;
+  --panel: #ffffff;
+  --panel-2: #f7f9fd;
+  --panel-3: #eaeef7;
+  --border: #d8dfea;
+  --border-soft: #e6ebf4;
+
+  --text: #16181f;
+  --text-dim: #525a6d;
+  /* Measured, not guessed. #8a92a6 was 3.11:1 on white. #6b7280 measured
+     4.47:1 against the composited glass fill — under the floor — so this sits
+     at 5.0:1 on that same surface with margin to spare, while staying visibly
+     lighter than --text-dim. */
+  --text-faint: #5e6674;
+  --prov-text: #555555;
+
+  --accent: #4c4c4c;
+  --accent-hover: #383838;
+  --accent-soft: rgba(76, 76, 76, 0.09);
+  --accent-border: rgba(76, 76, 76, 0.32);
+
+  --success: #3d6b52;
+  --warning: #7a5a1e;
+  --danger: #a03030;
+  --danger-soft: rgba(160, 48, 48, 0.09);
+
+  --shadow: 0 1px 2px rgba(19, 26, 48, 0.06), 0 10px 28px rgba(19, 26, 48, 0.09);
+  --shadow-sm: 0 1px 2px rgba(19, 26, 48, 0.08);
+  --bubble-ai: #ffffff;
+  --bubble-user: #eef1f8;
+
+  --glass-blur-radius: 12px;
+  --glass-sat: 205%;
+  /* 78%, not the 62% this started at. A 62% film passed over half of
+     whatever the shader was doing, which pulled the bright areas of the glass
+     down to ~194/255 and left the dark secondary text at 3.37:1. Denser film
+     costs translucency but keeps the field from dimming the text under it. */
+  --glass-fill: rgba(255, 255, 255, 0.78);
+  --glass-border: rgba(255, 255, 255, 0.85);
+  /* The dark hairline under the bright rim: on a light page the top highlight
+     alone disappears, so the edge needs a second, darker cue to survive. */
+  --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(19, 26, 48, 0.06);
+  --glass-shadow: 0 1px 2px rgba(19, 26, 48, 0.07), 0 8px 24px rgba(19, 26, 48, 0.08);
+  --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+
+  --code-bg: #f7f8fb;
+  --code-com: #6b7280;
+  --code-str: #2f6f3e;
+  --code-num: #8a4b12;
+  --code-kw: #4c1d95;
+  --code-fn: #1d4ed8;
+  --code-type: #0e6b80;
+  --code-var: #9d174d;
+  --code-key: #8a5a06;
+  --code-tag: #9f1239;
+  --code-add: #2f6f3e;
+  --code-del: #b91c1c;
+}
+
+/* Follow the OS when the user has not chosen explicitly. Same recipe as the
+   explicit light theme above, duplicated because CSS custom properties do not
+   compose across selectors. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f4f6fb;
+    --panel: #ffffff;
+    --panel-2: #f7f9fd;
+    --panel-3: #eaeef7;
+    --border: #d8dfea;
+    --border-soft: #e6ebf4;
+
+    --text: #16181f;
+    --text-dim: #525a6d;
+    --text-faint: #5e6674;
+    --prov-text: #555555;
+
+    --accent: #4c4c4c;
+    --accent-hover: #383838;
+    --accent-soft: rgba(76, 76, 76, 0.09);
+    --accent-border: rgba(76, 76, 76, 0.32);
+
+    --success: #3d6b52;
+    --warning: #7a5a1e;
+    --danger: #a03030;
+    --danger-soft: rgba(160, 48, 48, 0.09);
+
+    --shadow: 0 1px 2px rgba(19, 26, 48, 0.06), 0 10px 28px rgba(19, 26, 48, 0.09);
+    --shadow-sm: 0 1px 2px rgba(19, 26, 48, 0.08);
+    --bubble-ai: #ffffff;
+    --bubble-user: #eef1f8;
+
+    --glass-blur-radius: 12px;
+    --glass-sat: 205%;
+    /* Same 78% as the explicit light theme above; see the comment there. */
+    --glass-fill: rgba(255, 255, 255, 0.78);
+    --glass-border: rgba(255, 255, 255, 0.85);
+    --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      inset 0 0 0 1px rgba(19, 26, 48, 0.06);
+    --glass-shadow: 0 1px 2px rgba(19, 26, 48, 0.07), 0 8px 24px rgba(19, 26, 48, 0.08);
+    --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+
+    --code-bg: #f7f8fb;
+    --code-com: #6b7280;
+    --code-str: #2f6f3e;
+    --code-num: #8a4b12;
+    --code-kw: #4c1d95;
+    --code-fn: #1d4ed8;
+    --code-type: #0e6b80;
+    --code-var: #9d174d;
+    --code-key: #8a5a06;
+    --code-tag: #9f1239;
+    --code-add: #2f6f3e;
+    --code-del: #b91c1c;
+  }
+}
+
+/* Explicit dark wins over the OS query above regardless of order. */
+@media (prefers-color-scheme: light) {
+  :root[data-theme='dark'] {
+    --bg: #000000;
+    --panel: #000000;
+    --panel-2: #000000;
+    --panel-3: #0b0b0b;
+    --border: #4c4c4c;
+    --border-soft: #383838;
+
+    --text: #e8e8e8;
+    --text-dim: #c2c2c2;
+    --text-faint: #b0b0b0;
+    /* Matches the dark block above; see --prov-text there for why a label
+       colour has to clear 4.5:1 against a moving field. */
+    --prov-text: #c2c2c2;
+
+    --accent: #7c7c7c;
+    --accent-hover: #939393;
+    --accent-soft: rgba(124, 124, 124, 0.16);
+    --accent-border: rgba(160, 160, 160, 0.45);
+
+    --success: #9a9a9a;
+    --warning: #b0b0b0;
+    --danger: #cfcfcf;
+    --danger-soft: rgba(207, 207, 207, 0.14);
+
+    --shadow: 0 2px 4px rgba(0, 0, 0, 0.6), 0 14px 38px rgba(0, 0, 0, 0.55);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.55);
+    --bubble-ai: #000000;
+    --bubble-user: #000000;
+
+    --glass-blur-radius: 24px;
+    --glass-sat: 165%;
+    /* Same dark scrim as the base dark block above — see the comment there
+       for why this is a scrim and not a white film. */
+    --glass-fill: rgba(28, 28, 30, 0.7);
+    --glass-border: rgba(255, 255, 255, 0.15);
+    --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.11);
+    --glass-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(0, 0, 0, 0.6);
+    --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+
+    --code-bg: #0a0a0a;
+    --code-com: #8a8a8a;
+    --code-str: #9ece8f;
+    --code-num: #d9a066;
+    --code-kw: #c678dd;
+    --code-fn: #61afef;
+    --code-type: #56b6c2;
+    --code-var: #e06c75;
+    --code-key: #e5c07b;
+    --code-tag: #e06c75;
+    --code-add: #9ece8f;
+    --code-del: #e06c75;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root:not([data-theme]) {
+  color-scheme: light dark;
+}
+
+/* ---------- Base ---------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  background: var(--bg);
+  transition: background var(--speed) var(--ease);
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.02em;
+  line-height: 1.22;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--panel-3);
+  background-clip: content-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+
+/* ---------- Form controls ---------- */
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  width: 100%;
+  transition: border-color var(--speed) var(--ease), box-shadow var(--speed) var(--ease),
+    background var(--speed) var(--ease);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-faint);
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--prov) 38%, var(--border));
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--prov);
+  box-shadow: 0 0 0 3px var(--prov-soft);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+/* ---------- Buttons ---------- */
+
+button {
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.88rem;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--speed) var(--ease), border-color var(--speed) var(--ease),
+    color var(--speed) var(--ease), transform var(--speed) var(--ease),
+    opacity var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+}
+
+button:hover:not(:disabled) {
+  background: var(--panel-3);
+  border-color: color-mix(in srgb, var(--prov) 30%, var(--border));
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Glass primary. Same recipe as the chrome surfaces, so the CTA belongs to
+   the same material rather than reading as a differently-finished control. */
+.btn-primary {
+  background: var(--glass-fill);
+  border-color: var(--glass-border);
+  color: var(--text);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--panel-3);
+  border-color: var(--accent-border);
+  color: var(--text);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.btn-danger {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.btn-danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+/* Square icon button. Icons are inline SVG, not glyphs, because glyph
+   coverage varies by system font and unknown characters render as tofu.
+   Sized from --bar-h on both axes: padding 9px around a 16px icon produced a
+   36px-tall box, which the top bar then fought with a `width: 34px` override,
+   leaving every icon button 2px taller than it was wide. */
+.icon-btn {
+  width: var(--bar-h);
+  height: var(--bar-h);
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  line-height: 0;
+}
+
+.icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  margin: 0 auto;
+}
+
+/* ---------- Small shared bits ---------- */
+
+.badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.badge.ok {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.badge.info {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.badge.warn {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
+.badge.prov {
+  color: var(--prov);
+  border-color: var(--prov-border);
+  background: var(--prov-soft);
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--text-dim);
+}
+.hint.warn {
+  color: var(--warning);
+}
+
+label.field-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
+/* ---------- Notifications ----------
+
+   A stacking container rather than one fixed slot. The previous single toast
+   overwrote itself, so two events arriving together destroyed the first. */
+
+.toast-stack {
+  position: fixed;
+  /* Below the topbar (34px bar + 8px rail padding = ~51px), with a small gap. */
+  top: calc(var(--bar-h) + 26px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  /* The container must not swallow clicks meant for the composer beneath it —
+     only the notifications themselves are interactive. */
+  pointer-events: none;
+  width: max-content;
+  max-width: min(92vw, 520px);
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px 11px 15px;
+  border-radius: var(--radius-lg);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 500;
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  max-width: 100%;
+  /* Slides down from above and fades in, matching the new top position. */
+  opacity: 0;
+  transform: translateY(-12px) scale(0.97);
+  transition:
+    opacity var(--speed) var(--ease),
+    transform var(--speed) var(--ease);
+}
+
+.toast.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+.toast.is-out {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.98);
+}
+
+.toast__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  color: var(--text-dim);
+}
+
+.toast__icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.toast__text {
+  /* Long provider names and model ids must wrap rather than push the pill
+     past the viewport. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.toast__close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: -4px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.toast__close svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
+.toast__close:hover {
+  color: var(--text);
+  background: var(--panel-3);
+}
+
+/* Keyboard focus must be visible on the dismiss control, which sits inside a
+   transient element most people never tab to. */
+.toast__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Types. The chrome stays achromatic; the icon and a tinted rim carry the
+   meaning, so the distinction survives a greyscale screenshot. */
+.toast--success .toast__icon {
+  color: var(--success);
+}
+
+.toast--warning {
+  border-color: color-mix(in srgb, var(--warning) 48%, var(--glass-border));
+}
+
+.toast--warning .toast__icon {
+  color: var(--warning);
+}
+
+.toast--error {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--glass-border));
+  background: color-mix(in srgb, var(--danger) 12%, var(--glass-fill));
+}
+
+.toast--error .toast__icon {
+  color: var(--danger);
+}
+
+/* Pause the hover affordance on touch, where there is no hover. */
+@media (hover: none) {
+  .toast__close {
+    display: none;
+  }
+}
+
+/* ---------- Shared page chrome: shader backdrop & glass surface ----------
+   Loaded by both the chat and settings pages.
+
+   .shader-bg is the field the glass chrome blurs. It exists because
+   backdrop-filter over flat black blurs to flat black — the topbar, rail and
+   settings cards would read as translucent rectangles with nothing behind
+   them. Stacking is load-bearing: z-index -1 paints it above the page
+   background but below all in-flow content, which is exactly the set of
+   pixels a backdrop-filter samples.
+
+   The canvas has no width/height attributes — shader.js sets the backing
+   store, and CSS owns the layout size. */
+
+.shader-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  /* Fade the field in rather than letting it pop after shader.js has compiled
+     it. Until the attribute lands the canvas is fully transparent, so there is
+     no stray box on a compositor and no hard cut from flat black to the
+     moving field on navigation. */
+  opacity: 0;
+  transition: opacity 260ms var(--ease);
+}
+
+/* The shader is tone-mapped and already quite dark, and the glass then blurs
+   it by 20-24px — which averages most of its amplitude away. This opacity is
+   the single biggest lever on how much colour reaches the surface, so it is
+   deliberately high rather than timid. shader.js sets [data-ready] once the
+   program is linked and the first frame is drawn. */
+.shader-bg[data-ready] {
+  opacity: 0.9;
+}
+
+/* Without WebGL the page removes the canvas; opacity 0 is enough of a fallback
+   if any page ever leaves it in place. */
+
+@media (prefers-reduced-motion: reduce) {
+  .shader-bg {
+    transition: none;
+  }
+}
+
+/* Liquid glass surface. A translucent film plus a blurred, saturated backdrop.
+   Applied to the topbar, history rail, settings panel and the settings page
+   cards. Set --glass-fill to transparent to fall back to pure-black chrome. */
+.glass {
+  background: var(--glass-fill);
+  box-shadow: var(--glass-sheen);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

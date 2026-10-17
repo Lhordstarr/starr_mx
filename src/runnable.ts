@@ -1,0 +1,303 @@
+/**
+ * What this machine can actually run right now.
+ *
+ * Three separate questions used to be answered in three places, and each one
+ * guessed: the hub grouped downloads by a hardcoded runtime map, the catalog
+ * showed a Run button keyed off catalog metadata alone, and dictation only ever
+ * looked at cloud providers. The result was that a downloaded model could be
+ * on disk, described one way on the card, grouped another way on the hub, and
+ * still be impossible to actually invoke.
+ *
+ * This module is the single answer: given the catalog, what is on disk and what
+ * is installed, it returns the models that can *genuinely* run, and for each
+ * one the exact reason when it cannot. Every surface reads from here, so they
+ * cannot disagree.
+ *
+ * The catalog is the curated path, not the only one. The Hub browser can fetch
+ * any repository, and a download whose layout a bundled runner loads (a
+ * transformers Whisper, a diffusers tree) is as runnable as a catalog entry —
+ * it used to be on disk, runtime installed, and invisible to every picker
+ * purely because nobody had hand-written it down. Those downloads are
+ * discovered by layout below, with the same ready/reason discipline.
+ */
+import './net.js';
+import { readFile } from 'node:fs/promises';
+import * as path from 'node:path';
+import { CATALOG, catalogRepoIds, type CatalogEntry, type CatalogTask } from './model-catalog.js';
+import { hubCacheDir, listDownloads, modelsDir, type HFDownload } from './huggingface.js';
+import { runtimeStatus } from './runtimes.js';
+
+export type RunTask = 'stt' | 'tts' | 'image';
+
+export interface RunnableModel {
+  /** Catalog identity, exactly as the downloader and runners use it. */
+  repo: string;
+  label: string;
+  task: RunTask;
+  /** Which of the entry's files identifies the model to the runner. */
+  file: string;
+  /** Every file this model needs; a partial download is not runnable. */
+  requiredFiles: string[];
+  /** Which of those are already on disk. */
+  presentFiles: string[];
+  /** Installed runtime group -> version. */
+  runtimes: Record<string, string>;
+  missing: string[];
+  /** False when a required runtime is blocked on this interpreter. */
+  blocked: boolean;
+  /** Why it cannot run, or '' when it can. */
+  reason: string;
+  ready: boolean;
+}
+
+/**
+ * The catalog task label for a runner task. The two vocabularies differ
+ * ('speech-to-text' vs 'stt'), and conflating them is how entries end up
+ * filed under the wrong section.
+ */
+const CATALOG_TASK: Record<RunTask, CatalogTask> = {
+  stt: 'speech-to-text',
+  tts: 'text-to-speech',
+  image: 'image-generation',
+};
+
+/** One catalog entry as a candidate model. */
+function candidatesFor(task: RunTask): CatalogEntry[] {
+  return CATALOG.flatMap((s) => s.entries).filter(
+    (e) => e.task === CATALOG_TASK[task] && e.run?.kind === task,
+  );
+}
+
+/**
+ * A model needs *every* file of a bundle, not just its weights: a CTranslate2
+ * Whisper without `config.json` next to `model.bin` is not a model.
+ */
+function requiredFiles(entry: CatalogEntry): string[] {
+  return (entry.files ?? []).map((f) => f.name);
+}
+
+/** The file the runner is pointed at — the weights, not a sidecar. */
+function entryAnchor(entry: CatalogEntry): string {
+  const files = entry.files ?? [];
+  // The largest file is the weights in every format here (model.bin, *.safetensors,
+  // *.onnx, *.ckpt), so it identifies the model reliably.
+  const biggest = files.slice().sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))[0];
+  return biggest?.name ?? files[0]?.name ?? '';
+}
+
+/**
+ * A downloaded repository the catalog does not know, whose layout is still
+ * something a bundled runner can load.
+ *
+ * Detection is by layout, never by name: a repo called "whisper-thing" proves
+ * nothing, while `config.json` whose `model_type` is `whisper` is exactly what
+ * the transformers pipeline will accept. Shapes the runners do not handle stay
+ * unclaimed — being listed is a promise that running works.
+ */
+interface DetectedLayout {
+  /** Short format tag shown beside the model name. */
+  format: string;
+  /** Files the runner needs, most important first — the first is the anchor. */
+  needs: string[];
+  /** Installed runtime groups this layout needs before it can run. */
+  requires: string[];
+}
+
+/** `model_type` from a repo's config.json, or '' when absent or unreadable. */
+async function modelTypeOf(dir: string): Promise<string> {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(dir, 'config.json'), 'utf8')) as {
+      model_type?: unknown;
+    };
+    return typeof parsed.model_type === 'string' ? parsed.model_type.toLowerCase() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * What a downloaded repo is, when its files alone can say so.
+ *
+ * Every branch mirrors the runner that would execute the model, so the claim
+ * and the execution cannot drift apart: CT2 pairs with whisper_ct2.py's marker
+ * (`model.bin` + `config.json`), a `model_type` of whisper with the
+ * transformers pipeline in transcribe.py, `model_index.json` with the
+ * diffusers loader in generate.py.
+ */
+async function detectLayout(
+  task: RunTask,
+  dir: string,
+  files: Set<string>,
+): Promise<DetectedLayout | null> {
+  if (task === 'stt') {
+    // CTranslate2 keeps no `model_type` for Whisper conversions — the pairing
+    // of model.bin with config.json is the format, and is the same signal
+    // transcribe() uses to choose the CTranslate2 runner. A conversion that
+    // kept a `model_type` naming another family is not a Whisper, and
+    // whisper_ct2.py would only fail on it, so it is not claimed.
+    if (files.has('model.bin') && files.has('config.json')) {
+      const declared = await modelTypeOf(dir);
+      if (!declared || declared === 'whisper') {
+        return {
+          format: 'CTranslate2',
+          needs: ['model.bin', 'config.json'],
+          requires: ['faster-whisper'],
+        };
+      }
+    }
+    // Transformers repos declare their architecture. Only Whisper is claimed:
+    // it is the one the bundled runner is exercised against, and guessing past
+    // the config would offer directories that then fail to load.
+    if (files.has('config.json') && (await modelTypeOf(dir)) === 'whisper') {
+      const weight = files.has('model.safetensors')
+        ? 'model.safetensors'
+        : files.has('pytorch_model.bin')
+          ? 'pytorch_model.bin'
+          : null;
+      if (weight) {
+        return {
+          format: 'transformers',
+          needs: [weight, 'config.json'],
+          requires: ['torch', 'transformers'],
+        };
+      }
+    }
+    return null;
+  }
+  if (task === 'image') {
+    // A diffusers pipeline is a directory tree rooted at model_index.json;
+    // whether the pipeline inside loads is diffusers' call at load time, and
+    // the loader already reports that honestly through the job log.
+    if (files.has('model_index.json')) {
+      return {
+        format: 'diffusers',
+        needs: ['model_index.json'],
+        requires: ['torch', 'diffusers'],
+      };
+    }
+    return null;
+  }
+  // Text-to-speech has exactly one runner and it is Kokoro-specific; other TTS
+  // architectures have nothing here that loads them, so nothing is claimed.
+  return null;
+}
+
+/** Everything the live probe feeds in, overridable so tests need no venv. */
+export interface RunnableDeps {
+  /** Files already on disk, replacing the walk of the models directory. */
+  downloads?: HFDownload[];
+  /** Installed runtime versions, replacing the live probe. */
+  installed?: Record<string, string | null>;
+}
+
+export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Promise<RunnableModel[]> {
+  const [downloads, installed] = await Promise.all([
+    deps.downloads ?? listDownloads(),
+    // RuntimeStatus always carries the map; blank statuses carry an empty one.
+    deps.installed ?? runtimeStatus(false).then((s) => s.installed),
+  ]);
+  const onDisk = new Set(downloads.map((d) => `${d.repo}::${d.file}`));
+
+  const out: RunnableModel[] = [];
+  for (const entry of candidatesFor(task)) {
+    const needed = requiredFiles(entry);
+    if (!needed.length) continue;
+    const present = needed.filter((f) => onDisk.has(`${entry.repo}::${f}`));
+    const missingFiles = needed.filter((f) => !onDisk.has(`${entry.repo}::${f}`));
+
+    const requires = entry.run?.requires ?? [];
+    const missingRuntimes = requires.filter((g) => !installed[g]);
+    const runtimes: Record<string, string> = {};
+    for (const g of requires) {
+      const v = installed[g];
+      if (v) runtimes[g] = v;
+    }
+
+    let reason = '';
+    if (!present.length) {
+      reason = 'Not downloaded yet.';
+    } else if (missingFiles.length) {
+      // Half a bundle is the most confusing state to be in: the model is
+      // "on disk" but will not load, and the failure surfaces as a loader
+      // error deep in a runtime.
+      reason =
+        missingFiles.length === 1
+          ? `Missing ${missingFiles[0]} — download the whole set.`
+          : `Missing ${missingFiles.length} of ${needed.length} files — download the whole set.`;
+    } else if (missingRuntimes.length) {
+      reason = `Needs ${missingRuntimes.join(' + ')}.`;
+    }
+
+    out.push({
+      repo: entry.repo,
+      label: entry.label,
+      task,
+      file: entryAnchor(entry),
+      requiredFiles: needed,
+      presentFiles: present,
+      runtimes,
+      missing: missingRuntimes,
+      blocked: false,
+      reason,
+      ready: !reason,
+    });
+  }
+
+  // Downloads the catalog does not carry. Grouped by repo because a model can
+  // be several files; the catalog's entries are skipped because they already
+  // reported above, with their own bundle rules, and a second row for the same
+  // repo would make the two disagree.
+  const known = new Set(catalogRepoIds());
+  const byRepo = new Map<string, { root: string; files: Set<string> }>();
+  for (const d of downloads) {
+    if (known.has(d.repo)) continue;
+    const group = byRepo.get(d.repo) ?? { root: d.root, files: new Set<string>() };
+    group.files.add(d.file);
+    byRepo.set(d.repo, group);
+  }
+  // A layout scan may only read the two roots a download can live under: this
+  // app's models dir and the shared Hugging Face cache. Both were walked by
+  // listDownloads; a crafted download record still cannot steer a read.
+  const scanRoots = [modelsDir(), hubCacheDir()].map((r) => path.resolve(r));
+  for (const [repo, group] of byRepo) {
+    if (!scanRoots.some((root) => group.root.startsWith(root + path.sep))) continue;
+    const layout = await detectLayout(task, group.root, group.files);
+    if (!layout) continue;
+
+    const present = layout.needs.filter((f) => group.files.has(f));
+    const missingFiles = layout.needs.filter((f) => !group.files.has(f));
+    const missingRuntimes = layout.requires.filter((g) => !installed[g]);
+    const runtimes: Record<string, string> = {};
+    for (const g of layout.requires) {
+      const v = installed[g];
+      if (v) runtimes[g] = v;
+    }
+
+    let reason = '';
+    if (missingFiles.length) {
+      reason =
+        missingFiles.length === 1
+          ? `Missing ${missingFiles[0]} — download the whole set.`
+          : `Missing ${missingFiles.length} of ${layout.needs.length} files — download the whole set.`;
+    } else if (missingRuntimes.length) {
+      reason = `Needs ${missingRuntimes.join(' + ')}.`;
+    }
+
+    out.push({
+      repo,
+      // The repository id is kept whole: two "whisper-small" repositories are
+      // different models, and the picker only ever shows this string.
+      label: `${repo} (${layout.format})`,
+      task,
+      file: layout.needs[0] ?? '',
+      requiredFiles: layout.needs,
+      presentFiles: present,
+      runtimes,
+      missing: missingRuntimes,
+      blocked: false,
+      reason,
+      ready: !reason,
+    });
+  }
+  return out;
+}

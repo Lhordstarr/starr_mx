@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>STARR Matrix — Local &amp; Online</title>
+  <script src="/theme-init.js"></script>
+  <link rel="stylesheet" href="/theme.css" />
+  <link rel="stylesheet" href="/nav.css" />
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/viewer.css" />
+</head>
+<body>
+  <!-- Field for the glass chrome to blur. position:fixed + z-index:-1 puts it
+       over the page background but under every piece of content, which is what
+       lets the topbar/rail backdrop-filter sample it. Purely decorative, so it
+       is hidden from assistive tech and ignores pointer events. The canvas is
+       sized by styles.css, never by width/height attributes. -->
+  <canvas id="shader-bg" class="shader-bg" aria-hidden="true"></canvas>
+
+  <header class="topbar glass">
+    <button id="sidebar-toggle" class="icon-btn sidebar-toggle" title="Conversation history"
+            aria-label="Toggle conversation history" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M4 6h16M4 12h16M4 18h10" />
+      </svg>
+    </button>
+    <a class="brand" href="/">
+      <span class="brand-mark">◆</span>
+    <span class="brand-container" role="img" aria-label="STARR Matrix">
+      <span class="brand-starr" aria-hidden="true">STARR</span>
+      <span class="brand-matrix" aria-hidden="true">Matrix</span>
+    </span>
+    </a>
+
+    <div class="chip-wrap">
+      <button id="open-panel" class="chip chip-provider" title="Change provider"
+              aria-haspopup="listbox" aria-expanded="false" aria-controls="provider-pop">
+        <span class="dot-mark" aria-hidden="true"></span>
+        <span id="chip-provider">local</span>
+      </button>
+
+      <!-- Small rounded popup, same recipe as the model-detail modal. Anchored
+           under the chip rather than a full-width sheet, because the only thing
+           it ever held was provider choice. -->
+      <div class="popover" id="provider-pop" hidden>
+        <div class="popover__head">Provider</div>
+        <div class="popover__list" id="provider-list" role="listbox" aria-label="Provider"></div>
+        <p class="popover__hint hint" id="provider-hint"></p>
+        <div class="popover__foot">
+          <a href="/settings" class="popover__link">⚙ API keys &amp; providers</a>
+        </div>
+      </div>
+    </div>
+    <!-- Status only: the model is chosen from the picker on the composer. -->
+    <span class="chip chip-model is-static" id="chip-model" title="Active model">—</span>
+
+    <div class="topbar-right">
+      <span id="status-dot" class="dot" aria-hidden="true"></span>
+      <span id="status-blob" class="sp-22__blob status-blob" aria-hidden="true"></span>
+      <span id="status" class="status-text">ready</span>
+      <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="chat">
+    <!-- History lives in a fixed left column: list at the top, new chat pinned
+         to the bottom of it. -->
+    <aside class="sidebar glass" id="sidebar" aria-label="Conversation history">
+      <!-- Drawer-only header: on wide screens the sidebar is a permanent rail
+           and needs no close control; on narrow screens it slides over the
+           conversation and this is the way back out. -->
+      <!-- Primary navigation. Inside this panel rather than beside it: the chat
+           page already has a left column, and a second one would leave the
+           conversation with almost no width. nav.js fills it in. -->
+      <div class="nav-mount nav-mount--sidebar" data-nav-mount></div>
+
+      <div class="drawer-head">
+        <span class="drawer-title">History</span>
+        <button type="button" id="sidebar-close" class="icon-btn" aria-label="Close conversation history">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      <ul id="history-list" class="history-list" aria-label="Past conversations"></ul>
+      <p class="hint history-hint" id="history-hint"></p>
+
+      <!-- Resource usage for whatever is actually running: the Ollama daemon,
+           any local Python runtime, and the machine underneath them. Sits
+           between the conversation list and the primary action so it never
+           steals room from either.
+
+           Empty: resources.js builds the box, so the Studio can mount the same
+           one and the two cannot drift apart. -->
+      <div data-resource-mount aria-label="Resource usage"></div>
+
+      <button id="new-chat" class="btn-primary sidebar-new">＋ New conversation</button>    </aside>
+
+    <div class="chat-body">
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <h1 class="welcome-title">Where should we start?</h1>
+        <p class="welcome-sub">Pick a provider above, or just start typing. Local models need no API key.</p>
+      </div>
+    </div>
+
+    <form class="composer" id="composer">
+      <!-- Jump-to-latest pill. Hidden while the transcript is at the bottom;
+           appears once the reader has scrolled up, so there is always a way
+           back to the newest turn. Positioned by .to-latest above the box. -->
+      <button type="button" id="to-latest" class="to-latest" aria-label="Scroll to latest messages">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+        <span>Latest</span>
+      </button>
+      <div class="composer-box">
+        <!-- Tools enabled for the message being composed (/tool). Each chip
+             can be removed independently; the box hides when none remain. -->
+        <div class="tools-box" id="tools-box" hidden>
+          <div class="tools-list" id="tools-list" aria-label="Tools enabled for this message"></div>
+        </div>
+        <div class="attach-box" id="attach-box" hidden>
+          <div class="attach-list" id="attach-list" aria-label="Attachments"></div>
+        </div>
+        <textarea id="input" rows="1" placeholder="Send a message…"></textarea>
+        <div class="composer-row">
+          <div class="model-select" id="model-select">
+            <button type="button" id="model-trigger" class="model-trigger"
+                    aria-haspopup="listbox" aria-expanded="false" title="Change model">
+              <span class="mt-label" id="model-current">no model selected</span>
+              <svg class="mt-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+            <div class="model-menu" id="model-menu" hidden>
+              <div class="mm-search">
+                <input id="model-search" placeholder="Search models…" spellcheck="false"
+                       autocomplete="off" aria-label="Search models" />
+              </div>
+              <ul class="mm-list" id="model-list" role="listbox" aria-label="Models"></ul>
+              <div class="mm-foot" id="model-custom" hidden>
+                <button type="button" id="model-use">Use &ldquo;<span></span>&rdquo;</button>
+              </div>
+              <div class="mm-hint" id="model-hint"></div>
+            </div>
+          </div>
+          <span class="composer-hint" id="composer-hint">
+            <kbd>Enter</kbd> to send &middot; <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+          </span>
+          <span class="composer-count" id="composer-count" aria-live="off"></span>
+          <div class="composer-actions">
+            <input type="file" id="attach-input" multiple hidden
+                   accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.json,.yaml,.yml,.toml,.xml,.html,.log,.py,.js,.ts,.tsx,.jsx,.go,.rs,.java,.c,.h,.cpp,.hpp,.cs,.sh,.sql,.ini,.cfg,.env" />
+            <button type="button" id="attach" class="attach-btn" title="Attach images or text files"
+                    aria-label="Attach images or text files">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21.4 11.05 12.25 20.2a5.5 5.5 0 0 1-7.78-7.78l9.2-9.19a3.67 3.67 0 0 1 5.18 5.18l-9.2 9.2a1.83 1.83 0 1 1-2.59-2.6l8.49-8.48" />
+              </svg>
+            </button>
+            <button type="button" id="stop" class="btn-ghost" hidden>Stop</button>
+            <button type="button" id="mic" class="mic-btn" hidden
+                    aria-pressed="false" title="Record a message">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="2" width="6" height="11" rx="3" />
+                <path d="M5 11a7 7 0 0 0 14 0" />
+                <path d="M12 18v4" />
+              </svg>
+              <span id="mic-time" class="mic-time" aria-live="off"></span>
+            </button>
+
+            <button type="submit" id="send" class="btn-primary" aria-label="Send">
+              <span class="send-label">Send</span>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M5 12h13M12 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <!-- Opened by typing "/tool" in the input. Lists the registry with its
+             stored on/off state; picks here scope the next send only. -->
+        <div class="tool-menu" id="tool-menu" hidden>
+          <div class="tm-head">Available tools</div>
+          <div class="tm-list" id="tool-menu-list" role="listbox" aria-multiselectable="true"
+               aria-label="Available tools"></div>
+          <div class="tm-hint" id="tool-menu-hint" hidden></div>
+        </div>
+      </div>
+    </form>
+    </div>
+  </main>
+
+  <!-- Scrim for the history drawer on narrow screens. The provider popup is a
+     small anchored popover and dismisses on outside click instead. -->
+  <div class="backdrop" id="backdrop"></div>
+
+  <!-- Notifications are created by notify.js as needed; no fixed slot here. -->
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

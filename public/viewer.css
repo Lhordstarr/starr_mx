@@ -1,0 +1,190 @@
+/* ==========================================================================
+   viewer.css — shared image lightbox + download affordance.
+   Loaded by both the chat page and the Image Studio page. Tokens come from
+   theme.css; nothing here hardcodes a colour except the dimming scrim, which
+   is meant to read the same over either theme.
+   ========================================================================== */
+
+/* ---- Thumbnail: wrapper + hover download ---- */
+
+.viewer-item {
+  position: relative;
+  display: inline-flex;
+  line-height: 0;
+}
+
+.viewer-item img {
+  display: block;
+  cursor: zoom-in;
+}
+
+.viewer-item img:focus-visible {
+  outline: 2px solid var(--prov-border);
+  outline-offset: 2px;
+}
+
+.viewer-dl {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--glass-fill);
+  color: var(--text);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  opacity: 0;
+  transition: opacity var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.viewer-dl svg {
+  width: 14px;
+  height: 14px;
+}
+
+.viewer-item:hover .viewer-dl,
+.viewer-item:focus-within .viewer-dl {
+  opacity: 1;
+}
+
+.viewer-dl:hover {
+  border-color: var(--prov-border);
+  background: var(--prov-soft);
+}
+
+/* No hover on touch: keep the control permanently available. */
+@media (pointer: coarse) {
+  .viewer-dl {
+    opacity: 1;
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* ---- Lightbox ---- */
+
+/* Applied to <html> while open so the transcript behind can't scroll. */
+html.lb-lock {
+  overflow: hidden;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+}
+
+.lightbox[hidden] {
+  display: none;
+}
+
+.lb-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.74);
+  backdrop-filter: blur(7px) saturate(120%);
+  -webkit-backdrop-filter: blur(7px) saturate(120%);
+}
+
+.lb-figure {
+  position: relative;
+  margin: 0;
+  max-width: min(92vw, 1280px);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.lb-image {
+  max-width: 100%;
+  max-height: 78vh;
+  object-fit: contain;
+  border-radius: var(--radius);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  background: var(--panel-2);
+}
+
+.lb-caption {
+  max-width: 72ch;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  /* The scrim is dark in both themes, so the caption is a fixed light grey
+     rather than --text-dim (which is a dark grey in the light theme and would
+     disappear against the scrim). */
+  color: rgba(255, 255, 255, 0.86);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.lb-caption:empty {
+  display: none;
+}
+
+/* Controls live over the scrim regardless of theme, so they carry the glass
+   film rather than the transparent icon-button default. */
+.lightbox .icon-btn {
+  background: var(--glass-fill);
+  color: var(--text);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.lightbox .icon-btn:hover:not(:disabled) {
+  border-color: var(--prov-border);
+  background: var(--prov-soft);
+}
+
+.lb-prev,
+.lb-next {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.lb-prev {
+  left: 18px;
+}
+
+.lb-next {
+  right: 18px;
+}
+
+.lb-actions {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  display: flex;
+  gap: 8px;
+  z-index: 2;
+}
+
+@media (max-width: 560px) {
+  .lb-actions {
+    top: 12px;
+    right: 12px;
+  }
+
+  .lb-prev {
+    left: 8px;
+  }
+
+  .lb-next {
+    right: 8px;
+  }
+
+  .lb-image {
+    max-height: 68vh;
+  }
+}

@@ -1,0 +1,103 @@
+
+# Hardware notes — durable facts about this machine that are expensive to rediscover.
+hardware:
+  os: "Arch Linux (rolling), Mesa 26.2.4, ROCm 7.2.4 at /opt/rocm"
+  gpus:
+    - name: "AMD Radeon HD 520 Mobile"
+      pci: "0000:01:00.0"
+      ids: "0x1002:0x6660"
+      arch: "GCN1 (Southern Islands, 2011-2013)"
+      vram: "2 GB"
+      driver: amdgpu
+      role: "dedicated compute; class 0x038000, no display connectors"
+      notes: >
+        GCN1 predates ROCm, which requires GCN3+. A ROCm PyTorch wheel installs
+        but can never open this card. The backend that DOES support GCN1 is
+        Vulkan (llama.cpp's Vulkan build), which the app did not know about as of
+        2026-10-15.
+    - name: "Intel HD Graphics 520 (Skylake-U GT2)"
+      pci: "0000:00:02.0"
+      ids: "0x8086:0x1916"
+      driver: i915
+      role: "integrated; owns eDP-1 and HDMI-A-1, drives the display"
+      notes: "Works. Never useful for CUDA or ROCm."
+  gpu_fault_2026_10_15:
+    symptom: >
+      amdgpu refuses to bind to 0000:01:00.0. Kernel log shows the card's own
+      ATOM BIOS hanging during initialisation: "atombios stuck in loop for more
+      than 20secs aborting", then "gpu post error!", "Fatal error during GPU
+      init", "probe with driver amdgpu failed with error -22".
+    diagnosis: >
+      A GPU POST (power-on self test) failure, not a driver or ROCm problem. The
+      -22 is EINVAL, which is also why opening the render node returned EINVAL
+      the whole time. Nothing in userspace fixes this.
+    fix: >
+      Cold power cycle: shut down completely, unplug the AC charger, and hold
+      the power button for about 30 seconds (or remove the battery if it is
+      removable), wait, then power on. A warm reboot often is not enough.
+    what_did_not_work: >
+      `modprobe -r amdgpu && modprobe amdgpu` with no holders (lactd and the
+      idle SDDM greeter on tty2 stopped) unloaded cleanly but the POST failed
+      again on reload, leaving no /dev/dri/renderD128 at all. That makes the AMD
+      DRM node disappear entirely where it previously existed-but-returned-EINVAL;
+      functionally equivalent, since the card was unusable either way.
+    resolved: >
+      RESOLVED 2026-10-15 after a cold power cycle. runtime_status is now
+      "active", /dev/dri/card1 and renderD128 exist, amdgpu is bound, zero POST
+      failures in dmesg, and Vulkan (RADV) enumerates it as "AMD Radeon R5 M330".
+    the_real_answer: >
+      Ollama is NOT using ROCm on this machine. Its llama-server runs with
+      GGML_BACKEND_PATH=/usr/lib/ollama/vulkan/libggml-vulkan.so,
+      LD_LIBRARY_PATH=/usr/lib/ollama:/usr/lib/ollama/vulkan and
+      GGML_VK_VISIBLE_DEVICES=1, i.e. Mesa's Vulkan (RADV) backend. ROCm is
+      genuinely broken here (/dev/kfd still returns EINVAL). Measured: ollama ps
+      reports "100% GPU" and radeontop sees 95-97% while the model computes,
+      with 1113 MB of the 2048 MB VRAM resident.
+    lesson: >
+      Do not infer that a GPU is unusable from ROCm's GCN floor. ROCm and Vulkan
+      have different minimums, and on GCN1 they disagree completely. The user
+      said the card worked and was right; the app was wrong because it only
+      ever asked about /dev/kfd and the GCN generation.
+    caveat: >
+      radeontop works unprivileged; its "are you root?" error only appeared when
+      no AMD node existed at all. The app now enumerates Vulkan via
+      `vulkaninfo --summary`, splitting on the `GPU0:`/`GPU1:` block headers —
+      deviceType is printed BEFORE deviceName, so splitting on deviceName pairs
+      each card's name with the next card's type.
+    app_notes:
+      - >
+        AMD metering uses radeontop only. rocm-smi and amdsmi were removed: both
+        need a full ROCm install and a readable /dev/kfd to read four numbers.
+      - >
+        radeontop prints a plausible line with every counter at 100.00% even when
+        it cannot open the card, so the app checks stderr ("cannot access gpu
+        registers" / "failed to open drm node") AND whether all named counters are
+        unanimous before believing any reading.
+      - >
+        renderD node numbers are NOT derivable from card numbers. card1 was
+        renderD128 here but renderD129 on another enumeration order. Read
+        /sys/class/drm/cardN/device/drm/ instead of building the name.
+      - >
+        /sys/class/drm/cardN/device and /sys/bus/pci/devices/N resolve to the
+        same directory from different depths, so readlink() output differs
+        between them. Compare realpath(), never the raw symlink string.
+  gotchas:
+    - >
+      The AMD dGPU can enter a runtime power-management ERROR state, after which
+      /dev/dri/renderD128 returns EINVAL, ROCm reports "Unable to open /dev/kfd",
+      vulkaninfo lists no AMD device, and Ollama silently falls back to 100% CPU
+      even with -ngl 999. Symptom: "my GPU works elsewhere but the app ignores
+      it". Check `cat /sys/bus/pci/devices/0000:01:00.0/power/runtime_status`.
+      Fix: `sudo modprobe -r amdgpu && sudo modprobe amdgpu`, or reboot.
+    - >
+      /dev/kfd and the DRM device nodes persist on disk even when no AMD hardware
+      is present, so detecting the vendor from them gives false positives. The app
+      detects by PCI vendor id instead, deliberately.
+    - >
+      Mesa drivers live in /usr/lib/dri on Arch, not
+      /usr/lib/x86_64-linux-gnu/dri as on Debian. Checking the Debian path makes it
+      look like no GPU drivers are installed.
+    - >
+      VRAM accounting (mem_info_vram_total and friends) is exposed by amdgpu under
+      /sys/class/drm/cardN/device even while the card is faulted, so it is the
+      one reliable source of GPU facts in that state.

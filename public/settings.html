@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Settings — STARR Matrix</title>
+  <script src="/theme-init.js"></script>
+  <link rel="stylesheet" href="/theme.css" />
+  <link rel="stylesheet" href="/settings.css" />
+</head>
+<body class="settings-body">
+  <!-- Field for the glass chrome to blur. position:fixed + z-index:-1 puts it
+       behind the content but above the body fill, so the blurred cards read as
+       translucent over motion rather than over flat black. -->
+  <canvas id="shader-bg" class="shader-bg" aria-hidden="true"></canvas>
+  <div class="page">
+    <header>
+      <div>
+        <h1>Settings</h1>
+        <p class="sub">API keys, agent tools, and models — each its own tab below.</p>
+      </div>
+      <div class="header-actions">
+        <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
+        <a href="/" class="btn-ghost nav-btn">← Back to chat</a>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Settings sections">
+      <button type="button" role="tab" id="tab-keys" aria-controls="panel-keys"
+              aria-selected="true">API Keys</button>
+      <button type="button" role="tab" id="tab-tools" aria-controls="panel-tools"
+              aria-selected="false" tabindex="-1">Tools</button>
+      <button type="button" role="tab" id="tab-models" aria-controls="panel-models"
+              aria-selected="false" tabindex="-1">Models</button>
+    </nav>
+
+    <div id="panel-keys" role="tabpanel" aria-labelledby="tab-keys" tabindex="0">
+    <section class="panel-section">
+      <h2>Built-in providers</h2>
+      <form id="keys"></form>
+
+      <div class="actions">
+        <button type="button" id="clear-all" class="btn-danger">Remove all saved keys</button>
+        <span class="spacer"></span>
+      </div>
+    </section>
+
+    <section class="panel-section">
+      <h2>Add a provider</h2>
+      <p class="section-sub">
+        Any OpenAI-compatible endpoint: vLLM, LM Studio, llama.cpp, LocalAI,
+        Together, Fireworks, DeepSeek, or a private gateway. The key is optional
+        for local servers.
+      </p>
+
+      <form id="custom-form" class="custom-form">
+        <div class="field-row">
+          <label>
+            <span>Name</span>
+            <input id="cp-label" type="text" maxlength="60" placeholder="My LLM server"
+                   autocomplete="off" spellcheck="false" required />
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input id="cp-url" type="url" placeholder="http://localhost:8000/v1"
+                   autocomplete="off" spellcheck="false" required />
+          </label>
+        </div>
+        <div class="field-row">
+          <label>
+            <span>API key <em>(optional)</em></span>
+            <input id="cp-key" type="password" placeholder="sk-…"
+                   autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="checkbox-label">
+            <input id="cp-stt" type="checkbox" />
+            <span>
+              Supports dictation
+              <em>Endpoint answers <code>/audio/transcriptions</code></em>
+            </span>
+          </label>
+        </div>
+        <div class="actions">
+          <button type="submit" id="cp-submit" class="btn-primary">Add provider</button>
+          <span class="spacer"></span>
+        </div>
+      </form>
+
+      <div id="custom-list"></div>
+    </section>
+
+    <section class="panel-section">
+      <h2>Dictation</h2>
+      <p class="section-sub">
+        Providers that can turn speech into text. The composer mic uses the one
+        matching your current provider, or the first ready one below.
+      </p>
+      <div id="dictation-list"></div>
+    </section>
+
+    <!-- The file paths are deliberately not shown. They told the person using
+         the app nothing — there is no "open this folder" action to point them
+         at — while being the one piece of this page a screenshot or a stray
+         copy-paste would hand over. What actually protects the keys is stated
+         below, and none of it is the path: owner-only permissions, gitignored,
+         and never reachable over HTTP. -->
+    <section class="note">
+      <h2>How keys are stored</h2>
+      <p>
+        Keys are written to a file on the server with owner-only permissions
+        (<code>0600</code>), kept out of git, and never sent to the browser —
+        this page only ever shows a masked preview. The file is not served over
+        HTTP, so its name and location are not printed here.
+      </p>
+      <p>
+        A key set in <code>.env</code> stays in effect if you remove it here. Saving a key
+        here applies immediately; no restart needed.
+      </p>
+    </section>
+    </div>
+
+    <div id="panel-tools" role="tabpanel" aria-labelledby="tab-tools" tabindex="0" hidden>
+    <section class="panel-section">
+      <h2>Available tools</h2>
+      <p class="section-sub" id="tools-sub">
+        Enabled tools are offered to the model on every message; it calls them
+        only when the question needs them.
+      </p>
+      <div id="tools-list" class="tools-list" aria-live="off"></div>
+    </section>
+
+    <section class="panel-section">
+      <h2>Where tools work</h2>
+      <p class="section-sub" id="tools-providers">Loading provider support…</p>
+      <p class="section-sub">
+        Tool calls stream into the transcript as small activity lines under the
+        reply. Only the final answer is saved — the calls themselves are not
+        stored.
+      </p>
+    </section>
+    </div>
+
+    <div id="panel-models" role="tabpanel" aria-labelledby="tab-models" tabindex="0" hidden>
+    <div class="subtabs" role="group" aria-label="Models sections">
+      <button type="button" data-subview="local" aria-pressed="true">Your models</button>
+      <button type="button" data-subview="catalog" aria-pressed="false">Get models</button>
+      <button type="button" data-subview="downloads" aria-pressed="false">Downloads</button>
+      <button type="button" data-subview="browse" aria-pressed="false">Browse</button>
+      <button type="button" data-subview="runtimes" aria-pressed="false">Runtimes</button>
+    </div>
+    <div data-subpanel="runtimes" hidden>
+    <section class="panel-section" style="margin-top:0;padding-top:4px;">
+      <p class="section-sub" style="margin-top:0;">
+        Optional. Only needed for speech-to-text, speech and image generation —
+        Ollama already covers chat. Nothing touches your system Python.
+      </p>
+      <div class="rt-device">
+        <span class="rt-device__label">Compute</span>
+        <div class="rt-device__opts" role="radiogroup" aria-label="Compute device">
+          <button type="button" class="rt-device__opt" data-device="cpu" aria-checked="true" role="radio">
+            <strong>CPU</strong><em>Smallest download, works anywhere</em>
+          </button>
+          <button type="button" class="rt-device__opt" data-device="auto" aria-checked="false" role="radio">
+            <strong>GPU</strong><em>NVIDIA CUDA or AMD ROCm, detected automatically</em>
+          </button>
+        </div>
+        <p class="rt-gpu-note" id="rt-gpu-note"></p>
+        <p class="rt-warn" id="rt-warning" hidden></p>
+      </div>
+
+      <!-- What each backend is doing right now. Reported from the backends
+           themselves rather than declared here: the old "is the GPU usable"
+           question was answered from ROCm's rules, which called a card dead
+           while Ollama was running on it through Vulkan. -->
+      <section class="rt-backends" aria-labelledby="rt-backends-title">
+        <h3 class="rt-drivers__title" id="rt-backends-title">Backends</h3>
+        <p class="rt-drivers__blurb">
+          Each one reports where it is actually running, read from the backend
+          itself while it runs — not from what this page believes is possible.
+        </p>
+        <div id="rt-backends" class="rt-backends__list">
+          <p class="rt-drivers__blurb">Reading what the backends are doing…</p>
+        </div>
+      </section>
+
+      <div id="rt-status" class="rt-status"></div>
+      <!-- The largest thing on this tab was the one piece with no name. -->
+      <h3 class="rt-drivers__title">Packages</h3>
+      <div id="rt-list" class="rt-list"></div>
+
+      <div class="rt-actions">
+        <button type="button" id="rt-check" class="btn-ghost"
+                title="Re-read what is installed, what each backend is doing, and what this machine can run">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3-6.7" /><path d="M21 4v5h-5" />
+          </svg>
+          <span>Check</span>
+        </button>
+        <button type="button" id="rt-install" class="btn-primary">Install selected</button>
+        <button type="button" id="rt-remove" class="btn-danger" hidden>Remove environment</button>
+        <span class="spacer"></span>
+        <span class="rt-total" id="rt-total"></span>
+      </div>
+
+      <!-- GPU driver helper. Installing a driver is a system change, so it is
+           a button the user presses rather than a block of prose. -->
+      <div class="rt-drivers">
+        <h3 class="rt-drivers__title">GPU drivers</h3>
+        <!-- The one place the card is described. It used to be stated three
+             times on this tab — here, in the compute note, and in the run log
+             above — which is ~800 characters repeating one fact and made the
+             page read as noise. The compute selector's own label now carries
+             the short form. -->
+        <p class="rt-drivers__blurb" id="rt-driver-state">Checking what this machine has…</p>
+        <!-- What the kernel driver reports about the card itself. -->
+        <p class="rt-drivers__hw" id="rt-gpu-hw"></p>
+        <!-- Vulkan is a separate answer from ROCm, and on some cards the
+             opposite one. Shown so both are visible. -->
+        <p class="rt-drivers__hw rt-drivers__hw--vk" id="rt-gpu-vulkan"></p>
+        <pre class="rt-drivers__log" id="rt-driver-log" hidden aria-live="polite"></pre>
+        <div class="rt-drivers__actions">
+          <button type="button" id="rt-update-drivers" class="btn-primary">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-3-6.7" /><path d="M21 4v5h-5" />
+            </svg>
+            <span>Update GPU drivers</span>
+          </button>
+          <a class="btn-ghost" href="https://rocm.docs.amd.com/projects/install-on-linux/" target="_blank" rel="noopener">AMD ROCm docs</a>
+          <a class="btn-ghost" href="https://docs.nvidia.com/datacenter/tesla/tesla-installation-linux-x86.html" target="_blank" rel="noopener">NVIDIA docs</a>
+        </div>
+
+        <!-- Privilege prompt. The installer needs root, and a web server has no
+             terminal to ask on, so the password is collected here and handed
+             straight to `sudo -S`. It is a password field, it is cleared the
+             moment the request is sent, and it is never put in a URL — a query
+             string would end up in access logs. -->
+        <div class="rt-pass" id="rt-pass" hidden>
+          <label class="rt-pass__label" for="rt-pass-input">
+            This needs your password
+          </label>
+          <p class="rt-pass__note">
+            It is used once, to run <code>sudo</code>, and is never written
+            down or sent anywhere else. Leave it empty to skip and get the
+            command to run yourself.
+          </p>
+          <div class="rt-pass__row">
+            <input type="password" id="rt-pass-input" class="rt-pass__input"
+                   autocomplete="current-password" spellcheck="false"
+                   placeholder="Your password" />
+            <button type="button" class="btn-primary rt-pass__go" id="rt-pass-go">
+              Run installer
+            </button>
+            <button type="button" class="btn-ghost" id="rt-pass-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="rt-log" id="rt-log" hidden>
+        <div class="rt-log__head">Install log</div>
+        <pre id="rt-log-body"></pre>
+      </div>
+    </section>
+    </div>
+    <div data-subpanel="catalog" hidden>
+    <section class="panel-section">
+      <p class="section-sub">
+        Hand-checked models that run on your own machine, grouped by what they
+        do. Each entry names the one runtime that can actually load its
+        weights — <code>.gguf</code>, <code>.safetensors</code>,
+        <code>.onnx</code> and <code>.bin</code> all need different things, and
+        a chat model is the only kind Ollama will pull for you.
+      </p>
+      <!-- Pulling lives here, beside downloading: both are ways to acquire a
+           model. It used to sit on the models page, where it was noise. -->
+      <details class="pull-box">
+        <summary>Pull an Ollama model by name</summary>
+        <form id="pull-form" class="pull-form">
+          <div class="input-row">
+            <input id="pull-name" type="text" maxlength="200" placeholder="qwen3:8b"
+                   autocomplete="off" spellcheck="false" required
+                   aria-label="Model name to pull" />
+            <button type="submit" id="pull-submit" class="btn-primary">Pull model</button>
+          </div>
+        </form>
+        <div class="progress" id="pull-progress" hidden>
+          <div class="progress-bar" id="pull-bar"></div>
+        </div>
+        <div id="pull-status" class="scan-result" hidden></div>
+      </details>
+
+      <div id="catalog-list"></div>
+
+      <!-- Where a downloaded model actually gets run. Hidden until an entry
+           whose runtime is installed and whose weights are on disk is picked. -->
+      <div class="run-panel" id="run-panel" hidden>
+        <div class="run-panel__head">
+          <h3 id="run-title"></h3>
+          <button type="button" id="run-close" class="icon-btn" aria-label="Close runner">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+        <div id="run-body"></div>
+        <pre class="run-log" id="run-log"></pre>
+      </div>
+    </section>
+    </div>
+    <div data-subpanel="local">
+    <!-- Which model does which job. This is the only place that is decided:
+         the composer and the Studio both follow what is set here. -->
+    <section class="panel-section">
+      <h3 class="hub-title">What each job uses</h3>
+      <p class="section-sub">
+        Pick the model for speech-to-text, speech and image generation. Only
+        models this machine can actually run are offered; the rest say why.
+        The message bar and the Studio use whatever you choose here.
+      </p>
+      <div id="task-assignments"></div>
+    </section>
+
+    <section class="panel-section">
+      <p class="section-sub">
+        Everything you have, grouped by the runtime that runs it. A model sits
+        under the runtime it needs; if that runtime is missing you get a button
+        to install it rather than a Run button that cannot work.
+      </p>
+
+      <details id="hub-ollama" open>
+        <summary class="hub-title">Chat models · Ollama <span id="ollama-count"></span></summary>
+        <p class="section-sub">Served by your local Ollama daemon.</p>
+        <div id="local-models"></div>
+      </details>
+
+      <!-- One section per runtime, each listing the weights on disk it runs. -->
+      <div id="hub-runtimes"></div>
+    </section>
+    </div>
+
+    <div data-subpanel="downloads" hidden>
+    <section class="panel-section">
+      <p class="section-sub">
+        Every pull and download in this session, live. Progress here is the
+        server streaming bytes, not an estimate.
+      </p>
+      <div id="download-activity"></div>
+    </section>
+    </div>
+
+<div data-subpanel="browse" hidden>
+    <section class="panel-section">
+      <p class="section-sub">
+        The Hub, grouped by what each model is for. No sorting and no ranking —
+        everything comes back together, because a popularity ordering hid whole
+        categories behind a handful of very large repos. Open any model to see
+        its files and download the whole thing at once. Gated repos need an HF
+        token in the keys tab.
+      </p>
+      <form id="hf-search-form" class="hf-search">
+        <div class="hf-search__field">
+          <svg class="hf-search__icon" viewBox="0 0 24 24" width="16" height="16" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" /><path d="m20 20-3.2-3.2" />
+          </svg>
+          <input id="hf-q" type="text" maxlength="200"
+                 placeholder="Search the Hub — try a name, a format, or a task"
+                 autocomplete="off" spellcheck="false"
+                 aria-label="Search Hugging Face" />
+          <button type="submit" id="hf-go" class="btn-primary">Search</button>
+        </div>
+      </form>
+      <!-- Category filter. Narrowing is client-side over the fetched page, so
+           it costs nothing and never re-queries the Hub mid-browse. -->
+      <div class="hf-filters" role="group" aria-label="Filter by task">
+        <button type="button" class="hf-filter is-active" data-task="all" aria-pressed="true">All</button>
+        <button type="button" class="hf-filter" data-task="text" aria-pressed="false">Text</button>
+        <button type="button" class="hf-filter" data-task="speech-to-text" aria-pressed="false">Speech to text</button>
+        <button type="button" class="hf-filter" data-task="text-to-speech" aria-pressed="false">Text to speech</button>
+        <button type="button" class="hf-filter" data-task="image-generation" aria-pressed="false">Image</button>
+        <button type="button" class="hf-filter" data-task="video-generation" aria-pressed="false">Video</button>
+        <button type="button" class="hf-filter" data-task="audio" aria-pressed="false">Audio</button>
+        <button type="button" class="hf-filter" data-task="multimodal" aria-pressed="false">Vision</button>
+        <button type="button" class="hf-filter" data-task="embeddings" aria-pressed="false">Embeddings</button>
+        <button type="button" class="hf-filter" data-task="other" aria-pressed="false">Other</button>
+      </div>
+      <div id="hf-results" class="hf-groups"></div>
+    </section>
+    </div>
+    
+    </div>
+
+    <div class="modal-backdrop" id="hf-modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="hf-modal-title">
+        <div class="modal-head">
+          <span id="hf-modal-tile"></span>
+          <div class="modal-titles">
+            <div id="hf-modal-title" class="model-name"></div>
+            <div id="hf-modal-stats" class="row-note"></div>
+          </div>
+          <button type="button" id="hf-modal-close" class="icon-btn" aria-label="Close model details">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+        <!-- One action fetches the whole model. Most repositories are not a
+             single file: a config, a tokenizer and a vocabulary sit beside the
+             weights, and taking only the weights leaves something the loader
+             rejects. -->
+        <div class="hf-repo-bar">
+          <span id="hf-repo-summary" class="hf-repo-summary"></span>
+          <button type="button" id="hf-repo-dl" class="btn-primary" disabled>Download model</button>
+        </div>
+        <div id="hf-modal-files" class="hf-files"></div>
+      </div>
+    </div>
+
+    <!-- API key popup: one provider's credential at a time, so the Keys tab
+         stays a short list instead of a wall of full-width key forms. -->
+    <div class="modal-backdrop" id="key-modal-backdrop" hidden>
+      <div class="modal modal--tight" role="dialog" aria-modal="true"
+           aria-labelledby="key-modal-title">
+        <div class="modal-head">
+          <div class="modal-titles">
+            <div id="key-modal-title" class="model-name"></div>
+            <div id="key-modal-env" class="row-note"></div>
+          </div>
+          <button type="button" id="key-modal-close" class="icon-btn" aria-label="Close API key">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+        <p id="key-modal-note" class="row-note" hidden></p>
+        <div class="input-row">
+          <input id="key-modal-input" type="password" spellcheck="false" autocomplete="off"
+                 aria-label="API key" />
+          <button type="button" id="key-modal-save" class="btn-primary">Save</button>
+          <button type="button" id="key-modal-remove" class="btn-danger">Remove</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- No accounts, no support desk: this is the one place a person with a
+         question ends up, so the contact lives here rather than nowhere. The
+         link points at a Discord profile; the desktop shell hands external
+         links to the system browser instead of opening a second window. -->
+    <footer class="app-foot">
+      <span class="app-foot__mark">STARR Matrix</span>
+      <span class="app-foot__ask">Questions, bugs, or an idea? Ping me on Discord</span>
+      <a class="app-foot__link" href="https://discord.com/users/1033025392841334874"
+         target="_blank" rel="noreferrer">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+          <path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z" />
+        </svg>
+        <span>Void's Disciple</span>
+      </a>
+    </footer>
+  </div>
+
+  <!-- Notifications are created by notify.js as needed; no fixed slot here. -->
+
+  <script src="/settings.js" type="module"></script>
+</body>
+</html>

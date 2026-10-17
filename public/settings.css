@@ -1,0 +1,2894 @@
+/* ==========================================================================
+   settings.css — API key page. Tokens and controls come from theme.css.
+   ========================================================================== */
+
+.settings-body {
+  overflow-y: auto;
+}
+
+.page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 44px 24px 80px;
+}
+
+/* Browse is the one tab whose content is a grid of many small things rather
+   than a form or a list of settings. Holding it to the 720px reading column
+   capped it at three cards across on a wide screen, which is the opposite of
+   what browsing the Hub is for. Wider, and capped so it does not sprawl on an
+   ultrawide. */
+.page:has([data-subpanel='browse']:not([hidden])) {
+  max-width: 1500px;
+}
+
+/* ---- Footer ----
+
+   Settings is the app's only "about" surface, so the one human contact lives
+   at its foot: quiet, centered, and clear of the panels above it. The link is
+   a pill rather than an underline because it opens somewhere else — the same
+   shape language as the chips. */
+.app-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 10px;
+  margin-top: 36px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 0.84rem;
+}
+
+.app-foot__mark {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.app-foot__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 11px 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.app-foot__link:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.app-foot__link svg {
+  color: var(--accent);
+}
+
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 30px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.nav-btn {
+  display: inline-block;
+  text-decoration: none;
+  font-size: 0.86rem;
+  padding: 9px 14px;
+  line-height: 1.4;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 1.6rem;
+}
+
+.sub {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+/* ---- Key rows ---- */
+
+.row {
+  /* Same liquid-glass recipe as the chat cards: film + sheen + blurred,
+     saturated backdrop. The shader canvas behind is what the blur has to work
+     on — on flat black these would read as solid panels again. */
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 17px 19px;
+  margin-bottom: 13px;
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  transition: border-color var(--speed) var(--ease),
+              box-shadow var(--speed) var(--ease),
+              transform var(--speed) var(--ease);
+}
+
+.row:focus-within {
+  border-color: var(--accent-border);
+}
+
+.row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 3px;
+}
+
+.provider {
+  font-weight: 650;
+  font-size: 0.98rem;
+}
+
+.env-name {
+  font-size: 0.74rem;
+  color: var(--text-faint);
+  margin: 0 0 12px;
+  font-family: var(--font-mono);
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.input-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+}
+
+.row-note {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  margin: 9px 0 0;
+}
+
+/* ---- Custom providers ---- */
+
+.panel-section {
+  margin-bottom: 34px;
+}
+
+.panel-section > h2 {
+  font-size: 1rem;
+  margin: 0 0 6px;
+}
+
+.section-sub {
+  margin: 0 0 16px;
+  color: var(--text-dim);
+  font-size: 0.86rem;
+  max-width: 58ch;
+}
+
+.custom-form {
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 17px 19px;
+  margin-bottom: 18px;
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.field-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.field-row label > span {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.field-row label em {
+  font-style: normal;
+  color: var(--text-faint);
+  font-size: 0.75rem;
+}
+
+.field-row input[type='text'],
+.field-row input[type='url'] {
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+}
+
+.field-row code {
+  font-size: 0.72rem;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+}
+
+.checkbox-label {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 9px !important;
+  flex: 1 1 220px;
+  cursor: pointer;
+  align-self: flex-end;
+  padding-bottom: 8px;
+}
+
+.checkbox-label.inline {
+  flex: 0 0 auto;
+  padding-bottom: 0;
+  align-self: center;
+}
+
+.checkbox-label input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.checkbox-label span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.checkbox-label em {
+  font-style: normal;
+  color: var(--text-faint);
+  font-size: 0.75rem;
+}
+
+.custom-row .input-row {
+  margin-bottom: 9px;
+}
+
+.custom-row .input-row:last-of-type {
+  margin-bottom: 0;
+}
+
+.row-top .badge + .badge {
+  margin-left: -6px;
+}
+
+/* ---- Model scan results ---- */
+
+.btn-scan {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.btn-scan:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.scan-result {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  /* A softer, shallower glass than the big cards — this is an inline status
+     strip, not a surface of its own. */
+  background: color-mix(in srgb, var(--glass-fill) 62%, transparent);
+  backdrop-filter: blur(calc(var(--glass-blur-radius) * 0.55));
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur-radius) * 0.55));
+  font-size: 0.82rem;
+}
+
+.scan-result.pending {
+  color: var(--text-faint);
+}
+
+.scan-result.error {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  background: var(--danger-soft);
+}
+
+.scan-note {
+  margin: 0 0 9px;
+  color: var(--text-dim);
+}
+
+.scan-note:last-child {
+  margin-bottom: 0;
+}
+
+.scan-note.warn {
+  color: var(--warning);
+}
+
+.model-list-block summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.79rem;
+  padding: 2px 0;
+}
+
+.model-list-block[open] summary {
+  margin-bottom: 8px;
+}
+
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chip-model-id {
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+/* ---- Dictation ---- */
+
+.dictation-row .provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mic-mini {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.btn-scan-stt {
+  align-self: flex-start;
+  font-size: 0.8rem;
+  padding: 6px 11px;
+}
+
+/* ---- Local Ollama models ---- */
+
+.model-name {
+  font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', 'Cascadia Mono',
+    'Roboto Mono', Menlo, Consolas, monospace);
+  font-size: 0.88rem;
+}
+
+.pull-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.pull-form input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', 'Cascadia Mono',
+    'Roboto Mono', Menlo, Consolas, monospace);
+  font-size: 0.86rem;
+}
+
+.progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-top: 12px;
+}
+
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--prov);
+  border-radius: inherit;
+  transition: width 200ms linear;
+}
+
+/* ---- Footer ---- */
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* ---- Explanatory note ---- */
+
+.note {
+  margin-top: 38px;
+  padding: 18px 20px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--glass-fill);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  font-size: 0.86rem;
+  color: var(--text-dim);
+}
+
+.note h2 {
+  font-size: 0.9rem;
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.note p {
+  margin: 0 0 9px;
+}
+.note p:last-child {
+  margin-bottom: 0;
+}
+
+.note code {
+  color: var(--text);
+  background: var(--panel-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+
+/* ---- Tabs (API Keys / Tools / Models) ---- */
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 26px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+
+.tabs [role="tab"] {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 9px 14px;
+  margin-bottom: -1px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tabs [role="tab"]:hover:not(:disabled) {
+  color: var(--text);
+  background: transparent;
+  border-color: transparent;
+  border-bottom-color: var(--border);
+}
+
+.tabs [role="tab"][aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--prov);
+}
+
+.tabs [role="tab"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-radius: 6px 6px 0 0;
+}
+
+.tabpanel[hidden] {
+  display: none;
+}
+
+/* ---- Agent tools (one glass row per tool) ---- */
+
+.tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.tool-card {
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 17px 19px;
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tool-name {
+  font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', 'Cascadia Mono',
+    'Roboto Mono', Menlo, Consolas, monospace);
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+.tool-badges {
+  display: flex;
+  gap: 6px;
+  margin-right: auto;
+}
+
+.tool-desc {
+  margin: 9px 0 0;
+  font-size: 0.86rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/* On/off switch. State lives in data-on (mirrored to aria-checked in JS) so
+   the knob position never depends on a class the markup forgot. */
+.tool-toggle {
+  width: 42px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  position: relative;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tool-toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition: left var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.tool-toggle[data-on="1"] {
+  background: var(--prov-soft);
+  border-color: var(--prov-border);
+}
+
+.tool-toggle[data-on="1"]::after {
+  left: 20px;
+  background: var(--prov-text);
+}
+
+.tool-toggle:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.tool-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.tool-args {
+  margin-top: 10px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.tool-args summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.tool-args ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tool-args code {
+  font-size: 0.85em;
+}
+
+/* ---- Hugging Face browser ---- */
+
+/* Results are grouped into one section per category; each section owns its
+   own grid so cards reflow independently and the headings stay put. */
+.hf-group {
+  /* Grid children default to min-width:auto and refuse to shrink below their
+     content, which is what makes long repo ids push columns out of the grid. */
+  min-width: 0;
+  /* Clear of the sticky topbar when a heading is scrolled to. */
+  scroll-margin-top: calc(var(--bar-h) + 16px);
+}
+
+.hf-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 34px;
+  margin-top: 22px;
+}
+
+.hf-group__title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin: 0 0 14px;
+  padding: 0 2px 9px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.hf-group__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text-faint);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.hf-grid {
+  display: grid;
+  /* Four across on a wide screen, one fewer than the 258px tracks gave: the
+     cards now carry a real logo, and the extra width goes to it and to the
+     repo id. The model *count* is unchanged — that comes from how many the
+     page fetches, not from how wide the columns are — so this trades
+     scrolling for legibility and keeps the same amount to browse. */
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 12px;
+}
+
+/* ---- Card ---- */
+
+/* ---- Card ---- */
+
+.hf-card {
+  display: flex;
+  flex-direction: column;
+  /* The card is the grid item, and its name is long and unbroken (owner/repo).
+     min-width:0 lets the track stay at 1fr so the name ellipsises rather than
+     widening the column and knocking the grid off three. */
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  transition: transform var(--speed) var(--ease), border-color var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease);
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.hf-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent-border);
+  box-shadow: var(--glass-sheen), var(--shadow);
+}
+
+.hf-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--glass-sheen), var(--glass-shadow);
+}
+
+/* The maker's logo, centred in a band and given room to read. This slot used
+   to hold the Hub's social card — a 1200×648 image with the author's logo
+   printed on it at ~32px — so the mark that identifies the model came out a
+   few pixels wide. The avatar is the same mark at 200×200, and `contain`
+   shows all of it; `cover` would slice the top and bottom off a square. */
+.hf-card__media {
+  position: relative;
+  aspect-ratio: 3 / 2;
+  padding: 14px;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--panel-3), var(--panel-2));
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.hf-card__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+
+@keyframes hf-card-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Fallback tile centres itself in the media box when artwork is missing. */
+.hf-card__media .model-tile {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 2.4rem;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.hf-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 14px 15px 15px;
+  min-width: 0;
+}
+
+.hf-card__name {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hf-card__role {
+  font-size: 0.75rem;
+  color: var(--text-faint);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hf-card__stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.hf-card__stat {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 0.66rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hf-card__size {
+  margin-left: auto;
+  background: transparent;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hf-card,
+  .hf-card__img {
+    transition: none;
+    animation: none;
+  }
+
+  .hf-card:hover {
+    transform: none;
+  }
+}
+
+/* Download lists stay a single stack of full-width rows. They used to share
+   the card grid's 200px columns, which crushed file names, sizes and the
+   delete control into an unreadable slab. */
+.hf-results,
+.hf-files {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  margin-top: 18px;
+}
+
+.hf-hit .row-note {
+  margin-top: 6px;
+}
+
+.hf-name {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', 'Cascadia Mono',
+    'Roboto Mono', Menlo, Consolas, monospace);
+  font-size: 0.88rem;
+  font-weight: 650;
+  color: var(--prov-text);
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hf-name:hover:not(:disabled) {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.hf-badges {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.hf-detail-head {
+  margin: 14px 0 4px;
+}
+
+.hf-file-row .row-top {
+  margin-bottom: 0;
+}
+
+/* Roomy file rows. The base .row padding is sized for a single chat-style
+   entry; a file table carries a name, a size and a control on one line, so
+   it needs more vertical and horizontal room to stop reading as cramped. */
+.hf-file-row {
+  padding: 15px 20px;
+  margin-bottom: 10px;
+}
+
+.hf-file-row .model-name,
+.hf-file-row .hf-file-name {
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.hf-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+
+.hf-file-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+
+.btn-dl-file,
+.btn-del-file {
+  font-size: 0.8rem;
+  padding: 6px 11px;
+}
+
+#hf-back {
+  margin-top: 14px;
+  font-size: 0.8rem;
+  padding: 6px 11px;
+}
+
+#hf-detail-body .hf-files {
+  margin-top: 12px;
+}
+
+/* ---- Models sub-views (Local / Hugging Face / Downloads) ---- */
+
+.subtabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+
+.subtabs button {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.subtabs button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent-border);
+}
+
+.subtabs button[aria-pressed="true"] {
+  color: var(--prov-text);
+  border-color: var(--prov-border);
+  background: var(--prov-soft);
+}
+
+.subtabs button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Generated per-model artwork: gradient tile + initial, since the Hub
+   exposes no images and hot-linking any is CSP-blocked. */
+.model-tile {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 700;
+  font-size: 1rem;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  user-select: none;
+}
+
+.model-tile.lg {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  font-size: 1.35rem;
+}
+
+/* Names share rows with tiles, badges, and buttons, so they must shrink
+   instead of shoving their neighbours out. */
+.local-model-row .model-name,
+.hf-file-row .model-name,
+.hf-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hf-hit-top {
+  justify-content: flex-start;
+}
+
+
+/* ---- Model detail modal ---- */
+
+body.modal-open {
+  overflow: hidden;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal {
+  width: min(580px, 94vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  padding: 16px 18px;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-bottom: 12px;
+}
+
+.modal-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.modal-titles .model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#hf-modal-close {
+  flex-shrink: 0;
+}
+
+#hf-modal-files {
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+#hf-modal-files .row {
+  margin-bottom: 0;
+}
+
+@media (max-width: 600px) {
+  .page {
+    padding: 28px 16px 60px;
+  }
+  header {
+    flex-direction: column;
+  }
+  .input-row {
+    flex-wrap: wrap;
+  }
+  .input-row input {
+    flex-basis: 100%;
+  }
+  .input-row button {
+    flex: 1;
+  }
+}
+/* ---- Built-in provider keys: compact list + popup ---- */
+
+/* Six providers used to each be a full-width card holding an input row and two
+   buttons, which read as a wall of crowded controls. Each is now one short
+   clickable line; the credential form lives in the popup below. */
+#keys {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 13px 16px;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  box-shadow: var(--glass-sheen);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  cursor: pointer;
+  transition: border-color var(--speed) var(--ease), transform var(--speed) var(--ease);
+}
+
+.key-row:hover {
+  border-color: var(--accent-border);
+  transform: translateX(2px);
+}
+
+.key-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--glass-sheen);
+}
+
+.key-row__label {
+  font-size: 0.92rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.key-row__env {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-faint);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-row__chev {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .key-row {
+    transition: none;
+  }
+
+  .key-row:hover {
+    transform: none;
+  }
+}
+
+/* Narrow screens drop the env var name rather than let it squeeze the label. */
+@media (max-width: 520px) {
+  .key-row__env {
+    display: none;
+  }
+
+  .key-row__label {
+    flex: 1;
+  }
+}
+
+/* The key popup reuses the model-detail modal's recipe, just tighter. */
+.modal--tight {
+  width: min(460px, 94vw);
+  padding: 15px 17px 17px;
+}
+
+.modal--tight .modal-head {
+  margin-bottom: 10px;
+}
+
+.modal--tight .input-row {
+  margin-top: 4px;
+}
+
+.modal--tight .input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Local runtime catalog ---- */
+
+.cat-section {
+  margin-bottom: 30px;
+}
+
+.cat-section:last-child {
+  margin-bottom: 4px;
+}
+
+.cat-section__title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin: 0 0 6px;
+  padding: 0 2px 9px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.cat-section__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text-faint);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+/* Why this task can't be pulled. The reader should never have to guess
+   whether a missing Pull button is a bug. */
+.cat-section__note {
+  margin: 0 0 12px;
+  padding: 8px 11px;
+  border-left: 2px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 0.76rem;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.cat-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.cat-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 15px 16px 14px;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  box-shadow: var(--glass-sheen);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  transition: border-color var(--speed) var(--ease);
+}
+
+.cat-entry:hover {
+  border-color: var(--accent-border);
+}
+
+.cat-entry__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cat-entry__title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.cat-entry__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-end;
+}
+
+.cat-badge {
+  padding: 2px 7px;
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* The runtime is the important fact on this card, so it reads as the
+   primary tag rather than as one more format chip. */
+.cat-badge--runtime {
+  background: var(--accent-soft);
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 650;
+}
+
+.cat-badge--gguf { background: var(--prov-soft); color: var(--prov-text); }
+.cat-badge--safetensors { background: var(--panel-3); color: var(--text-dim); }
+.cat-badge--onnx { background: var(--panel-3); color: var(--text-dim); }
+.cat-badge--bin,
+.cat-badge--pth { background: var(--panel-3); color: var(--text-dim); }
+
+.cat-entry__blurb {
+  margin: 0;
+  font-size: 0.79rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.cat-entry__repo {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+.cat-entry__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: auto;
+  padding-top: 11px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.cat-entry__actions button {
+  font-size: 0.75rem;
+  padding: 6px 11px;
+}
+
+.cat-entry__none {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+@media (max-width: 600px) {
+  .cat-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---- Category filter chips (Hugging Face browse) ---- */
+
+.hf-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 14px 0 0;
+}
+
+.hf-filter {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color var(--speed) var(--ease), border-color var(--speed) var(--ease),
+    background var(--speed) var(--ease);
+}
+
+.hf-filter:hover {
+  color: var(--text);
+  border-color: var(--accent-border);
+}
+
+.hf-filter:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.hf-filter.is-active {
+  color: var(--text);
+  background: var(--panel-3);
+  border-color: var(--accent-border);
+}
+
+/* ---- What can run this model ---- */
+
+.hf-card__runtimes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.hf-runtime {
+  padding: 2px 7px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 0.63rem;
+  font-weight: 700;
+  font-style: normal;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ---- Runtime installer ---- */
+
+.rt-device {
+  margin-top: 18px;
+}
+
+.rt-device__label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.rt-device__opts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 9px;
+}
+
+.rt-device__opt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  text-align: left;
+  font: inherit;
+  color: var(--text-dim);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color var(--speed) var(--ease), color var(--speed) var(--ease);
+}
+
+.rt-device__opt strong {
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.rt-device__opt em {
+  font-size: 0.73rem;
+  font-style: normal;
+  color: var(--text-faint);
+  line-height: 1.4;
+  /* The shared button rule sets `white-space: nowrap`, and these are buttons —
+     which is right for a label but not for the sentence underneath it. Without
+     this the description stays on one line and runs 118px past the edge of its
+     card, over whatever is beside it. */
+  white-space: normal;
+  /* A flex item will not shrink below its min-content width by default, so a
+     long unbroken string could still push the card open. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rt-device__opt[aria-checked='true'] {
+  border-color: var(--accent-border);
+  background: var(--panel-3);
+}
+
+.rt-device__opt:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.rt-warn {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 0.78rem;
+}
+
+.rt-status {
+  margin-top: 16px;
+}
+
+.rt-status__row {
+  padding: 10px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.rt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rt-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  transition: border-color var(--speed) var(--ease);
+}
+
+/* Only the tick box and its text are the label. The Remove button is a sibling
+   so pressing it does not also toggle the install selection — a button inside a
+   label fires the label's control as well. */
+.rt-row__label {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.rt-row__remove {
+  flex-shrink: 0;
+  padding: 5px 11px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  transition: color var(--speed) var(--ease), border-color var(--speed) var(--ease),
+    background var(--speed) var(--ease);
+}
+
+.rt-row__remove:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.rt-row__remove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The row is not itself a click target any more, so it does not pretend to be
+   one on hover either. */
+.rt-row.is-installed {
+  opacity: 0.72;
+}
+
+/* The installed-row dimming above is meant for the package name, which is
+   settled fact rather than something to act on. The Remove button is the one
+   thing on that row you can still act on, so it keeps full contrast — a
+   destructive control nobody can see is not a control. */
+.rt-row.is-installed .rt-row__remove {
+  opacity: 1;
+}
+
+/* 20px, not 17. The row around it is the real hit target, so this was never
+   about reachability — it is that seven stacked toggles at 17px read as a
+   column of specks, and one pixel is the difference between a control and an
+   artefact at this size. */
+.rt-row input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.rt-row input[type='checkbox']:disabled {
+  cursor: default;
+}
+
+.rt-row__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.rt-row__title {
+  font-size: 0.89rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.rt-row__blurb {
+  margin: 3px 0 0;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.rt-row__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.rt-state {
+  padding: 3px 9px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.rt-state.is-on {
+  background: var(--success);
+  color: var(--bg);
+}
+
+.rt-unlocks {
+  font-size: 0.64rem;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.rt-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.rt-total {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+}
+
+.rt-log {
+  margin-top: 16px;
+}
+
+.rt-log__head {
+  margin-bottom: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.rt-log pre {
+  max-height: 280px;
+  margin: 0;
+  padding: 13px 15px;
+  overflow: auto;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .rt-row {
+    flex-wrap: wrap;
+  }
+
+  .rt-row__meta {
+    flex-direction: row;
+    align-items: center;
+    width: 100%;
+    padding-left: 31px;
+  }
+}
+
+/* ---- Running a downloaded model ---- */
+
+.run-panel {
+  margin-top: 22px;
+  padding: 18px 20px 20px;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.run-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.run-panel__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.run-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.run-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.run-field > span {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.run-field textarea,
+.run-field input {
+  width: 100%;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+
+.run-field textarea:focus-visible,
+.run-field input:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.run-out {
+  margin-top: 16px;
+}
+
+.run-text {
+  margin: 0;
+  padding: 13px 15px;
+  background: var(--panel-2);
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.run-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.run-out audio {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.run-meta {
+  margin: 9px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-faint);
+}
+
+.run-chunks {
+  margin-top: 12px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.run-chunks summary {
+  cursor: pointer;
+  color: var(--text-faint);
+}
+
+.run-chunk {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.run-log {
+  max-height: 180px;
+  margin: 14px 0 0;
+  padding: 11px 13px;
+  overflow: auto;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run-log:empty {
+  display: none;
+}
+
+.cat-run {
+  font-size: 0.75rem;
+  padding: 6px 13px;
+}
+
+/* ---- Local models: daemon list beside downloaded weights ---- */
+
+.local-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 22px;
+  margin-top: 16px;
+  align-items: start;
+}
+
+.local-split__title {
+  margin: 0 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.local-split .pull-form,
+.local-split .progress,
+.local-split .scan-result {
+  margin-top: 12px;
+}
+
+.local-repo-head {
+  margin: 14px 0 7px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.local-repo-head:first-child {
+  margin-top: 0;
+}
+
+.local-download-row {
+  display: block;
+  padding: 13px 16px;
+}
+
+.local-download-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.local-download-actions button {
+  font-size: 0.78rem;
+  padding: 6px 14px;
+}
+
+.rt-gpu-note {
+  margin: 9px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-faint);
+}
+
+.rt-gpu-note:empty {
+  display: none;
+}
+
+/* Catalog cards open on click rather than showing a wall of buttons. */
+.cat-entry__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.cat-entry__head:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.cat-entry.is-open {
+  border-color: var(--accent-border);
+}
+
+.cat-entry__actions[hidden] {
+  display: none;
+}
+
+.cat-entry__blurb {
+  cursor: default;
+}
+
+/* ---- Hub: models grouped by runtime ---- */
+
+.hub-title {
+  margin: 22px 0 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.hub-title:first-child {
+  margin-top: 0;
+}
+
+/* The Ollama heading is the <summary> that folds its list away; the
+   disclosure marker is the control, so the text itself must invite clicks. */
+summary.hub-title {
+  cursor: pointer;
+  user-select: none;
+}
+
+.hub-group {
+  margin: 14px 0;
+  padding: 15px 17px;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+}
+
+.hub-group.is-missing {
+  border-color: var(--border);
+  border-left: 3px solid var(--warning);
+}
+
+.hub-group__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hub-group__title {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.hub-group__state {
+  padding: 3px 9px;
+  border-radius: 10px;
+  background: var(--panel-3);
+  color: var(--text-faint);
+  font-size: 0.66rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.hub-group__blurb {
+  margin: 6px 0 0;
+  font-size: 0.77rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.hub-group__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.hub-group__note {
+  flex: 1;
+  min-width: 160px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.hub-files {
+  margin-top: 12px;
+}
+
+/* ---- Download activity ---- */
+
+.dl-row {
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+}
+
+.dl-row__top {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.dl-row__kind {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 9px;
+  background: var(--panel-3);
+  color: var(--text-faint);
+  font-size: 0.63rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dl-row__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.83rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-row__status {
+  flex-shrink: 0;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-row--done .dl-row__status { color: var(--success); }
+.dl-row--error .dl-row__status { color: var(--danger); }
+
+.dl-row__bar {
+  margin-top: 9px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+
+.dl-row__bar > i {
+  display: block;
+  height: 100%;
+  background: var(--text-dim);
+  border-radius: 3px;
+  transition: width 0.3s var(--ease);
+}
+
+/* A running row breathes: the fill pulses gently so a long download reads as
+   alive even when the byte counter is between updates. Kept subtle — a strong
+   pulse reads as "stuck" rather than "working". */
+.dl-row--running .dl-row__bar > i {
+  animation: dl-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes dl-pulse {
+  0%, 100% { opacity: 0.72; transform: scaleY(0.85); }
+  50% { opacity: 1; transform: scaleY(1); }
+}
+
+/* The cancel button sits last in the top row; a running row's bar + button
+   still fit on one line at 390px because the name truncates. */
+.dl-row__top .btn-tiny { flex-shrink: 0; }
+  width: 35% !important;
+  animation: dl-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes dl-slide {
+  0%   { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+
+/* ---- Driver helper ---- */
+
+.rt-drivers {
+  margin-top: 24px;
+  padding: 16px 18px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+
+.rt-drivers__title {
+  margin: 0 0 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.rt-drivers__blurb {
+  margin: 0 0 8px;
+  font-size: 0.79rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+/* The card's own specs, read from the kernel driver. Dimmer and monospaced so
+   it reads as instrumentation rather than prose. Empty until a GPU is found. */
+.rt-drivers__hw:not(:empty) {
+  display: block;
+  margin: -3px 0 9px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+
+/* The Vulkan line answers a different question, so it gets its own label
+   weight rather than reading as another row of the same table. */
+.rt-drivers__hw--vk:not(:empty) {
+  margin-top: -4px;
+  padding-left: 9px;
+  border-left: 2px solid var(--line, rgba(255, 255, 255, 0.14));
+  opacity: 1;
+}
+
+.rt-drivers__cmd {
+  margin: 10px 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+
+/* ---- Runtimes: backend report ----
+   These lived in nav.css, which only index.html loads — so on the page that
+   actually renders them the Backends block was entirely unstyled: badges ran
+   into the backend name, the GPU/CPU split bar collapsed to zero height, and
+   the evidence line rendered at body size. Belongs here, beside the rest of
+   the runtime rules. */
+
+.rt-backends {
+  margin: 14px 0 4px;
+}
+
+.rt-backends__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Three states, and they mean different things to the person reading them: a
+   backend running on the GPU, one running on the CPU, and one whose device
+   nobody can see. Marked by a text badge rather than a coloured dot, because
+   "we do not know" has to be visibly different from "we know it is idle" —
+   and a dot cannot carry that distinction. */
+.rt-backend {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.rt-backend__name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.rt-backend__badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.67rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.rt-backend__detail {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.rt-backend__evidence {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+}
+
+/* The split bar: GPU on the left, CPU on the right, in the one dimension the
+   two can be told apart. Uses width rather than two colours so it survives a
+   greyscale print and reads without relying on hue. */
+.rt-backend__split {
+  display: flex;
+  height: 5px;
+  margin-top: 7px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--accent-soft);
+}
+
+.rt-backend__split i {
+  display: block;
+  height: 100%;
+  background: var(--text-dim);
+}
+
+.rt-backend__legend {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 3px;
+  font-size: 0.67rem;
+  color: var(--text-faint);
+}
+
+/* Installer output. A <pre> because it is a transcript: preserving whitespace
+   and wrapping long lines both matter, and reformatting a package manager's
+   output tends to hide the one line that explains the failure. */
+.rt-drivers__log {
+  max-height: 260px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--panel-3);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rt-drivers__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rt-drivers__actions a,
+.rt-drivers__actions button {
+  font-size: 0.76rem;
+  padding: 6px 12px;
+  text-decoration: none;
+}
+
+.pull-box {
+  margin-top: 4px;
+  margin-bottom: 18px;
+  padding: 12px 15px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+
+/* ---- Privilege prompt ----
+   Installing drivers needs root and a server has no terminal to ask on, so the
+   password is collected here. Styled as a quiet inset rather than a modal: it is
+   one field in a panel the user is already looking at, and a dialog would hide
+   the install log it is about to fill. */
+
+.rt-pass {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.rt-pass[hidden] {
+  display: none;
+}
+
+.rt-pass__label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.rt-pass__note {
+  margin: 5px 0 10px;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.rt-pass__note code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text);
+}
+
+.rt-pass__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.rt-pass__input {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 8px 11px;
+  font-size: 0.82rem;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+
+.rt-pass__input:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.rt-pass__go,
+.rt-pass__row .btn-ghost {
+  padding: 8px 14px;
+  font-size: 0.78rem;
+}
+
+.pull-box summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--text-dim);
+}
+
+.pull-box[open] summary {
+  margin-bottom: 10px;
+}
+
+/* ---- What runs this file ---- */
+
+.fmt-chip {
+  display: inline-block;
+  margin-top: 7px;
+  padding: 2px 8px;
+  border-radius: 9px;
+  background: var(--panel-3);
+  color: var(--text-dim);
+  font-size: 0.63rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.runs-with {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.78rem;
+}
+
+.runs-with__label {
+  color: var(--text-faint);
+}
+
+.runs-with__name {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.runs-with__state {
+  padding: 2px 8px;
+  border-radius: 9px;
+  background: var(--panel-3);
+  color: var(--text-faint);
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.runs-with__state.is-on {
+  background: var(--success);
+  color: var(--bg);
+}
+
+.runs-with button {
+  font-size: 0.72rem;
+  padding: 5px 11px;
+  margin-left: auto;
+}
+
+/* ---- A runtime this machine's Python cannot install ---- */
+
+.rt-row.is-blocked {
+  opacity: 0.72;
+}
+
+.rt-row.is-blocked .rt-row__title {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+
+.rt-row__blocked {
+  margin-top: 5px;
+  color: var(--text-faint);
+  font-size: 0.73rem;
+}
+
+.rt-state.is-blocked {
+  background: var(--panel-3);
+  color: var(--text-dim);
+}
+
+/* A GPU that is present but cannot run CUDA or ROCm. Left enabled it looks
+   like an ordinary choice, and finding out otherwise costs gigabytes. */
+
+.rt-device__opt.is-unusable {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rt-device__opt.is-unusable strong {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+
+.rt-device__opt:focus-visible {
+  outline: 2px solid var(--text-dim);
+  outline-offset: 2px;
+}
+
+/* ---- Which model does which job ---- */
+
+.assign-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.assign-row:last-child {
+  border-bottom: 0;
+}
+
+.assign-row__title {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.assign-row__sub {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 0.75rem;
+}
+
+.assign-row__select {
+  flex: 0 1 340px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md, 10px);
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+/* ---- Runtimes: re-check ---- */
+
+/* A button holding an icon plus a label. The shared `button` rule in theme.css
+   is inline-block with no alignment, so the SVG lands on the text baseline and
+   the label rides a couple of pixels low. "Check" was already correct by
+   accident — it had its own id-scoped flex rule — while the identically-marked
+   "Update GPU drivers" button below was not, which is what made the two look
+   like different controls. Scoped to buttons that actually contain an icon, so
+   the text-only buttons beside them are untouched. */
+.rt-actions button:has(svg),
+.rt-drivers__actions button:has(svg) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#rt-check svg {
+  transition: transform 0.4s ease;
+}
+
+/* The spin is the feedback: without it a click looked like nothing happened
+   while the probe ran. */
+#rt-check.is-busy svg {
+  transform: rotate(360deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #rt-check.is-busy svg {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* A transfer we have lost contact with. Dimmed, and crucially without the
+   animated stripe — a bar that keeps moving while nothing is happening is the
+   definition of a stuck indicator. */
+
+.dl-row.is-stale {
+  opacity: 0.7;
+}
+
+.dl-row.is-stale .dl-row__bar {
+  background: var(--border-soft);
+}
+
+/* A transfer we have lost contact with. Dimmed, and crucially without the
+   animated stripe — a bar that keeps moving while nothing is happening is the
+   definition of a stuck indicator. */
+
+.dl-row.is-stale {
+  opacity: 0.7;
+}
+
+.dl-row.is-stale .dl-row__bar {
+  background: var(--border-soft);
+}
+
+/* ---- Ollama models: one compact row each ----
+   These were base .row blocks — 17px of glass padding around every model, with
+   full-size Chat/Delete buttons 45px tall — so a handful of models filled the
+   column. Same compact shape as the downloaded-weights rows below: smaller
+   tile and actions on the top line, the facts on one dimmed line underneath. */
+
+.local-model-row {
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-md, 10px);
+}
+
+.local-model-row .row-top {
+  margin-bottom: 0;
+  gap: 10px;
+}
+
+.local-model-row .model-tile {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+
+.local-model-row .btn-ghost {
+  padding: 4px 9px;
+  font-size: 0.72rem;
+}
+
+.local-model-row .row-note {
+  margin: 1px 0 0 36px; /* aligns under the name, clear of the tile */
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+/* ---- Downloaded models: one compact row each ----
+   Was five stacked blocks with a rule between each, so a handful of models
+   filled the page. Now: the file and its size on top, everything else on one
+   dimmed line underneath. */
+
+.local-download-row {
+  padding: 7px 11px;
+  margin-bottom: 5px;
+  border-radius: var(--radius-md, 10px);
+}
+
+.local-download-row .row-top {
+  margin-bottom: 0;
+  gap: 10px;
+}
+
+.local-download-row .row-top .model-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86rem;
+}
+
+.local-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  font-size: 0.74rem;
+  color: var(--text-faint);
+}
+
+.local-meta__repo {
+  font-family: var(--font-mono);
+  font-size: 0.71rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
+}
+
+.local-meta__runtime {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.local-meta__state {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--panel-3);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.local-meta__state.is-bad {
+  background: var(--panel-3);
+  color: var(--text-dim);
+}
+
+/* The "incomplete" tag is a button: it copies the missing files' download
+   links. Looks like the tag, behaves like an action on hover/focus. */
+.local-meta__state.is-action {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  font: inherit;
+  letter-spacing: inherit;
+  transition: border-color var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.local-meta__state.is-action:hover,
+.local-meta__state.is-action:focus-visible {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+/* The format chip used to sit on its own line above the meta row. */
+.local-download-row .fmt-chip {
+  margin-top: 0;
+  padding: 1px 6px;
+  font-size: 0.61rem;
+}
+
+.btn-tiny {
+  font-size: 0.7rem;
+  padding: 3px 9px;
+  border-radius: 8px;
+}
+
+.local-download-row .btn-tiny {
+  flex: 0 0 auto;
+}
+
+/* The group header itself was padded like a section; it is a label. */
+.hub-group {
+  margin-bottom: 10px;
+}
+
+.hub-group__blurb {
+  margin: 2px 0 8px;
+  font-size: 0.78rem;
+}
+
+.hub-group__note {
+  margin: 4px 0 0;
+}
+
+/* ---- Download a whole model, not one file of it ---- */
+
+.hf-repo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md, 10px);
+  background: var(--panel-2);
+}
+
+.hf-repo-summary {
+  font-size: 0.76rem;
+  color: var(--text-dim);
+}
+
+/* ---- Search bar ----
+   The form had no styling at all — only rules for the sort <select>, which is
+   gone — so it rendered as three unstyled controls. This is the whole field:
+   a rounded glass input, a leading glyph, and the button inside it. */
+
+.hf-search {
+  margin: 14px 0 10px;
+}
+
+.hf-search__field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  transition: border-color var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+}
+
+.hf-search__field:focus-within {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.hf-search__icon {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.hf-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.hf-search input::placeholder {
+  color: var(--text-faint);
+}
+
+.hf-search .btn-primary {
+  flex: 0 0 auto;
+  padding: 7px 16px;
+  font-size: 0.84rem;
+}
+
+/* Six-up cards need tighter internals: the previous padding and 0.9rem name
+   made each card feel like a panel rather than an entry in a list. */
+.hf-card__body {
+  padding: 9px 12px 10px;
+}
+
+.hf-card__name {
+  font-size: 0.8rem;
+  line-height: 1.25;
+}
+
+.hf-card__meta {
+  margin-top: 3px;
+  font-size: 0.68rem;
+}
+
+/* Eight across only works if the card is short. The name is an owner/repo id
+   with no spaces, so it needs an explicit clamp — an un-clamped one wrapped to
+   three lines and a "card" ended up 250px tall, which is 4 rows of nothing. */
+.hf-card__name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  line-height: 1.25;
+  font-size: 0.86rem;
+}
+
+.hf-card__role {
+  font-size: 0.66rem;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hf-card__stats {
+  margin-top: 4px;
+  font-size: 0.68rem;
+  gap: 7px;
+}
+
+/* The stats row was wrapping to four lines inside a 172px card — likes,
+   downloads and a size chip each taking their own row, 114px of vertical
+   space for three numbers. One line, abbreviating large counts. */
+.hf-card__stats {
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-top: 5px;
+  font-size: 0.72rem;
+  padding-top: 0;
+  border-top: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.hf-card__stat {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hf-card__size {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* ---- Collapsed loose files under a model directory ---- */
+.local-loose { margin-top: 8px; font-size: 0.78rem; color: var(--text-dim); }
+.local-loose summary { cursor: pointer; user-select: none; }
+.local-loose__files { list-style: none; padding: 6px 0 0; margin: 0; display: grid; gap: 4px; }
+.local-loose__files li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.local-loose__files li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1,0 +1,418 @@
+/* ==========================================================================
+   imagegen.css — Image Studio page. Reuses the chat page's chrome wholesale
+   (topbar, .messages, .composer glass box) so both pages stay on one visual
+   layer; this file only sizes the image-specific bits.
+   ========================================================================== */
+
+/* ---- Controls row inside the glass composer box ---- */
+
+.img-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: var(--text-faint);
+}
+
+/* The global select style is a full-width form control; inside the composer
+   it should hug its content instead. */
+.img-field select {
+  width: auto;
+  padding: 5px 26px 5px 9px;
+  font-size: 0.78rem;
+}
+
+.img-status {
+  font-size: 0.76rem;
+  color: var(--text-faint);
+  min-height: 1em;
+  margin-left: auto;
+  text-align: right;
+}
+
+/* ---- Composer row: prompt input joins the textarea family ---- */
+
+.composer #prompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 8px 2px;
+}
+
+.composer #prompt:focus {
+  outline: none;
+  box-shadow: none;
+  border: none;
+}
+
+.composer #prompt:hover:not(:disabled) {
+  border: none;
+  background: transparent;
+}
+
+#go {
+  flex: none;
+}
+
+/* ---- Generated images in the transcript ---- */
+
+/* The chat page's strip is built for 148px thumbnails of attached photos.
+   Generated images are the point here, so they get room. */
+.chat-body .msg-images img {
+  max-width: min(360px, 86vw);
+  max-height: 360px;
+  border-radius: var(--radius);
+}
+
+/* A turn rolled back from history has no bytes; say so in place of the image. */
+.img-note {
+  display: block;
+  margin: 2px 0 8px;
+  font-size: 0.8rem;
+  color: var(--text-faint);
+}
+/* ---- Studio: task tabs and the transcribe / speak panels ---- */
+
+.studio-tabs {
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+  padding: 10px 14px 0;
+}
+
+.studio-tab {
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.studio-tab:hover {
+  color: var(--text);
+}
+
+.studio-tab[aria-selected='true'] {
+  border-color: var(--accent-border);
+  background: var(--panel-3);
+  box-shadow: var(--glass-sheen);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* A faint divider above the resources box so the rail reads as model pickers
+   on top, system status below. */
+.sidebar > .resources {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--glass-border);
+}
+
+/* The topbar provider chip is a readout of the rail's Provider select, not a
+   second control. It keeps the provider colours the chat gives it — this is
+   still the "what is answering" indicator — but drops the hover affordance,
+   which would otherwise promise a popover that does not exist here. */
+.chip-provider.is-static,
+.chip-provider.is-static:hover {
+  cursor: default;
+  background: var(--prov-soft);
+  border-color: var(--prov-border);
+  color: var(--prov-text);
+}
+
+.studio-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 auto 10px;
+  width: min(720px, calc(100% - 28px));
+  padding: 12px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+}
+
+.studio-panel[hidden] {
+  display: none;
+}
+
+/* The Image tab's panel is a placeholder — its work happens in the transcript
+   and the composer — so an empty card floating above the composer is noise. */
+.studio-panel:empty {
+  display: none;
+}
+
+.studio-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.studio-pick__label {
+  color: var(--text-faint);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.studio-pick__select {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md, 10px);
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: 0.84rem;
+}
+
+.studio-pick__note {
+  color: var(--text-faint);
+  font-size: 0.74rem;
+}
+
+.studio-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.studio-controls .img-field {
+  flex: 1 1 240px;
+}
+
+/* The audio chip strip is the chat composer's attachment strip, reused at the
+   top of the panel card. The hairline that separates it from the textarea
+   there has nothing to separate here, so it is dropped; the panel's own gap
+   spaces it from the controls. */
+#panel-stt .attach-box {
+  padding: 0;
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+
+/* Extension chips under a transcript bubble. Same clothes as the chat's
+   per-code-block Copy / Download buttons — this is the same affordance one
+   level up: choose the file shape after the work, not before it. */
+.tr-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.tr-dl {
+  padding: 3px 9px;
+  font-size: 0.74rem;
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-faint);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tr-dl:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.tr-dl:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.studio-panel audio {
+  width: 100%;
+}
+
+/* ==========================================================================
+   The model rail.
+
+   Every Studio tab needs one decision made before the work can start: which
+   model runs it. That decision used to sit as a strip above the controls, so it
+   moved with the panel and had to be hunted for on each switch. It is a fixed
+   place now, and it shows only the live tab's picker — the rail lists one
+   decision, not three.
+   ========================================================================== */
+
+/* The rail uses the same `.sidebar` class as the chat page so both pages share
+   one layout. Only task-specific section styling lives here. */
+
+.studio-rail__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.studio-rail__label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.studio-rail__image-settings {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--panel-3);
+  border: 1px solid var(--glass-border);
+}
+
+.studio-rail__resources {
+  margin-top: 6px;
+}
+
+/* Sleek resource box in the rail: softer edges than a card, so it reads as
+   instrumentation rather than a container. */
+.sidebar .resources {
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--glass-border) 60%, transparent);
+  border-radius: var(--radius);
+  box-shadow: none;
+  background: linear-gradient(var(--glass-fill), var(--glass-fill));
+}
+
+.sidebar .resources__manage {
+  font-size: 0.62rem;
+  padding: 2px 7px;
+}
+
+.studio-rail__pick[hidden] {
+  display: none;
+}
+
+/* `hidden` normally means display:none, but the flex rules on these sections
+   win the specificity fight and would leave the Image settings card sitting on
+   the Transcribe and Speak tabs. */
+.studio-rail__section[hidden] {
+  display: none;
+}
+
+.studio-rail__note {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.studio-rail__note a {
+  color: var(--text-dim);
+}
+
+/* The picker styling was written for a full-width strip above the controls;
+   in a 280px column the label and the select have to stack instead. */
+.studio-rail__pick .studio-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.studio-rail__pick .studio-pick__label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.studio-rail__pick select,
+.studio-rail__pick .studio-pick select {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .chat {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    width: min(280px, 82vw);
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 260ms var(--ease), visibility 260ms;
+  }
+  .sidebar.open {
+    transform: none;
+    visibility: visible;
+  }
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+  .drawer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 2px 2px 8px 9px;
+  }
+}
+
+/* The Studio rail carries more than the chat's — model pickers, image settings
+   and telemetry — and the resource box grows when its report lands. The history
+   list must not be the only thing that gives way: floor it at a couple of rows
+   and let the whole rail scroll once the stack is taller than the window. */
+.sidebar {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.sidebar .history-list {
+  flex: 1 1 auto;
+  min-height: 84px;
+}
+
+/* In the rail every control has to fit the column. The composer row lets a
+   select hug its content, but "Pollinations" plus a label is wider than a
+   260px rail and used to poke out of the card, dragging a horizontal
+   scrollbar onto the whole panel with it. */
+.studio-rail__image-settings .img-field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.studio-rail__image-settings .img-field select {
+  width: 100%;
+  min-width: 0;
+}
+
+/* ==========================================================================
+   The composer's model pill (chat's, carried over).
+   ========================================================================== */
+
+/* Local models that exist but cannot run here stay listed — hiding them reads
+   as "nothing exists" — but they are not selectable. */
+.mm-option[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.mm-option[aria-disabled='true']:hover {
+  background: none;
+  color: var(--text-dim);
+}
+
+/* The reason a local model cannot run, parked at the row's far edge. */
+.mm-option .mm-reason {
+  margin-left: auto;
+  padding-left: 8px;
+  flex: 0 1 auto;
+  font-size: 0.72rem;
+  color: var(--text-faint);
+}
