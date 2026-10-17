@@ -260,9 +260,9 @@ export const RUNTIME_GROUPS: RuntimeGroup[] = [
     label: 'llama.cpp',
     blurb:
       'The GGUF inference engine, installed as a pinned prebuilt binary into ' +
-      'this app’s own folder — no root, no Python, no compiler. Use it to run ' +
-      'the quantized chat models in Get models (Qwen3, Llama 3.2, Gemma), ' +
-      'which Ollama cannot load.',
+      'this app’s own folder — no root, no Python, no compiler. Download the ' +
+      'quantized chat models in Get models (Qwen3, Llama 3.2, Gemma) and they ' +
+      'show up in the chat provider picker, run on this machine.',
     unlocks: ['text'],
     // Not a pip package either: the upstream project ships prebuilt CPU
     // tarballs per build. Kept beside Ollama so "the two chat runtimes" read
@@ -1077,7 +1077,7 @@ const llamaDir = (): string => path.join(runtimesDir(), 'llama.cpp');
 const llamaServerName = (): string =>
   process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
 /** The HTTP server binary; this is what the chat provider talks to. */
-function llamaServerPath(): string | null {
+export function llamaServerPath(): string | null {
   // Recorded at install time: the directory that actually holds the binary,
   // so removal deletes exactly that tree rather than guessing at a layout.
   const marker = path.join(llamaDir(), 'build.txt');

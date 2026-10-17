@@ -93,7 +93,7 @@ export const CATALOG: CatalogSection[] = [
   {
     task: 'text',
     title: 'Text & chat',
-    note: 'Ollama serves chat models, so these pull straight from your daemon.',
+    note: 'Ollama serves chat models, so these pull straight from your daemon — or download the GGUF and run it on this machine with llama.cpp.',
     entries: [
       {
         repo: 'unsloth/Qwen3-8B-GGUF',

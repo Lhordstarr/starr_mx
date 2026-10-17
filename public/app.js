@@ -831,7 +831,6 @@ async function loadProviders(saved) {
             aria-selected="${p.id === saved.provider}">
       <span class="popover__item-label">${escapeHtml(p.label)}</span>
       ${p.configured ? '' : '<span class="popover__flag">no key</span>'}
-      ${p.local ? '<span class="popover__flag popover__flag--live">runs on this PC</span>' : ''}
     </button>`;
 
   const local = providers.filter((p) => p.local);

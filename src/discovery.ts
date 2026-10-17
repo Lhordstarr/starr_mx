@@ -33,7 +33,17 @@ interface LocalCandidate {
 
 const CANDIDATES: LocalCandidate[] = [
   { id: 'lmstudio', label: 'LM Studio', baseUrl: 'http://127.0.0.1:1234/v1', modelsPath: '/v1/models' },
-  { id: 'llamacpp', label: 'llama.cpp', baseUrl: 'http://127.0.0.1:8080/v1', modelsPath: '/v1/models' },
+  // `llamacpp-server`, not `llamacpp`: this app has a provider of its own under
+  // that id, the one that starts the runtime it installed. A user-run server on
+  // 8080 is a different thing — already loaded, not managed here — and letting
+  // it share the id would have it silently replace the managed provider in the
+  // registry and take its model list with it.
+  {
+    id: 'llamacpp-server',
+    label: 'llama.cpp (:8080)',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    modelsPath: '/v1/models',
+  },
   { id: 'vllm', label: 'vLLM', baseUrl: 'http://127.0.0.1:8000/v1', modelsPath: '/v1/models' },
   { id: 'localai', label: 'LocalAI', baseUrl: 'http://127.0.0.1:8081/v1', modelsPath: '/v1/models' },
   { id: 'localai-alt', label: 'LocalAI', baseUrl: 'http://127.0.0.1:5000/v1', modelsPath: '/v1/models' },

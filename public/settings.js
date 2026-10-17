@@ -2060,12 +2060,36 @@ const FORMAT_RUNTIME = [
     ext: /\.(gguf)$/i,
     label: 'llama.cpp',
     requires: [],
-    // Ollama is present as a runtime group but GGUF is not something this app
-    // feeds to it, so there is nothing to install here.
+    // A GGUF this app cannot chat with: whisper GGUFs belong to whisper.cpp and
+    // diffusion GGUFs to ComfyUI, and neither is a text model. The chat models
+    // sharing the same extension are pulled out of this path by
+    // `chatRuntimeFor` below, which is why the note here can be blunt.
     external: true,
-    blurb: 'A quantised GGUF. Run by llama.cpp, or imported into Ollama.',
+    blurb: 'A quantised GGUF, but not a chat model — whisper and diffusion GGUFs need their own program.',
   },
 ];
+
+/**
+ * The runtime that can chat with a downloaded GGUF, when it is a chat model.
+ *
+ * The app installs llama.cpp itself and offers it as a chat provider, so most
+ * GGUFs on this page are runnable here — the exception being the whisper and
+ * diffusion files that share the format. Which is which is decided once, on the
+ * server (`/api/hf/files` marks the chat models with `llama`), because that is
+ * the same list the chat page's model picker shows: two answers here would mean
+ * a Chat button pointing at a model the provider has never heard of.
+ */
+const LLAMA_CHAT_RUNTIME = {
+  id: 'llama-cpp',
+  label: 'llama.cpp',
+  requires: ['llama-cpp'],
+  blurb: 'A quantised GGUF chat model. Runs on this machine through llama.cpp.',
+};
+
+/** `null` when this row is not a chat model. */
+function chatRuntimeFor(d) {
+  return d?.llama ? { ...LLAMA_CHAT_RUNTIME, provider: d.llama.provider, model: d.llama.model } : null;
+}
 
 /** What it takes to run this file, based on its extension. */
 function runtimeForFile(fileName) {
@@ -2106,6 +2130,10 @@ function runtimeBlocked(ids) {
  * runtime that needs about 40 MB of CTranslate2.
  */
 function runtimeForRow(d, resolved) {
+  // A chat model first: the GGUF extension alone says "external tool", which is
+  // true of whisper GGUFs and false of the ones this app's own provider runs.
+  const chat = chatRuntimeFor(d);
+  if (chat) return chat;
   if (d.entry?.run?.requires?.length) {
     const reqs = d.entry.run.requires;
     return {
@@ -2632,7 +2660,7 @@ async function refreshHub() {
 
   for (const { entry, members, anchor } of grouped) {
     // A catalog entry with a runner is authoritative — it knows the task.
-    const inferred = entry?.bundle ? null : runtimeForFile(anchor.file);
+    const inferred = entry?.bundle ? null : chatRuntimeFor(anchor) ?? runtimeForFile(anchor.file);
     const key = entry?.run?.requires[0] ?? inferred?.id ?? null;
     const present = members.map((m) => m.file);
     const wanted = entry?.files?.map((f) => f.name) ?? [];
@@ -2646,8 +2674,9 @@ async function refreshHub() {
       location: anchor.location ?? 'models',
       // True when no job in the app loads this repo — a forecasting model, a
       // tuner, a TTS architecture nothing here speaks. The row says so
-      // instead of leaving a runtime label that reads as usable.
-      jobless: usableRepos ? !usableRepos.has(anchor.repo) : false,
+      // instead of leaving a runtime label that reads as usable. A GGUF chat
+      // model is not jobless: the chat page's llama.cpp provider loads it.
+      jobless: anchor.llama ? false : usableRepos ? !usableRepos.has(anchor.repo) : false,
       entry: entry ?? null,
       // One model can span several files; the runner is pointed at the weights.
       file: anchor.file,
@@ -2753,7 +2782,8 @@ async function refreshHub() {
       const note = document.createElement('p');
       note.className = 'hub-group__note';
       note.textContent =
-        `${groupFiles.length} GGUF file${groupFiles.length === 1 ? '' : 's'}. Nothing to install here — llama.cpp runs these, or import one into Ollama from the chat page.`;
+        `${groupFiles.length} GGUF file${groupFiles.length === 1 ? '' : 's'}, none of them chat models. ` +
+        'Nothing to install here — these need their own program (whisper.cpp, ComfyUI).';
       const bar = document.createElement('div');
       bar.className = 'hub-group__actions';
       bar.append(note);
@@ -4925,6 +4955,24 @@ function renderLocalDownload(d, resolved) {
     meta.append(note);
   }
   row.append(meta);
+
+  // A downloaded GGUF chat model is one click from being used: the chat page's
+  // llama.cpp provider runs it, and the server already worked out the id that
+  // names it. Offered only once the runtime is installed — a button that lands
+  // on a provider that cannot start is worse than the Install button beside it.
+  const chatLink = d.llama && runtimeReady(LLAMA_CHAT_RUNTIME, catalogInstalled) ? d.llama : null;
+  if (chatLink) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-ghost btn-tiny btn-chat-model';
+    btn.textContent = 'Chat';
+    btn.title = `Start a conversation with ${chatLink.model}, run by llama.cpp on this machine`;
+    // In place, not a new tab: "Chat" means go use this model now.
+    btn.addEventListener('click', () => {
+      window.location.href = `/?provider=${encodeURIComponent(chatLink.provider)}&model=${encodeURIComponent(chatLink.model)}`;
+    });
+    top.append(btn);
+  }
 
   // Find the catalog entry for this repo, so the Run affordance and its gating
   // are the same rules the catalog uses — not a second guess written twice.

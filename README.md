@@ -43,6 +43,9 @@ Keys may come from either source:
 | Variable | Provider | Required |
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` | Ollama (local) | no, defaults to `http://localhost:11434` |
+| `LLAMACPP_PORT` | llama.cpp (local) | no, defaults to `9932` |
+| `LLAMACPP_CTX` | llama.cpp (local) | no, prompt context, defaults to `16384` |
+| `LLAMACPP_SERVER` | llama.cpp (local) | no, path to a `llama-server` binary; defaults to the pinned build this app installs |
 | `OPENAI_API_KEY` | OpenAI | for online use |
 | `OPENROUTER_API_KEY` | OpenRouter | for online use |
 | `ANTHROPIC_API_KEY` | Anthropic | for online use |
@@ -52,7 +55,10 @@ Keys may come from either source:
 | `KEYS_FILE` | — | no, defaults to `./.keys.json` |
 
 Providers without a key still appear in the dropdown, labelled *no key*. The app
-works fully offline with just Ollama.
+needs no cloud key at all: chat runs locally through Ollama, or through the
+llama.cpp runtime it installs itself — which starts with the GGUF model you
+pick (`LLAMACPP_IDLE_MS` overrides the ten-minute idle shutdown) and stops it
+again when you are done with it.
 
 ### Security
 

@@ -42,6 +42,7 @@ import {
 } from './huggingface.js';
 import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGen, releaseImageGen, IMAGE_FIELD_LABELS, MAX_PROMPT_LENGTH } from './imagegen.js';
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
+import { ggufModels, stopLlamaServer } from './llamacpp.js';
 import { allProviders, providerOrder } from './providers/index.js';
 import { discoverLocalServers, discoveredProvider, type DiscoveredServer } from './discovery.js';
 import { backendReports } from './backends.js';
@@ -198,6 +199,12 @@ app.use('/api', rateLimit);
 
 /** Lists every provider — built-in and user-added — with config state and models. */
 app.get('/api/providers', async (_req, res) => {
+  // llama.cpp's provider answers "is anything runnable?" from a cached listing
+  // of the GGUF files on this machine, and its info is read synchronously. One
+  // warm-up here keeps a freshly started server (or a fresh page load) from
+  // reporting "no models" for the first second.
+  await ggufModels().catch(() => undefined);
+
   const registry = providerRegistry();
 
   // Self-hosted servers that happen to be running on this machine. Ollama is
@@ -1516,7 +1523,19 @@ app.get('/api/hf/files', async (_req, res) => {
   // Opportunistic: clears out partials abandoned by cancelled downloads, and
   // the repo directories they leave behind.
   await pruneStalePartials().catch(() => {});
-  res.json({ files: await listDownloads() });
+  const files = await listDownloads();
+  // GGUF chat models are runnable from the chat page, and the id that names
+  // them (`Qwen3-4B-Q4_K_M`) is derived here rather than re-derived in the
+  // browser — the collision rule that qualifies two same-named files with their
+  // repo has to have exactly one implementation, or a "Chat" button leads to a
+  // model the server cannot resolve.
+  const byFile = new Map((await ggufModels().catch(() => [])).map((m) => [`${m.repo}\n${m.file}`, m]));
+  res.json({
+    files: files.map((f) => {
+      const model = byFile.get(`${f.repo}\n${f.file}`);
+      return model?.chat ? { ...f, llama: { provider: 'llamacpp', model: model.id } } : f;
+    }),
+  });
 });
 
 app.post('/api/hf/files/delete', async (req, res) => {
@@ -1881,6 +1900,24 @@ app.post('/api/chat', async (req, res) => {
   const send = (event: string, data: unknown) =>
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
+  // A local backend may need bringing up before it can answer at all — llama.cpp
+  // serves one model, so a request naming a different one starts a server with
+  // it loaded. The progress lines become transcript notices, so a multi-gigabyte
+  // load reads as work in progress, and a failure names what went wrong before
+  // any "thinking" began.
+  if (provider.prepare) {
+    try {
+      await provider.prepare(req.body.model, (line) => send('notice', { message: line }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${provider.info.id}]`, message);
+      if (!res.writableEnded) send('error', { message });
+      res.end();
+      releaseStream();
+      return;
+    }
+  }
+
   // Agent mode: the model may call tools (web search, page fetch, wiki), and
   // each call streams as its own event so the transcript can show the work.
   // A request for tools degrades to plain chat — with a notice line, never an
@@ -2013,6 +2050,11 @@ const tlsKey = process.env.TLS_KEY;
 await loadKeys();
 await loadAssignments();
 await loadCustomProviders();
+// The llama.cpp provider decides "configured" from a cached listing of the GGUF
+// files on this machine, and the boot summary below asks synchronously. Waiting
+// for one listing here keeps a machine that has the runtime and the models from
+// being reported as missing them on the very page load that follows.
+await ggufModels().catch(() => undefined);
 
 const server =
   tlsCert && tlsKey
@@ -2071,9 +2113,13 @@ server.listen(port, host, () => {
 // the manager's Stop all button does it. The wait before exiting is for the
 // SIGKILL fallback inside stopProcess, whose timer would otherwise die with
 // this process before it ever fires.
+//
+// The managed llama-server goes the same way, for the same reason plus one more:
+// it holds a model's weights in RAM, so leaving it behind would outlive the app
+// that started it and there would be nothing left to ask it to stop.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
-    void stopAllProcesses().then((stopped) => {
+    void Promise.all([stopAllProcesses(), stopLlamaServer()]).then(([stopped]) => {
       if (stopped > 0) setTimeout(() => process.exit(0), 4200);
       else process.exit(0);
     });

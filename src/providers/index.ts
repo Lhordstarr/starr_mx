@@ -1,6 +1,7 @@
 import { anthropic } from './anthropic.js';
 import { customApiKey, listCustomProviders } from './custom.js';
 import { gemini } from './gemini.js';
+import { llamacpp } from './llamacpp.js';
 import { ollama } from './ollama.js';
 import { openAICompatible } from './openai-compat.js';
 import type { BuiltinProviderId, Provider, ProviderId } from './types.js';
@@ -38,6 +39,7 @@ export const groq = openAICompatible({
 /** The providers compiled into the app. */
 export const builtinProviders: Record<BuiltinProviderId, Provider> = {
   ollama,
+  llamacpp,
   openai,
   openrouter,
   anthropic,
@@ -48,6 +50,7 @@ export const builtinProviders: Record<BuiltinProviderId, Provider> = {
 /** Display order for the built-ins, local first. */
 export const builtinOrder: BuiltinProviderId[] = [
   'ollama',
+  'llamacpp',
   'openai',
   'openrouter',
   'anthropic',

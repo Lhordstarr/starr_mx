@@ -4,6 +4,7 @@ import type { ToolDefinition } from '../tools.js';
 /** Ids of the providers compiled into the app. */
 export type BuiltinProviderId =
   | 'ollama'
+  | 'llamacpp'
   | 'openai'
   | 'openrouter'
   | 'anthropic'
@@ -116,8 +117,21 @@ export type ListModelsFn = () => Promise<string[]>;
  */
 export type ListVisionModelsFn = () => Promise<string[]>;
 
-/** Speech-to-text. Optional: only providers with a transcription API expose it. */
+/**
+ * Speech-to-text. Optional: only providers with a transcription API expose it.
+ */
 export type TranscribeFn = (opts: TranscribeOptions) => Promise<string>;
+
+/**
+ * Gets a local backend ready to answer a specific model, narrating what it is
+ * doing.
+ *
+ * Only llama.cpp needs this today: it serves one model at a time, so a request
+ * for a different one means starting a server with it loaded — seconds of work
+ * that must not look like a hang. Providers that are always ready simply omit
+ * it, and the chat calls it when it is there.
+ */
+export type PrepareFn = (model: string, onProgress: (line: string) => void) => Promise<void>;
 
 /** Narration-only hint shown in the UI. */
 export const NO_STT = 'This provider has no speech-to-text API';
@@ -138,6 +152,11 @@ export interface Provider {
   transcribe?: TranscribeFn;
   /** Transcription-capable models, discovered from the provider's own list. */
   listSttModels?: ListModelsFn;
+  /**
+   * Present when a request may need something started first (llama.cpp has to
+   * load the chosen model). Called before the stream begins.
+   */
+  prepare?: PrepareFn;
   /**
    * Models known to accept image attachments. Optional, and may legitimately
    * return [] to mean "this provider tells us nothing".
