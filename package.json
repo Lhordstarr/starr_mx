@@ -16,6 +16,7 @@
     "test:ui-tools": "node scripts/ui-tools-selftest.mjs",
     "test:ollama-models": "tsx scripts/ollama-models-selftest.ts",
     "test:processes": "tsx scripts/processes-selftest.ts",
+    "test:process-poll": "node scripts/process-poll-selftest.mjs",
     "test:hf": "tsx scripts/hf-selftest.ts",
     "test:runnable": "tsx scripts/runnable-selftest.ts",
     "test:runtimes": "tsx scripts/runtimes-selftest.ts"

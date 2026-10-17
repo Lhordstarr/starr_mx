@@ -897,9 +897,29 @@ let runtimesCache: unknown = null;
 let runtimesCacheAt = 0;
 const RUNTIMES_CACHE_TTL = 30_000;
 
+/**
+ * Frees the one-install lock and drops the cached status with it.
+ *
+ * Both halves belong together: a cached payload that says "busy" outlives the
+ * install that set it, and the button that reads it stays disabled.
+ */
+function releaseInstallLock() {
+  runtimeBusy = false;
+  runtimesCache = null;
+}
+
 app.get('/api/runtimes', async (_req, res) => {
   if (runtimesCache && Date.now() - runtimesCacheAt < RUNTIMES_CACHE_TTL) {
-    res.json(runtimesCache);
+    // `busy` is the one field that must never be cached. It is what disables
+    // the install button, and a stale "not busy" from before an install started
+    // re-enables it mid-install — so a second click lands on the server while
+    // the first install still holds the lock, and the answer is "already
+    // running on the server" for an install the user never started twice.
+    const cached = runtimesCache as { runtimes?: { busy?: boolean } };
+    res.json({
+      ...cached,
+      runtimes: { ...cached.runtimes, busy: runtimeBusy },
+    });
     return;
   }
   const status = await runtimeStatus(runtimeBusy);
@@ -1090,14 +1110,22 @@ app.post('/api/runtimes/install', async (req, res) => {
       },
     });
     const status = await runtimeStatus(false);
+    // Released before the completion is announced, not after. The browser
+    // re-reads the runtime status the moment it sees `done` — that read is what
+    // puts the Install button back — and while the lock was still held it read
+    // "busy" and left the button saying "Installing…" with nothing left
+    // running. The window was milliseconds wide, which is why it looked random.
+    releaseInstallLock();
     finishTransfer(installId, 'done');
     send('done', { runtimes: status });
   } catch (err) {
+    releaseInstallLock();
     finishTransfer(installId, 'error', (err as Error).message);
     send('error', { message: (err as Error).message });
   } finally {
-    runtimeBusy = false;
-    runtimesCache = null;
+    // Idempotent safety net: the lock must never outlive the install, whatever
+    // path it left by.
+    releaseInstallLock();
     if (!clientGone()) res.end();
   }
 });

@@ -1502,9 +1502,7 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
   let code: number;
   try {
     code = await new Promise<number>((resolve) => {
-      const [cmd, cmdArgs] = escalating
-        ? ['sudo', ['-S', '-p', '', ...recipe.cmd, ...recipe.args]]
-        : [recipe.cmd[0], recipe.args];
+      const { cmd, args: cmdArgs } = ollamaCommand(recipe, escalating);
       const child: ReturnType<typeof spawn> = spawn(cmd, cmdArgs, {
         stdio: escalating ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
       });
@@ -1535,7 +1533,7 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
       child.on('error', (err) => {
         const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
         emit(
-          missing && recipe.cmd[0] === 'brew'
+          missing && recipe.argv[0] === 'brew'
             ? 'Homebrew is not installed on this machine.'
             : `Could not start the installer: ${err.message}`,
         );
@@ -1573,7 +1571,7 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
   if (code !== 0) {
     // A missing Homebrew is the difference between "this will never work" and
     // "install this one thing first", and the log line above only half says it.
-    if (recipe.cmd[0] === 'brew' && /Homebrew is not installed/.test(tail)) {
+    if (recipe.argv[0] === 'brew' && /Homebrew is not installed/.test(tail)) {
       throw new Error(
         'Homebrew is not installed, and macOS installs Ollama through it. ' +
           'Install Homebrew from https://brew.sh, then install this again.',
@@ -1584,27 +1582,38 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
   onProgress('Ollama installed. Start it with `ollama serve` if the daemon is not already running.');
 }
 
-/** How to install Ollama on this OS, as the vendor documents it. */
+/**
+ * How to install Ollama on this OS, as the vendor documents it.
+ *
+ * `argv` is the whole argument vector, not a command with its own trailing
+ * arguments: the exact same vector is used both bare and behind `sudo`, and
+ * splitting it in two is how `sh -c` ended up being dropped — which made the
+ * installer run `sh "curl … | sh"` and fail with "cannot open …: No such
+ * file" instead of installing anything.
+ */
 export function ollamaRecipe(
   platform: NodeJS.Platform = process.platform,
-):
-  | { shown: string; cmd: string[]; args: string[]; needsRoot: boolean }
-  | null {
+): { shown: string; argv: string[]; needsRoot: boolean } | null {
   if (platform === 'win32') {
     // The vendor's own PowerShell one-liner. It installs per-user, so it does
     // not need an elevated prompt.
     return {
       shown: 'irm https://ollama.com/install.ps1 | iex',
-      cmd: ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command'],
-      args: ['irm https://ollama.com/install.ps1 | iex'],
+      argv: [
+        'powershell.exe',
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'irm https://ollama.com/install.ps1 | iex',
+      ],
       needsRoot: false,
     };
   }
   if (platform === 'darwin') {
     return {
       shown: 'brew install ollama',
-      cmd: ['brew'],
-      args: ['install', 'ollama'],
+      argv: ['brew', 'install', 'ollama'],
       // Homebrew refuses to run as root, so escalating here would break it
       // rather than help it. If brew still needs help the user is told the
       // command to run in a terminal.
@@ -1614,12 +1623,26 @@ export function ollamaRecipe(
   if (platform === 'linux') {
     return {
       shown: 'curl -fsSL https://ollama.com/install.sh | sh',
-      cmd: ['sh', '-c'],
-      args: ['curl -fsSL https://ollama.com/install.sh | sh'],
+      argv: ['sh', '-c', 'curl -fsSL https://ollama.com/install.sh | sh'],
       needsRoot: true,
     };
   }
   return null;
+}
+
+/**
+ * The exact process to run for a recipe, with or without sudo in front.
+ *
+ * One place builds it, so the escalated and un-escalated forms cannot drift —
+ * they are the same installer, and only the wrapper differs.
+ */
+export function ollamaCommand(
+  recipe: { argv: string[] },
+  escalating: boolean,
+): { cmd: string; args: string[] } {
+  return escalating
+    ? { cmd: 'sudo', args: ['-S', '-p', '', ...recipe.argv] }
+    : { cmd: recipe.argv[0], args: recipe.argv.slice(1) };
 }
 
 /** A human name for this OS, for the install line in the log. */

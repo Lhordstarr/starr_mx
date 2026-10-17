@@ -1664,6 +1664,12 @@ document.getElementById('rt-check')?.addEventListener('click', () => void checkR
  */
 let rtLoadInFlight = null;
 
+/**
+ * Pending confirmation read for a "busy" status, so a label that may already
+ * be out of date gets checked rather than left on screen.
+ */
+let rtBusyConfirm = null;
+
 async function loadRuntimes({ force = false } = {}) {
   // Restore the saved choice once, before the first fetch, so the very first
   // request already asks for the right wheel index.
@@ -1814,6 +1820,16 @@ async function loadRuntimes({ force = false } = {}) {
     // selection looked installable.
     rtInstall.disabled = Boolean(r.busy) || rtPicked.size === 0;
     rtInstall.textContent = r.busy ? 'Installing…' : 'Install selected';
+    if (r.busy) {
+      // This read says an install is running, but it cannot say how long that
+      // has been true — the install may have finished microseconds before the
+      // server answered, in which case this label is already a lie and nothing
+      // would correct it. One confirmation read a moment later turns "believed"
+      // into "known", which is what stops the button sitting on "Installing…"
+      // with nothing behind it.
+      clearTimeout(rtBusyConfirm);
+      rtBusyConfirm = setTimeout(() => void loadRuntimes({ force: true }), 2500);
+    }
   } catch (err) {
     rtStatus.innerHTML = '';
     const p = document.createElement('p');
@@ -1950,14 +1966,18 @@ async function runRuntimeInstall(password) {
   } catch (err) {
     notifyError(err instanceof Error ? err.message : String(err));
   } finally {
-    rtInstall.disabled = false;
     rtInstall.textContent = 'Install selected';
+    // Held disabled until the refresh below says otherwise: that read knows
+    // whether an install is still running, and re-enabling the button first
+    // would leave a window where a second click starts a duplicate install —
+    // which is what the server answers with "already running on the server".
+    rtInstall.disabled = true;
     await loadRuntimes();
     // An install can turn a "needs X" note into a Run button.
     await refreshCatalogRunState();
     // The prompt stays open when it is still the useful thing to do; a closed
     // one would leave the user with a failed install and no way to retry it.
-    if (!needsPassword) rtInstall.focus();
+    if (!rtInstall.disabled && !needsPassword) rtInstall.focus();
   }
 }
 

@@ -38,6 +38,12 @@ const POLL_LIMITS: Record<string, number> = {
   // The resource box polls this from every open tab. Two tabs on the base
   // limit (30) is 40 requests a minute, so meters went stale on a coin flip.
   '/api/resources': 120,
+  // Polled once a second while the process manager is open — 60 a minute on
+  // its own, so it sat permanently over the base limit of 30. Thirty seconds
+  // after opening the manager it started answering 429 and the list simply
+  // stopped updating, which reads as the pop-out hanging. It is the same
+  // endpoint /api/transfers was given room for.
+  '/api/processes': 240,
 };
 
 /**
