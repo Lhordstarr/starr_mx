@@ -102,8 +102,9 @@ body {
 .brand-starr {
   font-size: 15px;
   font-weight: 800;
-  letter-spacing: 2px;
-  margin-right: -2px; /* the trailing gap letter-spacing adds past the R */
+  /* The letters are spaced by the literal gaps in the markup now, so no
+     letter-spacing is wanted here -- it would only add a gap past the final R. */
+  letter-spacing: 0;
   /* --text-primary and --text-secondary, which this first used, are not tokens
      this codebase defines. Both spans then inherited the same colour, so STARR
      and Matrix came out the same weight and the wordmark had no hierarchy -- which
