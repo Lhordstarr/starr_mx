@@ -2346,7 +2346,7 @@ async function syncTransfers() {
       });
     }
     hfSyncFails = 0;
-    renderDownloads();
+    if (!hfActionInFlight) renderDownloads();
     // Anything still running keeps ticking without a page refresh — and the
     // ticker is torn down once it finishes, so an idle page holds no timer.
     if (running.length && !hfTransferTicker) {
@@ -2378,6 +2378,9 @@ let hfTransferTicker = null;
 let hfSyncFails = 0;
 
 let hfSyncPending = false;
+/** While a download button is mid-action, re-rendering the list would destroy
+ *  the button under the cursor and make the click look like it did nothing. */
+let hfActionInFlight = false;
 /** Coalesces progress re-reads so a fast download cannot spam the endpoint. */
 async function syncTransfersSoon() {
   if (hfSyncPending) return;
@@ -2497,6 +2500,7 @@ function renderDownloads() {
       pause.textContent = 'Pause';
       pause.addEventListener('click', async () => {
         pause.disabled = true;
+        hfActionInFlight = true;
         try {
           await api('/api/hf/download/cancel', {
             method: 'POST',
@@ -2507,7 +2511,9 @@ function renderDownloads() {
         } catch (err) {
           notifyError(err instanceof Error ? err.message : String(err));
         } finally {
+          hfActionInFlight = false;
           pause.disabled = false;
+          renderDownloads();
         }
       });
       top.append(pause);
@@ -2520,6 +2526,7 @@ function renderDownloads() {
       cancel.textContent = 'Cancel';
       cancel.addEventListener('click', async () => {
         cancel.disabled = true;
+        hfActionInFlight = true;
         try {
           await api('/api/hf/download/cancel', {
             method: 'POST',
@@ -2534,7 +2541,9 @@ function renderDownloads() {
         } catch (err) {
           notifyError(err instanceof Error ? err.message : String(err));
         } finally {
+          hfActionInFlight = false;
           cancel.disabled = false;
+          renderDownloads();
         }
       });
       top.append(cancel);
@@ -2550,6 +2559,7 @@ function renderDownloads() {
       resume.textContent = errored ? 'Retry' : 'Resume';
       resume.addEventListener('click', async () => {
         resume.disabled = true;
+        hfActionInFlight = true;
         resume.textContent = '…';
         try {
           const endpoint = g.files.length === 1 ? '/api/hf/download' : '/api/hf/download-repo';
@@ -2562,13 +2572,17 @@ function renderDownloads() {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body),
           });
+          // Give the server a moment to register the new transfer before polling.
+          await new Promise((r) => setTimeout(r, 300));
           await syncTransfers();
           await syncDerived();
         } catch (err) {
           notifyError(err instanceof Error ? err.message : String(err));
         } finally {
+          hfActionInFlight = false;
           resume.disabled = false;
           resume.textContent = errored ? 'Retry' : 'Resume';
+          renderDownloads();
         }
       });
       top.append(resume);
@@ -4794,15 +4808,7 @@ function renderHfDownload(d) {
   del.className = 'btn-ghost btn-del-file';
   del.textContent = 'Delete';
   del.addEventListener('click', async () => {
-    if (del.dataset.armed !== '1') {
-      del.dataset.armed = '1';
-      del.textContent = 'Sure?';
-      setTimeout(() => {
-        del.dataset.armed = '';
-        del.textContent = 'Delete';
-      }, 2600);
-      return;
-    }
+    if (!window.confirm(`Delete ${d.file} from this machine?`)) return;
     del.disabled = true;
     try {
       const res = await fetch('/api/hf/files/delete', {
@@ -4815,8 +4821,6 @@ function renderHfDownload(d) {
       await refreshHfFiles();
     } catch (err) {
       del.disabled = false;
-      del.dataset.armed = '';
-      del.textContent = 'Delete';
       notifyError(err instanceof Error ? err.message : String(err));
     }
   });
