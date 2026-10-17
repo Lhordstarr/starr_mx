@@ -1005,6 +1005,9 @@ function driverLog(line) {
 /** Runs the installer. `apply` is the only choice, so nothing user-supplied
  *  reaches the command line. */
 async function runDriverInstaller(apply, password) {
+  // Fresh run from a button press: it has not supplied a password yet, so a
+  // privilege request from the server is allowed to open the prompt.
+  driverPassTried = Boolean(password);
   if (!rtUpdateDrivers) return;
   const label = rtUpdateDrivers.querySelector('span');
   const was = label?.textContent;
@@ -1044,9 +1047,19 @@ async function runDriverInstaller(apply, password) {
         if (payload.line) driverLog(payload.line);
         else if (payload.message) driverLog(payload.message);
         else if (payload.command) {
-          driverLog('');
-          driverLog('Run this in a terminal, where it can ask for your password:');
-          driverLog(`  ${payload.command}`);
+          // The server reached the point where it needed a password and had
+          // none. This is the only thing that should ever open the prompt:
+          // an install that never needs root (a cached sudo, a passwordless
+          // account, a no-op) just finishes without asking.
+          driverLog('That step needs your password.');
+          if (driverPassTried) {
+            // Already supplied one and it still asked: the password was
+            // wrong or sudo is refusing non-interactively. Don't loop.
+            driverLog('It is still asking for a password — run this in a terminal to see why:');
+            driverLog(`  ${payload.command}`);
+          } else {
+            openPassPrompt();
+          }
         }
       }
     }
@@ -1060,6 +1073,19 @@ async function runDriverInstaller(apply, password) {
     if (label) label.textContent = was ?? 'Update GPU drivers';
   }
 }
+
+/**
+ * Whether the current driver-install run has already offered (or supplied) a
+ * password, so a second privilege request does not re-open the prompt forever.
+ */
+let driverPassTried = false;
+
+/**
+ * What the password prompt currently does with what it collects, and which
+ * button Escape should hand focus back to.
+ */
+let passPromptRun = null;
+let passPromptReturn = null;
 
 const rtPass = document.getElementById('rt-pass');
 const rtPassInput = document.getElementById('rt-pass-input');
@@ -1075,12 +1101,20 @@ function closePassPrompt() {
 /**
  * Opens the prompt. The password is collected here rather than in the terminal
  * because the installer needs root and a server has no terminal to ask on.
+ *
+ * `run` is what the password is handed to. It is passed in rather than assumed
+ * because two different installers ask for one — the GPU driver update and a
+ * runtime install that turns out to need root — and a box wired to the wrong
+ * one would send the password to the wrong command.
  */
-function openPassPrompt() {
+function openPassPrompt(run, returnTo) {
+  passPromptRun = run ?? ((value) => runDriverInstaller(true, value || undefined));
+  passPromptReturn = returnTo ?? (run ? null : rtUpdateDrivers);
   if (!rtPass) {
-    // No prompt available (should not happen): fall back to the old path,
-    // which reports the command instead of pretending it can install.
-    void runDriverInstaller(true, undefined);
+    // No prompt in the DOM: this build cannot ask, and starting over without a
+    // password would just ask again. Say where to type it instead.
+    rtLogBody.textContent +=
+      'This build cannot ask for a password. Run the command above in a terminal.\n';
     return;
   }
   rtPass.hidden = false;
@@ -1095,8 +1129,9 @@ rtPassCancel?.addEventListener('click', closePassPrompt);
  */
 async function submitPassPrompt() {
   const value = rtPassInput?.value ?? '';
+  const run = passPromptRun ?? ((v) => runDriverInstaller(true, v || undefined));
   closePassPrompt();
-  await runDriverInstaller(true, value.length ? value : undefined);
+  await run(value.length ? value : undefined);
 }
 
 rtPassGo?.addEventListener('click', () => void submitPassPrompt());
@@ -1107,24 +1142,26 @@ rtPassInput?.addEventListener('keydown', (ev) => {
     void submitPassPrompt();
   } else if (ev.key === 'Escape') {
     closePassPrompt();
-    rtUpdateDrivers?.focus();
+    (passPromptReturn ?? rtUpdateDrivers)?.focus();
   }
 });
 
 rtUpdateDrivers?.addEventListener('click', async () => {
-  // First press explains, second opens the prompt. A button that installs
-  // system packages should never be the thing you hit by aiming slightly
-  // high, and it should never be one click from running anything.
+  // First press explains, second starts it. A button that installs system
+  // packages should never be the thing you hit by aiming slightly high.
   if (rtUpdateDrivers.dataset.armed !== '1') {
     rtUpdateDrivers.dataset.armed = '1';
     driverLog('This will install or update GPU drivers using your package manager,');
-    driverLog('and add your user to the video and render groups. It needs root.');
+    driverLog('and add your user to the video and render groups. Some steps need root.');
     driverLog('');
     driverLog('Press "Update GPU drivers" again to continue.');
     return;
   }
   delete rtUpdateDrivers.dataset.armed;
-  openPassPrompt();
+  // Start without a password. The installer only asks when a step actually
+  // needs root, and the server tells us that when it happens — so the prompt
+  // appears then, not on every install.
+  await runDriverInstaller(true);
 });
 
 /* ---------------- Backend report ----------------
@@ -1786,23 +1823,85 @@ async function loadRuntimes({ force = false } = {}) {
   }
 }
 
-rtInstall.addEventListener('click', async () => {
-  if (!rtPicked.size) {
+rtInstall.addEventListener('click', () => void runRuntimeInstall());
+
+/**
+ * What the current (or last) install was asked to install, so a retry after a
+ * password prompt installs the same selection even if the list re-rendered.
+ */
+let pendingInstallGroups = [];
+
+/**
+ * Waits for the server's install lock to clear.
+ *
+ * One install at a time is deliberate — pip into the same venv from two
+ * processes is the corruption the lock prevents — so a retry that arrives
+ * before the previous attempt has finished is told to wait rather than to
+ * give up. Bounded: after this the answer is genuinely no.
+ */
+async function waitForInstallIdle(timeoutMs = 20000) {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    try {
+      const data = await fetch('/api/runtimes').then((r) => r.json());
+      if (!data?.runtimes?.busy) return true;
+    } catch {
+      // Cannot tell; assume idle rather than block the user on a guess.
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return false;
+}
+
+/**
+ * Installs the picked runtime groups, streaming the log.
+ *
+ * `password` is only ever non-undefined when an installer on the previous
+ * attempt actually asked for one. Nothing here prompts for a password up
+ * front: pip installs need none, and on macOS and Windows the Ollama install
+ * needs none either, so an install that never needs root never shows a box
+ * asking for a password nobody is going to give it.
+ */
+async function runRuntimeInstall(password) {
+  // The groups being installed, held outside the picker on purpose. A failed
+  // attempt re-renders the list, which un-ticks anything already installed —
+  // so by the time the password prompt is answered the selection can be empty
+  // and the retry would install nothing. The retry installs what the user
+  // asked for, not whatever the list happens to hold afterwards.
+  const groups = rtPicked.size ? [...rtPicked] : pendingInstallGroups;
+  if (!groups.length) {
     notifyWarning('Pick at least one runtime first');
     return;
   }
+  pendingInstallGroups = groups;
   rtInstall.disabled = true;
   rtInstall.textContent = 'Installing…';
   rtLog.hidden = false;
-  rtLogBody.textContent = '';
+  rtLogBody.textContent += password ? 'Retrying with your password…\n' : '';
   rtLog.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
+  // Set only after the server asks. A second ask means the password was
+  // refused or sudo will not run non-interactively, and asking again in a
+  // loop would trap the user in a dialog they cannot leave.
+  let privilegeAsked = Boolean(password);
+  let needsPassword = false;
+
   try {
-    const res = await fetch('/api/runtimes/install', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ groups: [...rtPicked], device: rtDevice }),
-    });
+    const post = () =>
+      fetch('/api/runtimes/install', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ groups, device: rtDevice, password }),
+      });
+    let res = await post();
+    if (res.status === 409 && password) {
+      // The attempt that asked for the password is still tearing down and
+      // still holding the one install lock. It releases in milliseconds, so
+      // wait for it rather than telling the user their password did nothing.
+      await waitForInstallIdle();
+      res = await post();
+    }
     if (!res.ok || !res.body) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error ?? `HTTP ${res.status}`);
@@ -1813,7 +1912,6 @@ rtInstall.addEventListener('click', async () => {
     if ((res.headers.get('content-type') ?? '').includes('application/json')) {
       const data = await res.json();
       if (data.attached) {
-        rtInstall.disabled = false;
         rtInstall.textContent = 'Install selected';
         rtLogBody.textContent +=
           'Already running on the server — watch it on the Downloads page.\n';
@@ -1826,6 +1924,15 @@ rtInstall.addEventListener('click', async () => {
     await sseStream(res.body, async (event, parsed) => {
       if (event === 'progress') {
         rtLogBody.textContent += `${parsed}\n`;
+      } else if (event === 'privilege') {
+        // An installer really did hit a password prompt. This is the only
+        // thing in the app that opens the box for a runtime install.
+        rtLogBody.textContent += `This step needs your password: ${parsed.command}\n`;
+        needsPassword = true;
+        if (!privilegeAsked) {
+          privilegeAsked = true;
+          openPassPrompt((value) => runRuntimeInstall(value || undefined), rtInstall);
+        }
       } else if (event === 'error') {
         throw new Error(parsed.message);
       } else if (event === 'done') {
@@ -1834,6 +1941,7 @@ rtInstall.addEventListener('click', async () => {
         for (const id of Object.keys(parsed.runtimes?.installed ?? {})) {
           if (parsed.runtimes.installed[id]) rtPicked.delete(id);
         }
+        pendingInstallGroups = [];
         notifySuccess('Runtimes installed');
         // The list just changed underneath us; re-read rather than guess.
         await loadRuntimes({ force: true });
@@ -1842,11 +1950,16 @@ rtInstall.addEventListener('click', async () => {
   } catch (err) {
     notifyError(err instanceof Error ? err.message : String(err));
   } finally {
+    rtInstall.disabled = false;
+    rtInstall.textContent = 'Install selected';
     await loadRuntimes();
     // An install can turn a "needs X" note into a Run button.
     await refreshCatalogRunState();
+    // The prompt stays open when it is still the useful thing to do; a closed
+    // one would leave the user with a failed install and no way to retry it.
+    if (!needsPassword) rtInstall.focus();
   }
-});
+}
 
 // Two-step, like the delete guards elsewhere: an accidental click must not
 // take out a multi-gigabyte environment.

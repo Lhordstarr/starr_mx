@@ -30,19 +30,33 @@ export interface DriverRunOptions {
 
 const SCRIPT = path.resolve(process.cwd(), 'scripts/install-gpu-drivers.sh');
 
-/** Patterns that mean "this stopped because it wanted a password". */
 /**
  * Strips CSI/OSC colour codes. The script colours its output for a terminal;
  * in a browser those bytes arrive as literal "^[1m" text on screen.
  */
 const ANSI = /\u001b\][^\u0007]*\u0007|\u001b\[[0-9;]*[A-Za-z]|\u001b[@-Z\\-_]/g;
 
+/** Patterns that mean "this stopped because it wanted a password". */
 const PRIVILEGE_HINTS = [
   /a terminal is required to read the password/i,
   /sudo:\s*no tty present/i,
   /ask for a password/i,
+  /a password is required/i,
   /permission denied/i,
 ];
+
+/**
+ * Did an install stop because it wanted a password it had no way to get?
+ *
+ * Shared with the runtime installers (Ollama's vendor script can hit the same
+ * wall) so both report the same thing about the same situation instead of
+ * drifting apart: a process with no terminal cannot answer a `sudo` prompt,
+ * and saying "the installer failed" for that sends the user looking for a
+ * broken script rather than a missing password.
+ */
+export function needsPrivilege(output: string): boolean {
+  return PRIVILEGE_HINTS.some((re) => re.test(output));
+}
 
 export async function runDriverInstaller(opts: DriverRunOptions): Promise<void> {
   const args = opts.apply ? ['--yes'] : [];
@@ -140,7 +154,7 @@ export async function runDriverInstaller(opts: DriverRunOptions): Promise<void> 
     return;
   }
 
-  if (opts.apply && code !== 0 && PRIVILEGE_HINTS.some((re) => re.test(tail))) {
+  if (opts.apply && code !== 0 && needsPrivilege(tail)) {
     // Not a failure of the script — a failure of the context. Saying "the
     // installer failed" here would send the user looking for a broken script
     // instead of a missing password.

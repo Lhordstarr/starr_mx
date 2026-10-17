@@ -23,6 +23,8 @@
  * newest compatible interpreter this machine has.
  */
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { needsPrivilege } from './drivers.js';
 import { readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -239,11 +241,14 @@ export const RUNTIME_GROUPS: RuntimeGroup[] = [
     probe: 'ollama',
     label: 'Ollama',
     blurb:
-      'The model server itself, and the only way to run chat models here. Installs the official Linux installer; it needs root and is skipped on non-Linux hosts.',
+      'The model server itself, and the only way to run chat models here. ' +
+      'Installs Ollama the way this OS does it — the vendor script on Linux ' +
+      '(which asks for your password), Homebrew on macOS, the vendor ' +
+      'PowerShell script on Windows.',
     unlocks: ['text'],
-    // Not a pip package: Ollama ships its own installer script. Kept here so
+    // Not a pip package: Ollama ships its own installer. Kept here so
     // everything the app needs appears in one list, but `pkgs` is empty and
-    // installRuntimes routes it through the vendor script instead.
+    // installRuntimes routes it through the vendor installer instead.
     pkgs: [],
     needsTorch: false,
     approxMB: 1500,
@@ -1009,14 +1014,46 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-/** Is the ollama binary present? The daemon may run without it, but without
- *  the CLI there is nothing to install from and nothing to point at. */
+/**
+ * Is the ollama binary present? The daemon may run without it, but without
+ * the CLI there is nothing to install from and nothing to point at.
+ *
+ * Every OS is checked honestly. This used to answer "yes" on macOS and Windows
+ * so the runtime would not offer an install it could not perform — which meant
+ * the row read as installed on a machine that had never heard of Ollama, and
+ * there was no way to fix it from inside the app.
+ */
 async function ollamaInstalled(): Promise<boolean> {
-  if (process.platform !== 'linux') return true; // macOS/Windows come via the app
+  if (process.platform === 'win32') {
+    // The Windows installer drops the CLI in the per-user programs folder and
+    // nowhere else, so PATH is not a reliable answer here.
+    const exe = path.join(
+      process.env.LOCALAPPDATA ?? path.join(homedir(), 'AppData', 'Local'),
+      'Programs',
+      'Ollama',
+      'ollama.exe',
+    );
+    if (await exists(exe)) return true;
+    return onPath('ollama.exe');
+  }
+  // Homebrew's prefix is not always on PATH for a process the user never
+  // logged in with, and that is exactly where `brew install ollama` puts it.
+  for (const dir of ['/usr/local/bin/ollama', '/opt/homebrew/bin/ollama', '/usr/bin/ollama']) {
+    if (await exists(dir)) return true;
+  }
+  return onPath('ollama');
+}
+
+/** True when `name` resolves on this machine's PATH, by spawning `which`. */
+function onPath(name: string): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const child = spawn('sh', ['-c', 'command -v ollama'], { stdio: 'ignore' });
-    child.on('error', () => resolve(false));
-    child.on('close', (code) => resolve(code === 0));
+    const done = (ok: boolean) => resolve(ok);
+    const child: ChildProcess =
+      process.platform === 'win32'
+        ? spawn('where', [name], { stdio: 'ignore' })
+        : spawn('sh', ['-c', `command -v ${name}`], { stdio: 'ignore' });
+    child.on('error', () => done(false));
+    child.on('close', (code) => done(code === 0));
   });
 }
 
@@ -1234,12 +1271,43 @@ export async function ensureVenv(
     child.stderr.on('data', (d) => (err += d));
     child.on('error', reject);
     child.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(`python -m venv failed: ${err.trim().slice(0, 300)}`)),
+      code === 0 ? resolve() : reject(new Error(describeVenvFailure(err))),
     );
   });
   if (!(await exists(venvPython(name)))) throw new Error('The environment was created but has no interpreter.');
   venvVersions.delete(name);
   invalidateRuntimeProbes();
+}
+
+/**
+ * Turns a failed `python -m venv` into something the user can act on.
+ *
+ * The stock failure on a fresh Ubuntu names ensurepip and nothing else, which
+ * sends the user to a Python bug rather than the package they are missing:
+ * Ubuntu and Debian split the venv module and ensurepip into `python3-venv`,
+ * which a minimal install does not pull in. So the known causes get the exact
+ * package, and anything else keeps the interpreter's own message, which is more
+ * use than a guess would be.
+ */
+export function describeVenvFailure(stderr: string): string {
+  const text = stderr.trim();
+  if (/\bensurepip\b/i.test(text)) {
+    return (
+      'This Python cannot create environments — the venv module is missing. ' +
+      'On Ubuntu/Debian: sudo apt install python3-venv (or python3.<version>-venv, ' +
+      'to match this interpreter)   ' +
+      '(Fedora: sudo dnf install python3-libs; Arch: sudo pacman -S python). ' +
+      'Then install the runtime again.'
+    );
+  }
+  if (/No module named venv/i.test(text)) {
+    return (
+      'This Python was built without the venv module. ' +
+      'On Ubuntu/Debian: sudo apt install python3-venv, or point RUNTIMES_PYTHON at ' +
+      'another interpreter that has it.'
+    );
+  }
+  return `python -m venv failed: ${text.slice(0, 300)}`;
 }
 
 /**
@@ -1275,7 +1343,30 @@ export interface InstallOpts {
   groups: RuntimeGroup[];
   device: Device;
   onProgress: (line: string) => void;
+  /**
+   * The user's password, used once to satisfy `sudo` and never kept.
+   *
+   * Reaches the child on stdin only, never argv — argv is world-readable
+   * through `ps`. Optional, because almost nothing a runtime install does
+   * needs root: it is read only when an installer actually asks.
+   */
+  password?: string;
+  /** Called when an installer needs root it could not get on its own. */
+  onNeedsPrivilege?: (command: string) => void;
 }
+
+/** The one part of InstallOpts a single installer needs to see. */
+type PrivilegedInstall = Pick<InstallOpts, 'onProgress' | 'password' | 'onNeedsPrivilege'>;
+
+/**
+ * Did an install stop because it wanted a password it had no way to get?
+ *
+ * Re-exported from the driver installer rather than re-listed here: both paths
+ * hit the same wall (no terminal to type into), and two copies of the pattern
+ * list would drift into disagreeing about what counts.
+ */
+export { needsPrivilege } from './drivers.js';
+
 
 /**
  * Installs the given groups into their venvs, torch first when anything needs
@@ -1287,7 +1378,13 @@ export interface InstallOpts {
  * gets one built on an interpreter its bound allows before anything is
  * installed into it.
  */
-export async function installRuntimes({ groups, device, onProgress }: InstallOpts): Promise<void> {
+export async function installRuntimes({
+  groups,
+  device,
+  onProgress,
+  password,
+  onNeedsPrivilege,
+}: InstallOpts): Promise<void> {
   // The shared venv is the baseline, so it exists from the first install on.
   await ensureVenv('venv', undefined, onProgress);
 
@@ -1347,7 +1444,7 @@ export async function installRuntimes({ groups, device, onProgress }: InstallOpt
     for (const g of list) {
       if (g.id === 'torch') continue;
       if (g.installer === 'ollama') {
-        await installOllama(onProgress);
+        await installOllama({ onProgress, password, onNeedsPrivilege });
         continue;
       }
       if (g.installer === 'llama-cpp') {
@@ -1366,38 +1463,171 @@ export async function installRuntimes({ groups, device, onProgress }: InstallOpt
 }
 
 /**
- * Ollama's official Linux installer. It needs root, so this is deliberately the
- * one path that can escalate — and it says so on the line before it runs. Pip
- * installs never do this, which is why this is separate rather than a pkgs entry.
+ * Ollama's own installer, run the way this OS does it.
+ *
+ * Deliberately not a pkgs entry: Ollama is not a Python package, it ships an
+ * installer, and on Linux that installer wants root. It is the only runtime
+ * that can escalate, so it is also the only one that can ask for a password —
+ * and it does that only when the step actually needs one.
  */
-async function installOllama(onProgress: (line: string) => void): Promise<void> {
-  if (process.platform !== 'linux') {
-    throw new Error('The bundled installer is Linux-only. Download Ollama for this OS instead.');
-  }
+async function installOllama(opts: PrivilegedInstall): Promise<void> {
+  const { onProgress, password, onNeedsPrivilege } = opts;
   if (await ollamaInstalled()) {
     onProgress('Ollama is already installed.');
     return;
   }
-  const script = 'https://ollama.com/install.sh';
-  onProgress('Installing Ollama (this needs sudo, and runs the vendor installer)…');
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn('sh', ['-c', `curl -fsSL ${script} | sh`], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const bump = (b: Buffer) => {
-      for (const line of b.toString().split(/\r?\n/)) if (line.trim()) onProgress(line.trim());
-    };
-    child.stdout.on('data', bump);
-    child.stderr.on('data', bump);
-    child.on('error', reject);
-    child.on('close', (code) =>
-      code === 0
-        ? resolve()
-        : reject(new Error(`The Ollama installer exited ${code} — see the log above.`)),
+  const recipe = ollamaRecipe();
+  if (!recipe) {
+    // Nothing to run on this OS. Say so with the vendor's own instructions
+    // rather than a dead end.
+    throw new Error(
+      'There is no scripted Ollama installer for this OS. Download it from ' +
+        'https://ollama.com/download and re-check this page.',
     );
-  });
+  }
+
+  // A password is only ever offered for a step that genuinely needs root. On
+  // macOS and Windows the installer runs as the user, so there is nothing to
+  // ask for and the prompt never opens.
+  const elevates = recipe.needsRoot;
+  onProgress(`Installing Ollama on ${platformLabel()} — ${recipe.shown}…`);
+
+  const scrub = (text: string) =>
+    password && password.length >= 3 ? text.split(password).join('[redacted]') : text;
+  // Whether sudo is on the other end of the pipe decides stdin: a password has
+  // to be written, anything else is told to ignore input.
+  const escalating = Boolean(password && elevates);
+  let tail = '';
+  let code: number;
+  try {
+    code = await new Promise<number>((resolve) => {
+      const [cmd, cmdArgs] = escalating
+        ? ['sudo', ['-S', '-p', '', ...recipe.cmd, ...recipe.args]]
+        : [recipe.cmd[0], recipe.args];
+      const child: ReturnType<typeof spawn> = spawn(cmd, cmdArgs, {
+        stdio: escalating ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
+      });
+      if (escalating) {
+        child.stdin?.on('error', () => {
+          /* sudo exited early — a wrong password does exactly that */
+        });
+        child.stdin?.end(`${password}\n`);
+      }
+      const bufs: Record<'out' | 'err', string> = { out: '', err: '' };
+      const pump = (stream: NodeJS.ReadableStream | null, key: 'out' | 'err') => {
+        stream?.setEncoding('utf8');
+        stream?.on('data', (c: string) => {
+          bufs[key] += c;
+          const lines = bufs[key].split('\n');
+          bufs[key] = lines.pop() ?? '';
+          for (const line of lines) emit(line);
+        });
+      };
+      const emit = (raw: string) => {
+        const text = scrub(raw.replace(/\s+$/, ''));
+        if (!text.trim()) return;
+        onProgress(text.trim());
+        tail = `${tail}\n${text}`.slice(-4000);
+      };
+      pump(child.stdout, 'out');
+      pump(child.stderr, 'err');
+      child.on('error', (err) => {
+        const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
+        emit(
+          missing && recipe.cmd[0] === 'brew'
+            ? 'Homebrew is not installed on this machine.'
+            : `Could not start the installer: ${err.message}`,
+        );
+        resolve(127);
+      });
+      child.on('close', (c) => {
+        for (const key of ['out', 'err'] as const) {
+          emit(bufs[key]);
+          bufs[key] = '';
+        }
+        resolve(c ?? 0);
+      });
+    });
+  } catch (err) {
+    throw new Error(`Could not start the Ollama installer: ${(err as Error).message}`);
+  }
+
+  if (password && /incorrect password|Sorry, try again|authentication failure/i.test(tail)) {
+    throw new Error('That password was not accepted, so nothing was changed.');
+  }
+
+  // It stopped because it wanted a password it had no way to get, not because
+  // the installer is broken. That distinction is the whole reason this checks
+  // the output rather than the exit code.
+  if (code !== 0 && needsPrivilege(tail)) {
+    const shown = `sudo ${recipe.shown}`;
+    onNeedsPrivilege?.(shown);
+    throw new Error(
+      'The Ollama installer needs root and could not elevate. ' +
+        'Supply your password to let it run, or run this in a terminal yourself: ' +
+        shown,
+    );
+  }
+
+  if (code !== 0) {
+    // A missing Homebrew is the difference between "this will never work" and
+    // "install this one thing first", and the log line above only half says it.
+    if (recipe.cmd[0] === 'brew' && /Homebrew is not installed/.test(tail)) {
+      throw new Error(
+        'Homebrew is not installed, and macOS installs Ollama through it. ' +
+          'Install Homebrew from https://brew.sh, then install this again.',
+      );
+    }
+    throw new Error(`The Ollama installer exited ${code} — see the log above.`);
+  }
   onProgress('Ollama installed. Start it with `ollama serve` if the daemon is not already running.');
+}
+
+/** How to install Ollama on this OS, as the vendor documents it. */
+export function ollamaRecipe(
+  platform: NodeJS.Platform = process.platform,
+):
+  | { shown: string; cmd: string[]; args: string[]; needsRoot: boolean }
+  | null {
+  if (platform === 'win32') {
+    // The vendor's own PowerShell one-liner. It installs per-user, so it does
+    // not need an elevated prompt.
+    return {
+      shown: 'irm https://ollama.com/install.ps1 | iex',
+      cmd: ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command'],
+      args: ['irm https://ollama.com/install.ps1 | iex'],
+      needsRoot: false,
+    };
+  }
+  if (platform === 'darwin') {
+    return {
+      shown: 'brew install ollama',
+      cmd: ['brew'],
+      args: ['install', 'ollama'],
+      // Homebrew refuses to run as root, so escalating here would break it
+      // rather than help it. If brew still needs help the user is told the
+      // command to run in a terminal.
+      needsRoot: false,
+    };
+  }
+  if (platform === 'linux') {
+    return {
+      shown: 'curl -fsSL https://ollama.com/install.sh | sh',
+      cmd: ['sh', '-c'],
+      args: ['curl -fsSL https://ollama.com/install.sh | sh'],
+      needsRoot: true,
+    };
+  }
+  return null;
+}
+
+/** A human name for this OS, for the install line in the log. */
+function platformLabel(): string {
+  if (process.platform === 'darwin') return 'macOS';
+  if (process.platform === 'win32') return 'Windows';
+  if (process.platform === 'linux') return 'Linux';
+  return process.platform;
 }
 
 /**

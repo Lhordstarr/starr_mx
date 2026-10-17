@@ -1015,6 +1015,13 @@ app.post('/api/drivers/update', async (req, res) => {
 app.post('/api/runtimes/install', async (req, res) => {
   const device = parseDevice(req.body?.device);
   const ids: unknown = req.body?.groups;
+  // Only an installer that genuinely needs root ever reads this. It arrives in
+  // the body rather than the query string (which lands in access logs) or argv
+  // (visible to every process through `ps`), goes straight to `sudo -S` on the
+  // child's stdin, and is never logged or echoed back.
+  const rawPass = req.body?.password;
+  const password =
+    typeof rawPass === 'string' && rawPass.length > 0 && rawPass.length <= 200 ? rawPass : undefined;
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ error: 'Pick at least one runtime to install.' });
   }
@@ -1068,6 +1075,11 @@ app.post('/api/runtimes/install', async (req, res) => {
     await installRuntimes({
       groups: groups as NonNullable<(typeof groups)[0]>[],
       device,
+      password,
+      // Report the need rather than failing on it: the browser only asks for a
+      // password when an installer really is stuck on one, which is the same
+      // contract the driver installer has.
+      onNeedsPrivilege: (command) => send('privilege', { command }),
       onProgress: (line) => {
         // pip's log carries its own percentage; surface it on the downloads
         // page so an install looks the same whether or not you reloaded.
