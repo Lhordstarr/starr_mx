@@ -1246,9 +1246,42 @@ export async function ensureVenv(
   onProgress: (line: string) => void,
 ): Promise<void> {
   if (await exists(venvPython(name))) {
-    onProgress('Reusing the existing environment.');
-    return;
+    // An interpreter is not an environment. A venv built without pip — a Python
+    // whose ensurepip is missing, an install that died part-way, a directory
+    // copied in from elsewhere — passes every check this function used to make,
+    // and then every single install fails with "No module named pip". So the
+    // question asked here is the one that decides whether pip can run at all.
+    if (await venvHasPip(name)) {
+      onProgress('Reusing the existing environment.');
+      return;
+    }
+    onProgress('This environment has no pip in it. Repairing it…');
+    if (await repairVenv(name, bound, onProgress, false)) {
+      venvVersions.delete(name);
+      invalidateRuntimeProbes();
+      return;
+    }
+    throw new Error(MISSING_PIP_MESSAGE);
   }
+  await createVenv(name, bound, onProgress);
+  // A freshly built environment is not automatically a working one: the very
+  // machine this came from builds a venv with no pip in it, because its Python
+  // has the venv module without the pip wheels. The build reports success; the
+  // check below is what notices.
+  if (!(await venvHasPip(name))) {
+    onProgress('The new environment has no pip in it. Repairing it…');
+    if (!(await repairVenv(name, bound, onProgress, true))) throw new Error(MISSING_PIP_MESSAGE);
+  }
+  venvVersions.delete(name);
+  invalidateRuntimeProbes();
+}
+
+/** Builds the environment from scratch. */
+async function createVenv(
+  name: string,
+  bound: string | undefined,
+  onProgress: (line: string) => void,
+): Promise<void> {
   const interpreter = await findInterpreter(bound);
   if (!interpreter) {
     throw new Error(
@@ -1264,20 +1297,135 @@ export async function ensureVenv(
       ? 'Creating the Python environment…'
       : `Creating ${name} with ${interpreter}${bound ? ` (needs Python ${bound})` : ''}…`,
   );
-  await new Promise<void>((resolve, reject) => {
-    // -m venv, not the venv console script: no activation state, no shell.
-    const child = spawn(interpreter, ['-m', 'venv', venvDir(name)], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let err = '';
-    child.stderr.on('data', (d) => (err += d));
-    child.on('error', reject);
-    child.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(describeVenvFailure(err))),
-    );
-  });
-  if (!(await exists(venvPython(name)))) throw new Error('The environment was created but has no interpreter.');
-  venvVersions.delete(name);
-  invalidateRuntimeProbes();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      // -m venv, not the venv console script: no activation state, no shell.
+      const child = spawn(interpreter, ['-m', 'venv', venvDir(name)], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let err = '';
+      child.stderr.on('data', (d) => (err += d));
+      child.on('error', reject);
+      child.on('close', (code) =>
+        code === 0 ? resolve() : reject(new Error(describeVenvFailure(err))),
+      );
+    });
+    if (!(await exists(venvPython(name)))) throw new Error('The environment was created but has no interpreter.');
+  } catch (err) {
+    /* A half-built environment is worse than none.
+     *
+     * `python -m venv` writes the directory and the interpreter before it runs
+     * ensurepip, so a Python without python3-venv fails *after* leaving
+     * something behind that passes every check this code used to make. Every
+     * later attempt then reported "Reusing the existing environment" and died
+     * with "No module named pip" — which is the exact sequence in the field log
+     * this came from, and why the original error was never seen again.
+     *
+     * Removing it means the next attempt fails the way the first one did, and
+     * says why, instead of failing somewhere unrelated much later. */
+    await rm(venvDir(name), { recursive: true, force: true });
+    throw err;
+  }
 }
+
+/**
+ * Puts pip back into an environment that has none.
+ *
+ * Two attempts, cheapest first. `ensurepip` in place keeps whatever is already
+ * there; rebuilding from scratch is the fallback for a directory that is broken
+ * in a way ensurepip will not complete inside. Rebuilding a pip-less
+ * environment cannot lose anything — pip is the only thing that ever put a
+ * package in there, so there is nothing to lose.
+ *
+ * `justBuilt` skips the rebuild: the directory was made by this code moments
+ * ago, so building it again would produce the same pip-less result. When that
+ * is true, a failure to find pip is a fact about the interpreter, not the
+ * directory, and the caller should say so instead of churning.
+ */
+async function repairVenv(
+  name: string,
+  bound: string | undefined,
+  onProgress: (line: string) => void,
+  justBuilt: boolean,
+): Promise<boolean> {
+  onProgress('Running ensurepip…');
+  const attempt = await runPython(venvPython(name), ['-m', 'ensurepip', '--upgrade'], 180_000);
+  if (attempt.code === 0 && (await venvHasPip(name))) {
+    onProgress('pip is back.');
+    return true;
+  }
+  if (justBuilt) {
+    // ensurepip is the thing that can be missing, and this interpreter has
+    // just demonstrated that it is: the same build would repeat it.
+    onProgress(
+      /No module named ensurepip/i.test(attempt.err)
+        ? 'This Python has no ensurepip, so it cannot put pip into an environment.'
+        : 'ensurepip could not finish.',
+    );
+    return false;
+  }
+  // ensurepip is itself the thing that can be missing, so say which one it was
+  // before throwing the directory away.
+  if (/No module named ensurepip/i.test(attempt.err)) {
+    onProgress(
+      'This Python has no ensurepip either, so the environment is being rebuilt — ' +
+        'anything that was installed into it is lost.',
+    );
+  } else {
+    onProgress('ensurepip could not finish. Rebuilding the environment — anything already in it is lost.');
+  }
+  await rm(venvDir(name), { recursive: true, force: true });
+  try {
+    await createVenv(name, bound, onProgress);
+  } catch (err) {
+    onProgress(`Rebuilding failed: ${(err as Error).message}`);
+    return false;
+  }
+  return venvHasPip(name);
+}
+
+/** Runs this environment's interpreter and collects everything it said. */
+function runPython(
+  python: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ code: number; out: string; err: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(python, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.stdout.on('data', (d) => (out += String(d)));
+    child.stderr.on('data', (d) => (err += String(d)));
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ code: 127, out, err: err + e.message });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? 0, out, err });
+    });
+  });
+}
+
+/** Can this environment install packages at all? */
+export async function venvHasPip(name: string): Promise<boolean> {
+  const r = await runPython(venvPython(name), ['-m', 'pip', '--version'], 60_000);
+  return r.code === 0 && /pip \d/.test(r.out);
+}
+
+/**
+ * What to tell someone whose Python cannot build a working environment.
+ *
+ * One message, used whether the failure was at creation or at repair, because
+ * it is the same missing package either way.
+ */
+const VENV_MODULE_HINT =
+  'On Ubuntu/Debian: sudo apt install python3-venv (or python3.<version>-venv, to match this interpreter)   ' +
+  '(Fedora: sudo dnf install python3-libs; Arch: sudo pacman -S python).';
+
+/** Said when there is an environment but no way to install into it. */
+export const MISSING_PIP_MESSAGE =
+  'This Python cannot install packages — the environment has no pip, and it could not be repaired. ' +
+  `${VENV_MODULE_HINT} Then install the runtime again.`;
 
 /**
  * Turns a failed `python -m venv` into something the user can act on.
@@ -1294,17 +1442,13 @@ export function describeVenvFailure(stderr: string): string {
   if (/\bensurepip\b/i.test(text)) {
     return (
       'This Python cannot create environments — the venv module is missing. ' +
-      'On Ubuntu/Debian: sudo apt install python3-venv (or python3.<version>-venv, ' +
-      'to match this interpreter)   ' +
-      '(Fedora: sudo dnf install python3-libs; Arch: sudo pacman -S python). ' +
-      'Then install the runtime again.'
+      `${VENV_MODULE_HINT} Then install the runtime again.`
     );
   }
   if (/No module named venv/i.test(text)) {
     return (
       'This Python was built without the venv module. ' +
-      'On Ubuntu/Debian: sudo apt install python3-venv, or point RUNTIMES_PYTHON at ' +
-      'another interpreter that has it.'
+      `${VENV_MODULE_HINT} Or set RUNTIMES_PYTHON to point at another interpreter.`
     );
   }
   return `python -m venv failed: ${text.slice(0, 300)}`;
@@ -1408,24 +1552,41 @@ export async function installRuntimes({
   const runPip = (py: string, args: string[], label: string) =>
     new Promise<void>((resolve, reject) => {
       const child = spawn(py, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      // Kept, not just printed. "pip exited 1" says nothing about why, and the
+      // one reason worth naming — an environment with no pip in it — is
+      // otherwise invisible to everything reading the transcript.
+      let err = '';
       const bump = (buf: Buffer) => {
         for (const line of buf.toString().split(/\r?\n/)) {
           if (line.trim()) onProgress(line.trim());
         }
       };
       child.stdout.on('data', bump);
-      child.stderr.on('data', bump);
+      child.stderr.on('data', (d: Buffer) => {
+        err += d.toString();
+        bump(d);
+      });
       child.on('error', reject);
-      child.on('close', (code) =>
-        code === 0
-          ? resolve()
-          : reject(new Error(`${label} failed (pip exited ${code}) — see the log above.`)),
-      );
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        if (/No module named pip/i.test(err)) {
+          reject(new Error(MISSING_PIP_MESSAGE));
+          return;
+        }
+        reject(new Error(`${label} failed (pip exited ${code}) — see the log above.`));
+      });
     });
 
   for (const [name, list] of members) {
     const bound = list.map((g) => g.maxPython).find((b) => b) ?? undefined;
-    await ensureVenv(name, bound, onProgress);
+    // The shared environment was ensured at the top of this function. Asking
+    // again printed "Reusing the existing environment" twice for every install
+    // and, now that this check costs a subprocess, asked the same question
+    // twice as well.
+    if (name !== 'venv') await ensureVenv(name, bound, onProgress);
     const py = venvPython(name);
     const where = name === 'venv' ? 'the environment' : `${list[0].label}'s own environment`;
 

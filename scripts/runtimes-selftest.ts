@@ -17,11 +17,20 @@
  * always run.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describeVenvFailure, needsPrivilege, ollamaCommand, ollamaRecipe } from '../src/runtimes.ts';
+import {
+  describeVenvFailure,
+  ensureVenv,
+  MISSING_PIP_MESSAGE,
+  needsPrivilege,
+  ollamaCommand,
+  ollamaRecipe,
+  venvHasPip,
+  venvPython,
+} from '../src/runtimes.ts';
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const PORT = Number(process.env.CDP_PORT ?? 9381);
@@ -67,6 +76,176 @@ section('Python environment errors');
     odd,
   );
   report('an empty failure does not become an empty error', describeVenvFailure('').length > 0);
+}
+
+/* ---- 1b. An environment with no pip in it ---- */
+section('An environment without pip');
+{
+  // The failure from the field: a venv whose interpreter exists, so every
+  // check passed and it was reported as reusable — and then every install
+  // failed with "No module named pip" and no advice.
+  report(
+    'a good environment reports that it has pip',
+    await venvHasPip('venv'),
+  );
+  report(
+    'the message names the package to install',
+    /python3-venv/.test(MISSING_PIP_MESSAGE) && /no pip/i.test(MISSING_PIP_MESSAGE),
+    MISSING_PIP_MESSAGE,
+  );
+
+  /* Both halves are exercised on throwaway environments, so nothing here can
+     touch the one the app is actually using. */
+  const saved = { dir: process.env.RUNTIMES_DIR, py: process.env.RUNTIMES_PYTHON };
+  const real = venvPython();
+
+  // a. Repairable: a real venv built without pip. ensurepip is still importable
+  //    from the interpreter, so pip comes back in place and the directory — and
+  //    anything in it — survives.
+  const repairable = mkdtempSync(join(tmpdir(), 'starr-nopip-'));
+  const built = spawnSync(real, ['-m', 'venv', '--without-pip', join(repairable, 'venv')], {
+    stdio: 'ignore',
+  });
+  report(
+    'a pip-less environment can be built to test against',
+    built.status === 0 && existsSync(join(repairable, 'venv', 'bin', 'python')),
+    `exit ${built.status}`,
+  );
+  process.env.RUNTIMES_DIR = repairable;
+  process.env.RUNTIMES_PYTHON = real;
+  report('the test environment really has no pip', (await venvHasPip('venv')) === false);
+  const said: string[] = [];
+  let repairError = '';
+  try {
+    await ensureVenv('venv', undefined, (line) => said.push(line));
+  } catch (err) {
+    repairError = (err as Error).message;
+  }
+  report('an environment with no pip is repaired instead of reused', repairError === '', repairError);
+  report('the repaired environment can run pip', await venvHasPip('venv'));
+  report(
+    'the repair never claims the environment was reusable',
+    !said.includes('Reusing the existing environment.'),
+    said.join(' | '),
+  );
+  report(
+    'the repair explains itself',
+    said.some((line) => /no pip/i.test(line)) && said.some((line) => /pip is back/i.test(line)),
+    said.join(' | '),
+  );
+
+  // b. Unrepairable: an interpreter with neither pip nor ensurepip, which is
+  //    what a stripped python3 looks like. No amount of rebuilding helps, so
+  //    the only honest answer is the one that names the package to install.
+  const doomed = mkdtempSync(join(tmpdir(), 'starr-nopip2-'));
+  const inner = join(doomed, 'venv-bin-python');
+  writeFileSync(
+    inner,
+    [
+      '#!/bin/sh',
+      'case "$1 $2" in',
+      '  "-m pip") echo "No module named pip" >&2; exit 1 ;;',
+      '  "-m ensurepip") echo "No module named ensurepip" >&2; exit 1 ;;',
+      'esac',
+      'exit 1',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(inner, 0o755);
+  const fake = join(doomed, 'python3');
+  writeFileSync(
+    fake,
+    [
+      '#!/bin/sh',
+      '# Answers the version probe, and builds a venv whose interpreter has',
+      '# nothing: no pip, no ensurepip.',
+      'if [ "$1" = "-c" ]; then echo "3.12"; exit 0; fi',
+      'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then',
+      '  mkdir -p "$3/bin"',
+      `  cp ${JSON.stringify(inner)} "$3/bin/python"`,
+      '  chmod +x "$3/bin/python"',
+      '  exit 0',
+      'fi',
+      'exit 1',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(fake, 0o755);
+  process.env.RUNTIMES_DIR = join(doomed, 'runtimes');
+  process.env.RUNTIMES_PYTHON = fake;
+  let doomedMessage = '';
+  try {
+    await ensureVenv('venv', undefined, () => undefined);
+  } catch (err) {
+    doomedMessage = (err as Error).message;
+  }
+  report(
+    'an environment that cannot be repaired says which package fixes it',
+    /python3-venv/.test(doomedMessage) && /no pip/i.test(doomedMessage),
+    doomedMessage || '(no error was thrown)',
+  );
+
+  // c. The exact field sequence. A Python without python3-venv builds most of
+  //    a venv and then fails on ensurepip — leaving an interpreter that passes
+  //    every check the old code made. Every later attempt "reused" it and died
+  //    with "No module named pip", which is why the original error was never
+  //    seen again. The wreckage must not survive the failure.
+  const partial = mkdtempSync(join(tmpdir(), 'starr-partial-'));
+  const partialFake = join(partial, 'python3');
+  writeFileSync(
+    partialFake,
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "-c" ]; then echo "3.12"; exit 0; fi',
+      'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then',
+      '  mkdir -p "$3/bin"',
+      '  : > "$3/bin/python"',
+      '  echo "The virtual environment was not created successfully because the ensurepip module is not available." >&2',
+      '  exit 1',
+      'fi',
+      'exit 1',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(partialFake, 0o755);
+  process.env.RUNTIMES_DIR = join(partial, 'runtimes');
+  process.env.RUNTIMES_PYTHON = partialFake;
+  const partialSaid: string[] = [];
+  let partialMessage = '';
+  try {
+    await ensureVenv('venv', undefined, (line) => partialSaid.push(line));
+  } catch (err) {
+    partialMessage = (err as Error).message;
+  }
+  report(
+    'a venv that dies on ensurepip is reported with the package to install',
+    /python3-venv/.test(partialMessage),
+    partialMessage || '(no error was thrown)',
+  );
+  report(
+    'the half-built environment it left behind is discarded',
+    !existsSync(join(partial, 'runtimes', 'venv', 'bin', 'python')),
+  );
+  let partialAgain = '';
+  try {
+    await ensureVenv('venv', undefined, () => undefined);
+  } catch (err) {
+    partialAgain = (err as Error).message;
+  }
+  report(
+    'the next attempt fails the same way instead of reusing the wreckage',
+    partialAgain !== '' && partialAgain === partialMessage,
+    (partialAgain || '(no error was thrown)').slice(0, 90),
+  );
+  rmSync(partial, { recursive: true, force: true });
+
+  if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+  else process.env.RUNTIMES_DIR = saved.dir;
+  if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+  else process.env.RUNTIMES_PYTHON = saved.py;
+  rmSync(repairable, { recursive: true, force: true });
+  rmSync(doomed, { recursive: true, force: true });
+  report('the real environment is untouched by the fixtures', await venvHasPip('venv'));
 }
 
 /* ---- 2. Ollama has a command on every OS ---- */
@@ -389,6 +568,128 @@ if (!serverUp) {
     }
     rmSync(stallDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
+  }
+}
+
+/* ---- 4b. The field failure, on a real server ---- */
+section('A server whose Python cannot install anything');
+{
+  /* The log that came back from the machine this is about:
+
+       Reusing the existing environment.
+       .../venv/bin/python: No module named pip
+
+     An environment was reported reusable and every install into it failed.
+     Both halves are checked above; this runs the whole path — HTTP in, SSE out —
+     against a server whose interpreter has neither pip nor ensurepip, which is
+     the one case where there is nothing to repair and the honest answer is the
+     package to install. Nothing here touches the network: the failure happens
+     before the first download. */
+  const noPipDir = join(tmpdir(), `starr-nopip-server-${process.pid}`);
+  const noPipPort = 3198;
+  let noPipServer: ReturnType<typeof spawn> | null = null;
+  try {
+    mkdirSync(noPipDir, { recursive: true });
+    const inner = join(noPipDir, 'venv-bin-python');
+    writeFileSync(
+      inner,
+      [
+        '#!/bin/sh',
+        'case "$1 $2" in',
+        '  "-m pip") echo "No module named pip" >&2; exit 1 ;;',
+        '  "-m ensurepip") echo "No module named ensurepip" >&2; exit 1 ;;',
+        'esac',
+        'exit 1',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(inner, 0o755);
+    const noPipPython = join(noPipDir, 'python3');
+    writeFileSync(
+      noPipPython,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "-c" ]; then echo "3.12"; exit 0; fi',
+        'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then',
+        '  mkdir -p "$3/bin"',
+        `  cp ${JSON.stringify(inner)} "$3/bin/python"`,
+        '  chmod +x "$3/bin/python"',
+        '  exit 0',
+        'fi',
+        'exit 1',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(noPipPython, 0o755);
+    noPipServer = spawn(join(process.cwd(), 'node_modules', '.bin', 'tsx'), ['src/server.ts'], {
+      cwd: process.cwd(),
+      detached: true,
+      env: {
+        ...process.env,
+        PORT: String(noPipPort),
+        RUNTIMES_PYTHON: noPipPython,
+        RUNTIMES_DIR: join(noPipDir, 'runtimes'),
+      },
+      stdio: 'ignore',
+    });
+    let ready = false;
+    for (let i = 0; i < 60 && !ready; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        await fetch(`http://localhost:${noPipPort}/api/runtimes`, { signal: AbortSignal.timeout(1500) });
+        ready = true;
+      } catch {
+        /* still booting */
+      }
+    }
+    if (!ready) throw new Error('the no-pip server never came up');
+
+    const res = await fetch(`http://localhost:${noPipPort}/api/runtimes/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ groups: ['onnxruntime'], device: 'cpu' }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const stream = await res.text();
+    report(
+      'the failure reaches the browser, naming the package to install',
+      /event: error/.test(stream) && /python3-venv/.test(stream),
+      stream.split('\n').filter(Boolean).slice(-2).join(' '),
+    );
+    report(
+      'the log says why, in the same words as the error',
+      /no pip/.test(stream) && /cannot install packages/.test(stream),
+      stream.split('\n').filter((l) => /pip/.test(l)).slice(0, 3).join(' | '),
+    );
+    const status = await fetch(`http://localhost:${noPipPort}/api/runtimes`).then((r) => r.json());
+    report(
+      'a failed install leaves nothing busy behind',
+      status?.runtimes?.busy === false,
+      `busy=${String(status?.runtimes?.busy)}`,
+    );
+  } catch (err) {
+    report('the no-pip install check ran', false, (err as Error).message);
+  } finally {
+    if (noPipServer?.pid) {
+      try {
+        process.kill(-noPipServer.pid, 'SIGKILL');
+      } catch {
+        try {
+          noPipServer.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+    for (let i = 0; i < 20; i += 1) {
+      try {
+        await fetch(`http://localhost:${noPipPort}/api/runtimes`, { signal: AbortSignal.timeout(500) });
+      } catch {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    rmSync(noPipDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 }
 
