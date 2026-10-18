@@ -83,6 +83,35 @@ async function groupedRoots() {
   return byRoot;
 }
 
+/**
+ * Is this repo a quantized checkpoint the bundled server cannot load?
+ *
+ * `AutoModelForCausalLM` reads fp32/fp16/bf16 weights. GPTQ, AWQ and bitsandbytes
+ * checkpoints store packed 4- and 8-bit weights behind a `quantize_config`, and
+ * need `auto-gptq`, `gptqmodel` or `optimum` to unpack them — none of which this
+ * app installs. Listing one as a chat model therefore produced a provider that
+ * offered it, accepted the selection, and then failed at load time with a tensor
+ * complaint that says nothing about a missing runtime.
+ *
+ * The config is the signal, not the name: `Qwen2.5-…-GPTQ-Int4` and a repo with
+ * no hint in its name both carry `quantization_config` / `quantize_config`, and a
+ * repo named "-4bit" can equally hold plain weights. The name is a fallback for a
+ * tree whose config did not arrive.
+ */
+export function quantizedHow(repo: string, config: Record<string, unknown>): string | null {
+  const cfg = config?.quantization_config ?? config?.quantize_config;
+  if (cfg && typeof cfg === 'object') {
+    const method = String((cfg as { quant_method?: unknown }).quant_method ?? '').toLowerCase();
+    if (method === 'gptq') return 'GPTQ';
+    if (method === 'awq') return 'AWQ';
+    if (method) return method.toUpperCase();
+    return 'quantized';
+  }
+  if (/\b(gptq|awq|bnb|bitsandbytes)\b/i.test(repo)) return 'GPTQ';
+  if (/[-_](int4|int8|4bit|8bit|q4|q8)\b/i.test(repo)) return 'quantized';
+  return null;
+}
+
 export async function transformersChatModels(force = false): Promise<TransformersModel[]> {
   if (!force && cached && Date.now() - cached.at < CACHE_MS) return cached.models;
 
@@ -119,15 +148,17 @@ export async function transformersChatModels(force = false): Promise<Transformer
   for (const [repo, { root, files }] of byRepo) {
     const task = NON_TEXT_REPOS.get(repo);
     let architectures: string[] = [];
+    let config: Record<string, unknown> = {};
     try {
-      const cfg = JSON.parse(readFileSync(path.join(root, 'config.json'), 'utf8'));
-      architectures = Array.isArray(cfg?.architectures) ? cfg.architectures : [];
+      config = JSON.parse(readFileSync(path.join(root, 'config.json'), 'utf8'));
+      architectures = Array.isArray(config?.architectures) ? config.architectures : [];
     } catch {
       architectures = [];
     }
     const isCausal = architectures.some((a) => /causal|lmhead/i.test(a)) && !architectures.some((a) => /conditionalgeneration|seq2seq|whisper|clip/i.test(a));
     const isMlx = /mlx/i.test(repo);
-    const chat = !task && isCausal && !isMlx && !NOT_CHAT.test(repo);
+    const quantized = quantizedHow(repo, config);
+    const chat = !task && isCausal && !isMlx && !quantized && !NOT_CHAT.test(repo);
     out.push({
       id: repo,
       repo,
@@ -135,13 +166,15 @@ export async function transformersChatModels(force = false): Promise<Transformer
       chat,
       why: chat
         ? undefined
-        : isMlx
-          ? 'it is an MLX (Apple) model, which needs a different runtime'
-          : task
-            ? `it is a ${task} model`
-            : !isCausal
-              ? `it is not a causal language model (${architectures.join(', ') || 'unknown architecture'})`
-              : 'it is not a text model',
+        : quantized
+          ? `it is a ${quantized} checkpoint, which needs a runtime this app does not install`
+          : isMlx
+            ? 'it is an MLX (Apple) model, which needs a different runtime'
+            : task
+              ? `it is a ${task} model`
+              : !isCausal
+                ? `it is not a causal language model (${architectures.join(', ') || 'unknown architecture'})`
+                : 'it is not a text model',
     });
   }
   out.sort((a, b) => a.id.localeCompare(b.id));

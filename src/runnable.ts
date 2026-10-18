@@ -21,7 +21,7 @@
  * discovered by layout below, with the same ready/reason discipline.
  */
 import './net.js';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { CATALOG, catalogRepoIds, type CatalogEntry, type CatalogTask } from './model-catalog.js';
 import { hubCacheDir, listDownloads, modelsDir, type HFDownload } from './huggingface.js';
@@ -165,21 +165,107 @@ async function detectLayout(
     return null;
   }
   if (task === 'image') {
-    // A diffusers pipeline is a directory tree rooted at model_index.json;
-    // whether the pipeline inside loads is diffusers' call at load time, and
-    // the loader already reports that honestly through the job log.
-    if (files.has('model_index.json')) {
-      return {
-        format: 'diffusers',
-        needs: ['model_index.json'],
-        requires: ['torch', 'diffusers'],
-      };
-    }
-    return null;
+    /* A diffusers pipeline is a tree rooted at model_index.json, but the root
+     * alone is not a model. The index names the components it wires together —
+     * text_encoder, tokenizer, unet, vae, scheduler — each as a folder in the
+     * same tree. Claiming a bundle on the index alone is what let a
+     * half-finished download report itself as ready and then fail inside the
+     * loader, where the message names a tensor rather than the file that was
+     * never downloaded. So the components are required too, and a partial tree
+     * says which ones are absent instead of "ready". */
+    if (!files.has('model_index.json')) return null;
+    return {
+      format: 'diffusers',
+      needs: ['model_index.json', ...(await diffusersComponents(dir))],
+      requires: ['torch', 'diffusers'],
+    };
   }
   // Text-to-speech has exactly one runner and it is Kokoro-specific; other TTS
   // architectures have nothing here that loads them, so nothing is claimed.
   return null;
+}
+
+/**
+ * The component folders a diffusers `model_index.json` wires together.
+ *
+ * Each entry is a `[library, class, path]` triple with the folder last, so the
+ * folder is the final element. Entries that name no folder at all — the
+ * `"safety_checker": [null, null]` placeholders — are skipped, and so is
+ * anything that is not that shape: a tree this cannot read leaves the index as
+ * the only requirement, which is where this started and no worse.
+ */
+async function diffusersComponents(dir: string): Promise<string[]> {
+  let index: unknown;
+  try {
+    index = JSON.parse(await readFile(path.join(dir, 'model_index.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  if (!index || typeof index !== 'object') return [];
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(index as Record<string, unknown>)) {
+    if (key.startsWith('_')) continue;
+    /* Three elements, not two. A component that lives in its own folder is a
+       `[library, class, path]` triple; a two-element entry names the class with
+       no path at all (`"scheduler": ["diffusers", "DDIMScheduler"]`) and sits at
+       the tree root. Taking the last element of one of those reads the class
+       name as a folder and demands a directory called "DDIMScheduler". */
+    if (!Array.isArray(value) || value.length < 3) continue;
+    if (value.some((v) => v === null)) continue;
+    const last = value[value.length - 1];
+    if (typeof last !== 'string' || !last.trim()) continue;
+    out.push(last.replace(/^\.?\/+/, '').replace(/\/+$/, ''));
+  }
+  return [...new Set(out)].filter(Boolean);
+}
+
+/**
+ * What is actually in a directory, as repo-relative paths.
+ *
+ * The download records are not this. They say what *this app* fetched, so a repo
+ * pulled by `huggingface-cli`, `git clone` or a colleague's tarball arrives as a
+ * single record and every other file is counted missing — which is how a
+ * complete diffusers tree reads as an empty one. Both are consulted: the records
+ * for what the app did, this for what is there.
+ */
+async function treeOf(dir: string, depth = 3): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (prefix: string, level: number): Promise<void> => {
+    if (level > depth) return;
+    let entries;
+    try {
+      entries = await readdir(path.join(dir, prefix), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        out.push(`${rel}/`);
+        await walk(rel, level + 1);
+      } else if (e.isFile()) {
+        out.push(rel);
+      }
+    }
+  };
+  await walk('', 0);
+  return out;
+}
+
+/**
+ * Is one `needs` entry satisfied?
+ *
+ * A component is a folder rather than a single file, so it counts as present
+ * when anything lives under it. Without that, every diffusers bundle would
+ * report all of its components missing — the check has to mean "the folder is
+ * there", not "this exact path is a file".
+ */
+function needsSatisfied(files: Set<string>, entry: string): boolean {
+  if (files.has(entry)) return true;
+  for (const f of files) {
+    if (f.startsWith(`${entry}/`)) return true;
+  }
+  return false;
 }
 
 /** Everything the live probe feeds in, overridable so tests need no venv. */
@@ -264,8 +350,16 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
     const layout = await detectLayout(task, group.root, group.files);
     if (!layout) continue;
 
-    const present = layout.needs.filter((f) => group.files.has(f));
-    const missingFiles = layout.needs.filter((f) => !group.files.has(f));
+    /* The records say what this app fetched; the tree says what is there. A repo
+       that arrived by any other route has one record and a full directory, and
+       believing the records alone marks every real file missing. */
+    const onDisk = new Set(group.files);
+    for (const rel of await treeOf(group.root)) {
+      onDisk.add(rel);
+    }
+
+    const present = layout.needs.filter((f) => needsSatisfied(onDisk, f));
+    const missingFiles = layout.needs.filter((f) => !needsSatisfied(onDisk, f));
     const missingRuntimes = layout.requires.filter((g) => !installed[g]);
     const runtimes: Record<string, string> = {};
     for (const g of layout.requires) {

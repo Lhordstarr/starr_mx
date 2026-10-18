@@ -136,8 +136,11 @@ const ALL: Record<string, string | null> = {
   ollama: 'installed',
 };
 
-const deps = (installed: Record<string, string | null>): RunnableDeps => ({
-  downloads,
+const deps = (
+  installed: Record<string, string | null>,
+  extraRepos: string[] = [],
+): RunnableDeps => ({
+  downloads: [...downloads, ...downloadsOf(root, extraRepos)],
   installed,
 });
 
@@ -197,6 +200,80 @@ await check('a diffusers tree never leaks into stt or tts', async () => {
   const tts = byRepo(await runnableModels('tts', deps(ALL)));
   assert.equal(stt.has('Acme/diff-pipe'), false);
   assert.equal(tts.has('Acme/diff-pipe'), false);
+});
+
+/* A diffusers repo is a tree of component folders described by model_index.json.
+   Claiming one on the index alone let a download that had fetched nothing but
+   the index report itself as ready, and then fail inside the loader naming a
+   tensor rather than the file that was never fetched. This is that case. */
+const INDEX = JSON.stringify({
+  _class_name: 'AutoPipelineForText2Image',
+  feature_extractor: [null, null],
+  safety_checker: [null, null],
+  scheduler: ['diffusers', 'DDIMScheduler'],
+  text_encoder: ['transformers', 'CLIPTextModel', 'text_encoder'],
+  tokenizer: ['transformers', 'CLIPTokenizer', 'tokenizer'],
+  unet: ['diffusers', 'UNet2DConditionModel', 'unet'],
+  vae: ['diffusers', 'AutoencoderKL', 'vae'],
+});
+await check('a diffusers tree with only its index is not runnable', async () => {
+  seed(root, 'Acme/index-only', { 'model_index.json': INDEX });
+  const image = byRepo(await runnableModels('image', deps(ALL, ['Acme/index-only'])));
+  const m = image.get('Acme/index-only');
+  assert.ok(m, 'repo is still listed, so the reason is visible');
+  assert.equal(m.ready, false, 'an index alone is not a model');
+  assert.match(m.reason, /Missing/, `reason named nothing useful: ${m.reason}`);
+});
+
+await check('and it says which components are absent', async () => {
+  seed(root, 'Acme/index-only', { 'model_index.json': INDEX });
+  const image = byRepo(await runnableModels('image', deps(ALL, ['Acme/index-only'])));
+  const m = image.get('Acme/index-only')!;
+  for (const part of ['text_encoder', 'tokenizer', 'unet', 'vae']) {
+    assert.ok(
+      m.requiredFiles.includes(part),
+      `${part} should be required; needs=${JSON.stringify(m.requiredFiles)}`,
+    );
+  }
+});
+
+await check('a two-element scheduler entry is a class name, not a folder', async () => {
+  seed(root, 'Acme/index-only', { 'model_index.json': INDEX });
+  const image = byRepo(await runnableModels('image', deps(ALL, ['Acme/index-only'])));
+  const m = image.get('Acme/index-only')!;
+  assert.equal(
+    m.requiredFiles.includes('DDIMScheduler'),
+    false,
+    'the scheduler triple has no path, so its class name must not be required',
+  );
+});
+
+await check('a complete diffusers tree is still runnable', async () => {
+  seed(root, 'Acme/index-only', {
+    'model_index.json': INDEX,
+    'unet/diffusion_pytorch_model.safetensors': 'w',
+    'vae/diffusion_pytorch_model.safetensors': 'w',
+    'text_encoder/model.safetensors': 'w',
+    'tokenizer/vocab.json': '{}',
+  });
+  const image = byRepo(await runnableModels('image', deps(ALL, ['Acme/index-only'])));
+  const m = image.get('Acme/index-only')!;
+  assert.equal(m.ready, true, `a complete tree should run; reason=${m.reason}`);
+});
+
+await check('a diffusers tree fetched outside this app is still seen as complete', async () => {
+  // The records only know what this app fetched; the directory is the truth.
+  seed(root, 'Acme/index-only', {
+    'model_index.json': INDEX,
+    'unet/diffusion_pytorch_model.safetensors': 'w',
+    'vae/diffusion_pytorch_model.safetensors': 'w',
+    'text_encoder/model.safetensors': 'w',
+    'tokenizer/vocab.json': '{}',
+  });
+  const onlyIndex = downloadsOf(root, ['Acme/index-only']).filter((d) => d.file === 'model_index.json');
+  const image = byRepo(await runnableModels('image', { downloads: onlyIndex, installed: ALL }));
+  const m = image.get('Acme/index-only')!;
+  assert.equal(m.ready, true, `on-disk files should count; reason=${m.reason}`);
 });
 
 await check('an unrecognised repo is not claimed by any task', async () => {

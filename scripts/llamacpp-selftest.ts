@@ -51,6 +51,7 @@ import {
   prepareLlama,
   resolveGgufModel,
 } from '../src/llamacpp.ts';
+import { quantizedHow } from '../src/transformers-chat.ts';
 
 let passed = 0;
 const failures: string[] = [];
@@ -625,6 +626,49 @@ section('Client contract');
   report(
     'the GGUF format entry points at the runtime instead of declaring itself external',
     /id: 'llama-cpp'/.test(settingsJs) && /LLAMA_CHAT_RUNTIME/.test(settingsJs),
+  );
+}
+
+/* ---------------- Quantized checkpoints ---------------- */
+
+/* AutoModelForCausalLM reads fp32/fp16/bf16 weights. A GPTQ, AWQ or
+   bitsandbytes checkpoint stores packed 4- and 8-bit weights behind a
+   quantize_config and needs auto-gptq, gptqmodel or optimum to unpack them —
+   none of which this app installs. Listing one offered a model that then failed
+   at load time naming a tensor, with nothing pointing at a missing runtime. */
+console.log('\nQuantized checkpoints');
+{
+  const gptq = quantizedHow('Qwen/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4', {
+    architectures: ['Qwen2ForCausalLM'],
+    quantize_config: { bits: 4, quant_method: 'gptq' },
+  });
+  report('a GPTQ config is recognised as GPTQ', gptq === 'GPTQ', String(gptq));
+  report(
+    'an AWQ config is recognised as AWQ',
+    quantizedHow('org/model', { quantization_config: { quant_method: 'awq' } }) === 'AWQ',
+  );
+  const bnb = quantizedHow('org/model', { quantization_config: { quant_method: 'bitsandbytes' } });
+  report('a bitsandbytes config is recognised as bitsandbytes', bnb === 'BITSANDBYTES', String(bnb));
+  report(
+    'the config decides, not just the name',
+    quantizedHow('org/no-hint-in-the-name', { quantize_config: { quant_method: 'gptq' } }) === 'GPTQ',
+  );
+  report(
+    'a name alone still catches a tree whose config did not arrive',
+    quantizedHow('org/hidden-GPTQ-checkpoint', {}) === 'GPTQ',
+  );
+  report(
+    'a -4bit name is treated as quantized',
+    quantizedHow('org/model-4bit', {}) === 'quantized',
+  );
+  report(
+    'an ordinary chat model is left alone',
+    quantizedHow('Qwen/Qwen2.5-7B-Instruct', { architectures: ['Qwen2ForCausalLM'] }) === null,
+  );
+  report(
+    'an ordinary chat model whose name merely mentions a bit width is not caught by accident',
+    quantizedHow('org/model-bit-8', { architectures: ['Qwen2ForCausalLM'] }) === null,
+    String(quantizedHow('org/model-bit-8', {})),
   );
 }
 
