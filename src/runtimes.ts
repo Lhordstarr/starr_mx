@@ -1828,29 +1828,55 @@ async function ensureVenvWithRecovery(
 async function installVenvPackage(
   pkg: MissingVenvPackage,
   onProgress: (line: string) => void,
+  opts: Pick<InstallOpts, 'password' | 'onNeedsPrivilege'>,
+): Promise<void> {
+  await aptInstall(
+    `python${pkg.version}-venv`,
+    'This Python is missing the venv module',
+    onProgress,
+    opts,
+  );
+}
+
+/**
+ * Installs one apt package, escalating only when a password was supplied.
+ *
+ * Every caller passes a package name this file chose for itself — never
+ * anything a request carried in — so the blast radius is one package, chosen
+ * from a fixed set, on a machine where the user is about to type their password
+ * anyway. That is deliberately the same contract the Ollama and driver
+ * installers already had; this just means the venv module and curl stop being
+ * the two things a user has to leave the app to install.
+ */
+async function aptInstall(
+  pkg: string,
+  why: string,
+  onProgress: (line: string) => void,
   { password, onNeedsPrivilege }: Pick<InstallOpts, 'password' | 'onNeedsPrivilege'>,
 ): Promise<void> {
   // Only apt-based systems have a scripted answer here. On anything else the
-  // message already names the right package, and guessing a dnf or pacal
+  // message already names the right package, and guessing a dnf or pacman
   // command here would be worse than printing what the interpreter said.
   if (process.platform !== 'linux') {
     throw new Error(
-      `This Python is missing the venv module and this app cannot install it on ${platformLabel()}. ` +
+      `${why}, and this app cannot install it on ${platformLabel()}. ` +
         'Install it with your package manager, then install the runtime again.',
     );
   }
 
+  const command = `sudo apt-get install -y ${pkg}`;
+
   if (!password) {
     // No password yet: report the need so the browser prompts, and say exactly
     // what will run. This is the same contract every other elevating step uses.
-    onNeedsPrivilege?.(pkg.command);
+    onNeedsPrivilege?.(command);
     throw new Error(
-      `This Python is missing the venv module. Installing it needs your password:   ${pkg.command}   ` +
+      `${why}. Installing it needs your password:   ${command}   ` +
         'Supply your password to let it run, or run that command in a terminal and install the runtime again.',
     );
   }
 
-  onProgress(`Installing ${pkg.command} — this needs your password…`);
+  onProgress(`Installing ${command} — this needs your password…`);
   const scrub = (text: string) =>
     password.length >= 3 ? text.split(password).join('[redacted]') : text;
   let tail = '';
@@ -1858,7 +1884,7 @@ async function installVenvPackage(
     // `sudo -S` reads the password from stdin; `-p ''` stops sudo printing a
     // second prompt of its own. `-k` is deliberately not passed, so a recent
     // sudo authentication in a terminal is reused instead of asking again.
-    const child = spawn('sudo', ['-S', '-p', '', 'apt-get', 'install', '-y', `python${pkg.version}-venv`], {
+    const child = spawn('sudo', ['-S', '-p', '', 'apt-get', 'install', '-y', pkg], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child.stdin?.on('error', () => {
@@ -1908,11 +1934,11 @@ async function installVenvPackage(
   if (code !== 0) {
     throw new Error(
       needsPrivilege(tail)
-        ? `The package could not be installed because it needs root:   ${pkg.command}`
-        : `Installing ${pkg.command} failed (apt-get exited ${code}) — see the log above.`,
+        ? `The package could not be installed because it needs root:   ${command}`
+        : `Installing ${command} failed (apt-get exited ${code}) — see the log above.`,
     );
   }
-  onProgress('Installed.');
+  onProgress(`${pkg} installed.`);
   invalidateRuntimeProbes();
 }
 
@@ -2045,7 +2071,23 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
     return;
   }
 
-  const recipe = ollamaRecipe();
+  /* The vendor's Linux installer is `curl … | sh`, which fails on a minimal or
+   * server Ubuntu that has no curl — and "curl: command not found" reads as the
+   * app being broken rather than the machine being minimal. wget does the same
+   * job. With neither, curl is installed through the same password prompt the
+   * Ollama install itself uses, so this is one extra step rather than a dead end
+   * and a manual trip to a terminal. */
+  let fetcher: 'curl' | 'wget' | null = null;
+  if (process.platform === 'linux') {
+    fetcher = await downloadTool();
+    if (!fetcher) {
+      await aptInstall('curl', 'Ollama is installed with curl, and this machine has neither curl nor wget', onProgress, opts);
+      fetcher = (await downloadTool()) ?? 'curl';
+    }
+    onProgress(`Fetching the Ollama installer with ${fetcher}.`);
+  }
+
+  const recipe = ollamaRecipe(process.platform, fetcher ?? 'curl');
   if (!recipe) {
     // Nothing to run on this OS. Say so with the vendor's own instructions
     // rather than a dead end.
@@ -2151,6 +2193,23 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
 }
 
 /**
+ * The tool that will fetch a URL on this machine, or null when there is none.
+ *
+ * The vendor install script is `curl … | sh`, and a minimal or server Ubuntu
+ * has no curl — so the documented command fails with "curl: command not found"
+ * and nothing is installed, which reads as the app being broken rather than the
+ * machine being minimal. wget is nearly always present instead and writes the
+ * same bytes to stdout, so it drops straight into a pipe. When neither exists,
+ * the answer is to install curl rather than leave the user with a dead command.
+ */
+export async function downloadTool(): Promise<'curl' | 'wget' | null> {
+  for (const t of ['curl', 'wget'] as const) {
+    if (await onPath(t)) return t;
+  }
+  return null;
+}
+
+/**
  * How to install Ollama on this OS, as the vendor documents it.
  *
  * `argv` is the whole argument vector, not a command with its own trailing
@@ -2158,9 +2217,13 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
  * splitting it in two is how `sh -c` ended up being dropped — which made the
  * installer run `sh "curl … | sh"` and fail with "cannot open …: No such
  * file" instead of installing anything.
+ *
+ * `fetcher` is a parameter rather than a lookup in here so this stays a pure
+ * function of its arguments, which is what its per-OS checks rely on.
  */
 export function ollamaRecipe(
   platform: NodeJS.Platform = process.platform,
+  fetcher: 'curl' | 'wget' = 'curl',
 ): { shown: string; argv: string[]; needsRoot: boolean } | null {
   if (platform === 'win32') {
     // The vendor's own PowerShell one-liner. It installs per-user, so it does
@@ -2189,9 +2252,12 @@ export function ollamaRecipe(
     };
   }
   if (platform === 'linux') {
+    // wget writes the response to stdout with -qO-, which is the same shape
+    // curl's default stdout has, so the pipe is identical either way.
+    const pipe = fetcher === 'wget' ? 'wget -qO-' : 'curl -fsSL';
     return {
-      shown: 'curl -fsSL https://ollama.com/install.sh | sh',
-      argv: ['sh', '-c', 'curl -fsSL https://ollama.com/install.sh | sh'],
+      shown: `${pipe} https://ollama.com/install.sh | sh`,
+      argv: ['sh', '-c', `${pipe} https://ollama.com/install.sh | sh`],
       needsRoot: true,
     };
   }

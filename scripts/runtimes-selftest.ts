@@ -23,6 +23,7 @@ import { join } from 'node:path';
 
 import {
   describeVenvFailure,
+  downloadTool,
   ensureVenv,
   installRuntimes,
   MISSING_PIP_MESSAGE,
@@ -509,6 +510,41 @@ section('Ollama installer per OS');
   );
 
   report('an unsupported OS admits it rather than guessing', ollamaRecipe('aix' as NodeJS.Platform) === null);
+
+  /* A minimal or server Ubuntu has no curl, and the vendor command is
+     `curl … | sh`, so it died with "curl: command not found" — which reads as
+     the app being broken rather than the machine being minimal. */
+  const wgetLinux = ollamaRecipe('linux', 'wget');
+  report(
+    'Linux can fetch the installer with wget when there is no curl',
+    /wget -qO-\s+https:\/\/ollama\.com\/install\.sh \| sh/.test(wgetLinux?.shown ?? ''),
+    wgetLinux?.shown,
+  );
+  report(
+    'the wget form keeps the same `sh -c` shape',
+    wgetLinux?.argv[0] === 'sh' && wgetLinux?.argv[1] === '-c' && wgetLinux?.argv.length === 3,
+    wgetLinux?.argv.join(' '),
+  );
+  report(
+    'the wget form still needs root, like the curl one',
+    wgetLinux?.needsRoot === true,
+  );
+  report(
+    'curl stays the default when nothing says otherwise',
+    ollamaRecipe('linux')?.shown === ollamaRecipe('linux', 'curl')?.shown,
+    ollamaRecipe('linux')?.shown,
+  );
+  report(
+    'a fetcher choice does not leak onto the other platforms',
+    /brew/.test(ollamaRecipe('darwin', 'wget')?.shown ?? '') &&
+      /install\.ps1/.test(ollamaRecipe('win32', 'wget')?.shown ?? ''),
+  );
+  const fetcher = await downloadTool();
+  report(
+    'the downloader probe names the one this machine actually has',
+    fetcher === null || fetcher === 'curl' || fetcher === 'wget',
+    String(fetcher),
+  );
 
   // The escalated and bare forms are the same installer with a wrapper, so the
   // two argument vectors have to agree apart from that wrapper.

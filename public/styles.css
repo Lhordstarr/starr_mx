@@ -526,6 +526,12 @@ a.icon-btn {
   border-radius: var(--radius-sm);
   padding: 14px 16px;
   overflow-x: auto;
+  /* Long lines wrap instead of sizing the block to their own width. An
+     attached config file is often one very long line — a minified JSON, a
+     base64 blob — and `pre` alone made every such message wider than the
+     window, where `.messages` clipped it away instead of scrolling it. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   margin: 0 0 12px;
 }
 .bubble pre:last-child {
@@ -635,6 +641,15 @@ a.icon-btn {
    shows only while a reply streams (see toggleBusy). */
 .bubble-wrap {
   position: relative;
+  /* Capped at the column, for every role.
+     Only the assistant rule had a max-width, so a long line in a *user* bubble
+     — which is where an attached file lands — sized the wrapper to its content
+     instead of the other way round. `.messages` clips overflow, so the result
+     was not a scrollbar but content pushed past the edge of the window and made
+     unreachable. `min-width: 0` lets a flex item shrink below its content,
+     which is what actually lets `max-width` take effect here. */
+  max-width: 100%;
+  min-width: 0;
 }
 
 .sp-22__blob {
