@@ -25,7 +25,15 @@
 import { spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { needsPrivilege } from './drivers.js';
-import { readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
@@ -172,6 +180,42 @@ export function venvPython(name = 'venv'): string {
   return process.platform === 'win32'
     ? path.join(venvDir(name), 'Scripts', 'python.exe')
     : path.join(venvDir(name), 'bin', 'python');
+}
+
+/**
+ * The first existing folder at or above `dir` that this process cannot write to,
+ * with the uid that owns it. Null when somewhere along the way it can write.
+ *
+ * This exists to answer "needs sudo" with the truth rather than a guess. The
+ * answer is almost never yes: nothing about building a Python environment in
+ * your own folder requires root, and the one time it fails is that the folder
+ * was *already* created by root — by an install run under `sudo` — so the fix is
+ * to hand the folder back to you, not to build the next thing as root.
+ *
+ * Walking up matters because `.runtimes` is often created by this same code, and
+ * a missing leaf is not the problem; the unwritable parent is.
+ */
+export function unwritableAncestor(dir: string): { path: string; uid: number } | null {
+  let cur = path.resolve(dir);
+  for (;;) {
+    let uid: number | null = null;
+    try {
+      uid = statSync(cur).uid;
+    } catch {
+      // Does not exist yet — the answer, if there is one, is above it.
+    }
+    if (uid !== null) {
+      try {
+        accessSync(cur, constants.W_OK);
+        return null;
+      } catch {
+        return { path: cur, uid };
+      }
+    }
+    const up = path.dirname(cur);
+    if (up === cur) return null;
+    cur = up;
+  }
 }
 
 /**
@@ -1335,6 +1379,13 @@ async function createVenv(
         : 'No python3 interpreter was found on this machine.',
     );
   }
+  // Asked before anything is created, because this is the one failure whose
+  // answer is a single command rather than an investigation — and because
+  // running the build as root to "fix" it is what caused it.
+  const blocked = unwritableAncestor(runtimesDir());
+  if (blocked) {
+    throw new Error(permissionMessage(blocked.path, blocked.uid));
+  }
   await mkdir(runtimesDir(), { recursive: true });
   onProgress(
     name === 'venv'
@@ -1500,6 +1551,28 @@ const VENV_BUILD_ADVICE =
   'Point RUNTIMES_DIR somewhere on your home filesystem if the app sits on a network or Windows-formatted drive, ' +
   'and check there is free space. Or set RUNTIMES_PYTHON to a different interpreter.';
 
+/**
+ * What to say when a folder this process has to write to is not writable.
+ *
+ * The answer to "does this need sudo" is almost always "no, and running it with
+ * sudo is what broke it". A Python environment built by root cannot be repaired,
+ * updated or removed by the user who owns the app afterwards, so the instinct to
+ * reach for `sudo` here is what turns a one-line failure into a folder nobody can
+ * use. So the command given is the one that gives the folder *back*, and the one
+ * that creates the environment is never wrapped in sudo.
+ */
+export function permissionMessage(dir: string, uid: number): string {
+  const owned = uid === 0 ? 'owned by root' : `owned by uid ${uid}`;
+  return (
+    `${dir} is ${owned}, so this process cannot write to it — and it will not work until that changes. ` +
+    (uid === 0
+      ? 'This normally means a previous install was run under sudo. The environment itself does not need root: ' +
+        `hand the folder back to yourself with   sudo chown -R "$(id -un)":"$(id -un)" "${dir}"   ` +
+        'then install the runtime again. Running the app as root instead will break it again the same way.'
+      : `Grant yourself write access to "${dir}", or point RUNTIMES_DIR at a folder you own, then install the runtime again.`)
+  );
+}
+
 /** Said when there is an environment but no way to install into it. */
 export const MISSING_PIP_MESSAGE =
   'This Python cannot install packages — the environment has no pip, and it could not be repaired. ' +
@@ -1568,10 +1641,15 @@ export function describeVenvFailure(stderr: string, killed?: string): string {
     );
   }
   if (/Permission denied|Errno 13\b/i.test(text)) {
-    return (
-      `The Python environment could not be written to (${text.slice(0, 120)}). ` +
-      `${VENV_BUILD_ADVICE} If it is a permissions problem on this app's folder, fixing that and installing again will do it.`
-    );
+    // The pre-flight check normally catches this before Python is even run, so
+    // arriving here means something deeper changed underneath. Ask the folder
+    // anyway: if the cause is known, say so, rather than listing what else it
+    // might have been.
+    const blocked = unwritableAncestor(runtimesDir());
+    return blocked
+      ? permissionMessage(blocked.path, blocked.uid)
+      : `The Python environment could not be written to (${text.slice(0, 120)}). ` +
+        `${VENV_BUILD_ADVICE} If it is a permissions problem on this app's folder, fixing that and installing again will do it.`;
   }
   // Exited non-zero having said nothing. This is the case that produced a bare
   // "python -m venv failed: " with no reason at all: there is no text to relay,

@@ -28,6 +28,8 @@ import {
   needsPrivilege,
   ollamaCommand,
   ollamaRecipe,
+  permissionMessage,
+  unwritableAncestor,
   venvHasPip,
   venvPython,
 } from '../src/runtimes.ts';
@@ -110,6 +112,60 @@ section('Python environment errors');
     symlink,
   );
   report('an empty failure does not become an empty error', describeVenvFailure('').length > 0);
+
+  // "Does this need sudo?" — the answer is almost always no, and the fix for a
+  // root-owned folder is to hand it back, never to build the next one as root.
+  const rootOwned = permissionMessage('/home/u/app/.runtimes', 0);
+  report(
+    'a root-owned folder is named as root-owned',
+    /owned by root/.test(rootOwned),
+    rootOwned,
+  );
+  report(
+    'it says the environment does not need root',
+    /does not need root/i.test(rootOwned),
+    rootOwned,
+  );
+  report(
+    'the command given gives the folder back rather than building as root',
+    /sudo chown -R/.test(rootOwned) && !/sudo (?!chown)/.test(rootOwned.replace(/sudo chown -R [^\s]+\s*/, '')),
+    rootOwned,
+  );
+  report(
+    'it warns that running as root repeats the failure',
+    /again/i.test(rootOwned),
+    rootOwned,
+  );
+  const otherOwned = permissionMessage('/srv/shared', 1001);
+  report(
+    'a folder owned by another user is not called root',
+    /owned by uid 1001/.test(otherOwned) && !/owned by root/.test(otherOwned),
+    otherOwned,
+  );
+
+  // The walk-up, which is the half that matters: the leaf usually does not
+  // exist yet, so the unwritable folder is its parent.
+  const locked = mkdtempSync(join(tmpdir(), 'starr-perm-'));
+  report('a writable folder reports no problem', unwritableAncestor(locked) === null);
+  chmodSync(locked, 0o500);
+  report(
+    'an unwritable folder is found',
+    unwritableAncestor(locked)?.path === locked,
+    JSON.stringify(unwritableAncestor(locked)),
+  );
+  report(
+    'a missing leaf inside it resolves to the unwritable parent',
+    unwritableAncestor(join(locked, '.runtimes'))?.path === locked,
+    JSON.stringify(unwritableAncestor(join(locked, '.runtimes'))),
+  );
+  report(
+    'the owner of an unwritable folder is reported',
+    typeof unwritableAncestor(locked)?.uid === 'number',
+    JSON.stringify(unwritableAncestor(locked)?.uid),
+  );
+  chmodSync(locked, 0o700);
+  rmSync(locked, { recursive: true, force: true });
+
   // This is the exact failure a real Ubuntu box produced: the interpreter exited
   // non-zero and wrote nothing at all, so the message was the advice tail with no
   // reason in front of it.
