@@ -2004,11 +2004,15 @@ app.post('/api/chat', async (req, res) => {
     const chatWithTools = provider.chatWithTools;
     const plainMessages = withToolGuidance(messages, false);
     if (!tools.length || !chatWithTools) {
-      send('notice', {
-        message: !tools.length
-          ? 'No tools enabled — answering directly (see Settings → Tools).'
-          : `${provider.info.label} doesn't support tool calls yet — answering directly.`,
-      });
+      // Local models that can't do tools just answer directly; no need to
+      // announce it — the reply itself is the feedback.
+      if (!provider.info.local) {
+        send('notice', {
+          message: !tools.length
+            ? 'No tools enabled — answering directly (see Settings → Tools).'
+            : `${provider.info.label} doesn't support tool calls yet — answering directly.`,
+        });
+      }
       await streamPlain(plainMessages);
       send('done', {});
       return;
@@ -2047,11 +2051,15 @@ app.post('/api/chat', async (req, res) => {
       if (replied || controller.signal.aborted || !(refused || isToolFormatError(message))) {
         throw err;
       }
-      send('notice', {
-        message: refused
-          ? `Model ${req.body.model} doesn't support tool calls — answering directly.`
-          : 'Tool calls were interrupted — answering directly.',
-      });
+      // Local models that refuse tools just retry silently — the reply is
+      // the feedback, and a notice line here reads as a failure.
+      if (!provider.info.local) {
+        send('notice', {
+          message: refused
+            ? `Model ${req.body.model} doesn't support tool calls — answering directly.`
+            : 'Tool calls were interrupted — answering directly.',
+        });
+      }
       await streamPlain(plainMessages);
       replied = true;
     }
@@ -2059,7 +2067,9 @@ app.post('/api/chat', async (req, res) => {
     // kept calling tools into the capped round. Answer directly rather than
     // leaving the reader with activity lines and silence.
     if (!replied && !controller.signal.aborted) {
-      send('notice', { message: 'The tool rounds ended without an answer — answering directly.' });
+      if (!provider.info.local) {
+        send('notice', { message: 'The tool rounds ended without an answer — answering directly.' });
+      }
       await streamPlain(plainMessages);
     }
     send('done', {});
