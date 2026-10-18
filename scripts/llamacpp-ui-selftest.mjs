@@ -273,6 +273,92 @@ try {
       }
     }
   }
+
+  /* ------- The flag on a provider row, and only where it belongs -------
+   *
+   * The flag is about a missing *credential*, so it must not land on a local
+   * backend. `configured` means "can be used", which for those means "has
+   * models" — so llama.cpp and Transformers with nothing downloaded were both
+   * being told they were missing a key they never needed.
+   *
+   * Driven through the real page rather than by re-implementing the ternary
+   * here: a check that repeats the logic proves nothing about the logic. The
+   * status is doctored first, because on a machine where the local providers
+   * all have models the tag never appears and the check would pass vacuously.
+   *
+   * Last, deliberately. It has to navigate and intercept, both of which reset
+   * page state the checks above depend on. */
+  try {
+    const list = await (
+      await fetch(new URL('/api/providers', APP_URL), { signal: AbortSignal.timeout(60000) })
+    ).json();
+    const emptied = list.providers.map((p) =>
+      p.local ? { ...p, configured: false, models: [], sttModels: [] } : p,
+    );
+    const doctoredBody = Buffer.from(JSON.stringify({ ...list, providers: emptied })).toString('base64');
+    ws.addEventListener('message', (ev) => {
+      const m = JSON.parse(String(ev.data));
+      if (m.method !== 'Fetch.requestPaused') return;
+      const url = m.params?.request?.url ?? '';
+      const msg = (method, params) => {
+        // `idc` rather than a new counter: the pending map is keyed off it, so
+        // the reply has to land on an id nothing is waiting for.
+        const n = ++idc;
+        pending.delete(n);
+        ws.send(JSON.stringify({ id: n, method, params }));
+      };
+      if (url.includes('/api/providers')) {
+        msg('Fetch.fulfillRequest', {
+          requestId: m.params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'content-type', value: 'application/json' }],
+          body: doctoredBody,
+        });
+      } else {
+        msg('Fetch.continueRequest', { requestId: m.params.requestId });
+      }
+    });
+    await cdp('Fetch.enable', { patterns: [{ urlPattern: `${new URL(APP_URL).origin}/api/providers*` }] });
+    // Blank first: navigate resolves as the new document commits, and the
+    // previous one is still pollable, so a wait can pass against stale rows.
+    await cdp('Page.navigate', { url: 'about:blank' });
+    await sleep(400);
+    await cdp('Page.navigate', { url: `${new URL(APP_URL).origin}/` });
+    await waitFor(`!!document.getElementById('provider-list')`, 20000);
+    await sleep(500);
+    await evalJs(`document.getElementById('open-panel').click(); true`);
+    await sleep(500);
+    const rows = JSON.parse(
+      (await evalJs(`JSON.stringify(
+        [...document.querySelectorAll('#provider-list .popover__item')].map(r => ({
+          id: r.dataset.id,
+          flag: r.querySelector('.popover__flag')?.textContent ?? null,
+        })))`)) ?? '[]',
+    );
+    await cdp('Fetch.disable');
+    const localIds = new Set(list.providers.filter((p) => p.local).map((p) => p.id));
+    const flagOf = (id) => rows.find((r) => r.id === id)?.flag;
+    report(
+      'a local backend with no models is not told it is missing a key',
+      flagOf('llamacpp') !== 'no key' &&
+        flagOf('transformers-chat') !== 'no key' &&
+        flagOf('ollama') !== 'no key',
+      JSON.stringify(rows),
+    );
+    report('and it says why it is empty instead', flagOf('llamacpp') === 'no models', JSON.stringify(rows));
+    report(
+      'no local provider carries a "no key" tag',
+      rows.filter((r) => r.flag === 'no key').every((r) => !localIds.has(r.id)),
+      JSON.stringify(rows.filter((r) => r.flag === 'no key')),
+    );
+    report(
+      'a cloud provider with no key still says so',
+      flagOf('openai') === 'no key',
+      JSON.stringify(rows.filter((r) => r.flag === 'no key')),
+    );
+  } catch (err) {
+    report('the provider-row flag checks ran', false, err.message);
+  }
 } catch (err) {
   report('the llama.cpp screens ran', false, err.message);
 } finally {

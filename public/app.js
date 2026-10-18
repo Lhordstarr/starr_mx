@@ -821,16 +821,23 @@ async function loadProviders(saved) {
   providers = data.providers;
 
   // Each provider is a row in the popup rather than an <option>: it can carry
-  // the "no key" state as visible text, which an <option> can only hint at in
-  // a string the user has to parse.
+  // its state as visible text, which an <option> can only hint at in a string
+  // the user has to parse.
   // Grouped, because "Local" and "an API key" are different kinds of thing and
   // a flat list with Ollama wedged between OpenAI and Anthropic hides which
   // ones run on this machine and cost nothing.
+  //
+  // The flag is about a missing credential, so it only belongs on a provider
+  // that needs one. `configured` means "can be used", which for a local
+  // provider means "has models" — so llama.cpp or Transformers with nothing
+  // downloaded yet was being told it was missing a key it never needed, and a
+  // row that says nothing at all explains nothing, so those say why they are
+  // empty instead.
   const renderRow = (p) => `
     <button type="button" class="popover__item" role="option" data-id="${p.id}"
             aria-selected="${p.id === saved.provider}">
       <span class="popover__item-label">${escapeHtml(p.label)}</span>
-      ${p.configured ? '' : '<span class="popover__flag">no key</span>'}
+      ${p.configured ? '' : `<span class="popover__flag">${p.local ? 'no models' : 'no key'}</span>`}
     </button>`;
 
   const local = providers.filter((p) => p.local);

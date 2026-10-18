@@ -1,2 +1,0 @@
-
-This Python cannot create environments — the venv module is missing. On Ubuntu/Debian: sudo apt install python3-venv (or python3.<version>-venv, to match this interpreter) (Fedora: sudo dnf install python3-libs; Arch: sudo pacman -S python). Then install the runtime again.
