@@ -2467,6 +2467,27 @@ a.icon-btn {
   );
 }
 
+/* A single-segment bar for a job's share of system RAM. Used by the local
+   models (llama.cpp, transformers) that do not report a VRAM figure. */
+.procman__membar {
+  display: inline-block;
+  width: 48px;
+  height: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+  border-radius: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text) 12%, var(--bg));
+}
+
+.procman__membar > i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--text);
+  transition: width var(--speed) var(--ease);
+}
+
 .procman__legend {
   display: flex;
   flex-wrap: wrap;

@@ -78,6 +78,7 @@ function buildMarkup() {
            byte counts and a bar, and the counts state the fraction already. -->
       <div class="resources__row resources__row--sub" data-metric="vram">
         <span class="resources__label">VRAM</span>
+        <span class="resources__bar"><i></i></span>
         <span class="resources__value">—</span>
       </div>
     </div>
@@ -401,6 +402,19 @@ export function mountResources() {
         frag.append(document.createTextNode(p));
         return;
       }
+      if (p && typeof p.bar === 'number') {
+        // A small inline bar for a job's share of system RAM. Width is the
+        // fraction of total memory; the transition is on the element so it
+        // slides rather than steps between polls.
+        const wrap = document.createElement('span');
+        wrap.className = 'procman__membar';
+        const fill = document.createElement('i');
+        fill.style.width = `${Math.min(100, Math.max(0, p.bar))}%`;
+        wrap.append(fill);
+        wrap.title = `${Math.round(p.bar)}% of system RAM`;
+        frag.append(wrap);
+        return;
+      }
       const b = document.createElement('b');
       b.textContent = p.strong;
       frag.append(b, document.createTextNode(` ${p.rest}`));
@@ -502,6 +516,7 @@ export function mountResources() {
    */
   function renderProcesses(data) {
     const now = Date.now();
+    const ramTotal = data.ramTotalBytes ?? 0;
     const models = data.ollama?.models ?? [];
     const jobs = data.active ?? [];
     const running = jobs.filter((j) => j.state !== 'stopping');
@@ -558,6 +573,7 @@ export function mountResources() {
         // goes, rather than showing a zero that was never true.
         if (typeof j.memoryBytes === 'number' && j.memoryBytes > 0) {
           parts.push({ strong: fmtBytesFor(j.memoryBytes), rest: 'in memory' });
+          if (ramTotal > 0) parts.push({ bar: (j.memoryBytes / ramTotal) * 100 });
         }
         // The runner's own answer where it has one: the request ("auto") is
         // not the truth on a machine that cannot run on a GPU at all.
