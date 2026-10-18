@@ -1321,6 +1321,8 @@ const rtPreferred = ['onnxruntime'];
 let rtPicked = new Set();
 /** Set once the preference has been resolved, so later visits keep the user's own picks. */
 let rtPickedInit = false;
+/** The groups from the last loadRuntimes, so "Install all" can select them. */
+let rtCurrentGroups = [];
 /** True once the user has clicked a device, so auto-detection stops second-guessing them. */
 let rtDeviceChosen = false;
 
@@ -1828,7 +1830,8 @@ async function loadRuntimes({ force = false } = {}) {
     }
     renderRuntimeStatus(r);
     runtimeBlockedIds = new Set((data.blocked ?? []).map((b) => b.id));
-    renderRuntimeGroups(data.groups ?? [], r.installed ?? {}, data.blocked ?? [], data.upgrades ?? {});
+    rtCurrentGroups = data.groups ?? [];
+    renderRuntimeGroups(rtCurrentGroups, r.installed ?? {}, data.blocked ?? [], data.upgrades ?? {});
     // renderRuntimeGroups already disabled this when nothing is ticked; that
     // decision was being overwritten by the busy check alone, so an empty
     // selection looked installable.
@@ -1854,6 +1857,19 @@ async function loadRuntimes({ force = false } = {}) {
 }
 
 rtInstall.addEventListener('click', () => void runRuntimeInstall());
+const rtInstallAll = document.getElementById('rt-install-all');
+rtInstallAll?.addEventListener('click', () => {
+  rtPicked = new Set(
+    rtCurrentGroups
+      .filter((g) => !g.__installed && !g.__blocked)
+      .map((g) => g.id),
+  );
+  if (!rtPicked.size) {
+    notifyWarning('Everything installable is already installed');
+    return;
+  }
+  void runRuntimeInstall();
+});
 
 /**
  * What the current (or last) install was asked to install, so a retry after a
