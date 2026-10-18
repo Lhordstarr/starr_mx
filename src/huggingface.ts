@@ -833,8 +833,7 @@ export async function listDownloads(): Promise<HFDownload[]> {
 
 /** Deletes one downloaded file and prunes dirs left empty (never above root). */
 export async function deleteDownload(repo: string, file: string): Promise<void> {
-  const repoProblem = validateRepoId(repo);
-  if (repoProblem) throw new Error(repoProblem);
+  if (!repo || !repo.trim()) throw new Error('Model id is required');
   const fileProblem = validateFilePath(file);
   if (fileProblem) throw new Error(fileProblem);
   const root = path.resolve(modelsDir());

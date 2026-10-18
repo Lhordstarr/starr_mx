@@ -43,7 +43,7 @@ import {
 } from './huggingface.js';
 import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGen, releaseImageGen, IMAGE_FIELD_LABELS, MAX_PROMPT_LENGTH } from './imagegen.js';
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
-import { ggufModels, stopLlamaServer } from './llamacpp.js';
+import { ggufModels, llamaServerState, stopLlamaServer } from './llamacpp.js';
 import { llamaCppUpgradeKind } from './runtimes.js';
 import { allProviders, providerOrder } from './providers/index.js';
 import { discoverLocalServers, discoveredProvider, type DiscoveredServer } from './discovery.js';
@@ -1583,10 +1583,17 @@ app.get('/api/hf/files', async (_req, res) => {
 app.post('/api/hf/files/delete', async (req, res) => {
   const repo = typeof req.body?.repo === 'string' ? req.body.repo : '';
   const file = typeof req.body?.file === 'string' ? req.body.file : '';
-  const problem = validateRepoId(repo) ?? validateFilePath(file);
-  if (problem) return res.status(400).json({ error: problem });
+  if (!repo) return res.status(400).json({ error: 'Model id is required' });
+  const fileProblem = validateFilePath(file);
+  if (fileProblem) return res.status(400).json({ error: fileProblem });
   try {
     await deleteDownload(repo, file);
+    // If the file we just removed is the model a running llama-server holds,
+    // that server is now pointing at nothing: stop it so the next request
+    // starts a fresh one instead of failing on a missing file.
+    const loaded = llamaServerState().model;
+    const deletedName = path.basename(file).replace(/\.gguf$/i, '');
+    if (loaded && loaded === deletedName) await stopLlamaServer();
     res.json({ deleted: { repo, file } });
   } catch (err) {
     const message = (err as Error).message;
