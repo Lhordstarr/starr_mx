@@ -4,6 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import express from 'express';
 import { readFileSync } from 'node:fs';
 import { createServer as createTlsServer } from 'node:https';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -1291,6 +1292,8 @@ app.get('/api/processes', async (_req, res) => {
     ),
     recent,
     ollama,
+    // Total system RAM, so a per-job memory bar can be a fraction of something.
+    ramTotalBytes: os.totalmem(),
   });
 });
 

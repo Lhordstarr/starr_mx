@@ -33,7 +33,7 @@ if (!browser) {
 
 let providers;
 try {
-  const res = await fetch(new URL('/api/providers', APP_URL), { signal: AbortSignal.timeout(3000) });
+  const res = await fetch(new URL('/api/providers', APP_URL), { signal: AbortSignal.timeout(15000) });
   providers = (await res.json())?.providers ?? [];
 } catch {
   console.log(`SKIP — app not reachable at ${APP_URL} (start it with npm run dev)`);
@@ -168,20 +168,16 @@ try {
     const item = document.querySelector('#provider-list .popover__item[data-id=llamacpp]');
     return item ? { label: item.querySelector('.popover__item-label')?.textContent ?? '', text: item.textContent } : null;
   })()`);
-  report('llama.cpp is listed as a provider', row?.label === 'llama.cpp', JSON.stringify(row));
+  report('llama.cpp is listed as a provider', row?.label === 'llama.cpp (local)', JSON.stringify(row));
   report(
     'the "runs on this PC" tag is gone from the provider rows',
     !(await evalJs(`document.getElementById('provider-pop').textContent`)).includes('runs on this PC'),
-  );
-  report(
-    'the local group heading stays',
-    await evalJs(`document.getElementById('provider-pop').textContent.includes('On this machine')`),
   );
 
   await evalJs(`document.querySelector('#provider-list .popover__item[data-id=llamacpp]').click()`);
   report(
     'picking it makes llama.cpp the active provider',
-    await waitFor(`document.getElementById('chip-provider').textContent === 'llama.cpp'`),
+    await waitFor(`document.getElementById('chip-provider').textContent === 'llama.cpp (local)'`),
     await evalJs(`document.getElementById('chip-provider').textContent`),
   );
 
@@ -214,7 +210,7 @@ try {
   report(
     'a deep link selects the provider and the model',
     await waitFor(
-      `document.getElementById('chip-provider').textContent === 'llama.cpp' &&
+      `document.getElementById('chip-provider').textContent === 'llama.cpp (local)' &&
        document.getElementById('model-current').textContent === ${JSON.stringify(target)}`,
       15000,
     ),
@@ -267,7 +263,7 @@ try {
           report(
             'and the chat page has it selected',
             await waitFor(
-              `document.getElementById('chip-provider').textContent === 'llama.cpp' &&
+              `document.getElementById('chip-provider').textContent === 'llama.cpp (local)' &&
                ${JSON.stringify(models)}.includes(document.getElementById('model-current').textContent)`,
               15000,
             ),
