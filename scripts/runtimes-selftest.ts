@@ -24,7 +24,9 @@ import { join } from 'node:path';
 import {
   describeVenvFailure,
   ensureVenv,
+  installRuntimes,
   MISSING_PIP_MESSAGE,
+  MissingVenvPackage,
   needsPrivilege,
   ollamaCommand,
   ollamaRecipe,
@@ -227,6 +229,85 @@ section('Python environment errors');
     killed: 'The interpreter was killed by SIGTERM before it could report anything.',
   });
   report('a SIGTERM death is not called the out-of-memory killer', !/out-of-memory/i.test(term), term);
+}
+
+/* ---- 1c. The one failure with a scripted fix ---- */
+section('Installing the missing venv package');
+{
+  const pkg = new MissingVenvPackage('3.12');
+  report(
+    'the command names the package for that interpreter',
+    pkg.command === 'sudo apt-get install -y python3.12-venv',
+    pkg.command,
+  );
+  report('the command asks for no confirmation twice', /install -y/.test(pkg.command), pkg.command);
+
+  /* End to end against a stand-in interpreter: the venv module present, the
+     ensurepip module absent. This is what a fresh Ubuntu without python3-venv
+     looks like from here, and it is the failure a real box produced. */
+  const home = mkdtempSync(join(tmpdir(), 'starr-missing-'));
+  const fake = join(home, 'python3');
+  writeFileSync(
+    fake,
+    [
+      '#!/bin/sh',
+      'case "$*" in',
+      '  *"-c import sys;print"*) echo "3.12"; exit 0 ;;',
+      '  *"-m venv"*)',
+      '    echo "The virtual environment was not created successfully because the ensurepip module is not available." >&2',
+      '    exit 1 ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(fake, 0o755);
+
+  const saved = { dir: process.env.RUNTIMES_DIR, py: process.env.RUNTIMES_PYTHON };
+  process.env.RUNTIMES_PYTHON = fake;
+  process.env.RUNTIMES_DIR = join(home, '.runtimes');
+
+  const asked: string[] = [];
+  let caught = '';
+  try {
+    await installRuntimes({
+      groups: [{ id: 'onnxruntime', pkgs: ['onnxruntime'] }] as never,
+      device: 'cpu',
+      onProgress: () => {},
+      onNeedsPrivilege: (c: string) => asked.push(c),
+    });
+  } catch (err) {
+    caught = (err as Error).message;
+  }
+  report(
+    'a missing venv module asks for the package to be installed',
+    asked.length === 1 && asked[0] === 'sudo apt-get install -y python3.12-venv',
+    JSON.stringify(asked),
+  );
+  report(
+    'and the failure names the same command',
+    caught.includes('sudo apt-get install -y python3.12-venv'),
+    caught,
+  );
+  report(
+    'it does not claim the environment was built',
+    !/installed\.$/i.test(caught) && /missing the venv module/.test(caught),
+    caught,
+  );
+  report(
+    'the versioned package is used, not the metapackage',
+    !/install -y python3-venv\b/.test(caught),
+    caught,
+  );
+
+  // Restored before the fixtures are torn down, so a failure above cannot leave
+  // the real environment pointed at a throwaway interpreter.
+  if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+  else process.env.RUNTIMES_DIR = saved.dir;
+  if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+  else process.env.RUNTIMES_PYTHON = saved.py;
+  rmSync(home, { recursive: true, force: true });
+  report('the real environment is untouched by the fixture', process.env.RUNTIMES_PYTHON === saved.py);
 }
 
 /* ---- 1b. An environment with no pip in it ---- */

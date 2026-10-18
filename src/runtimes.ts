@@ -1423,6 +1423,10 @@ async function createVenv(
               // turns "python3.<version>-venv" into the package name to type.
               version: version || undefined,
             }),
+            // Carried structurally, not re-derived from the text above. This is
+            // the one failure with a scripted fix, and recognising it by parsing
+            // our own English would make the recovery depend on the wording.
+            { cause: isMissingVenvModule(err) && version ? new MissingVenvPackage(version) : undefined },
           ),
         );
       });
@@ -1624,6 +1628,31 @@ export interface VenvFailureDetail {
   version?: string;
 }
 
+/**
+ * The distro package that carries the venv module is not installed.
+ *
+ * Carried as a marker so the one failure with a scripted fix can be recognised
+ * without matching on the message text this file also writes for humans.
+ */
+export class MissingVenvPackage extends Error {
+  constructor(
+    /** Interpreter version the package must match, e.g. '3.12'. */
+    readonly version: string,
+  ) {
+    super(`python${version}-venv is not installed`);
+    this.name = 'MissingVenvPackage';
+  }
+  /** The exact command, which is also what the password prompt is shown. */
+  get command(): string {
+    return `sudo apt-get install -y python${this.version}-venv`;
+  }
+}
+
+/** Did the interpreter fail because its venv module is missing? */
+function isMissingVenvModule(stderr: string): boolean {
+  return /\bensurepip\b/i.test(stderr) || /No module named ['"]?venv/i.test(stderr);
+}
+
 export function describeVenvFailure(stderr: string, detail: VenvFailureDetail = {}): string {
   const text = stderr.trim();
   const hint = venvModuleHint(detail.version);
@@ -1761,6 +1790,132 @@ type PrivilegedInstall = Pick<InstallOpts, 'onProgress' | 'password' | 'onNeedsP
  */
 export { needsPrivilege } from './drivers.js';
 
+/**
+ * Creates the environment, installing the distro package that carries the venv
+ * module if that is what is missing.
+ *
+ * This is the one place the app escalates for Python itself. It has to: the
+ * module is a *system* package, so no amount of retrying, repairing or pointing
+ * RUNTIMES_PYTHON at a different interpreter gets past it — and the alternative
+ * is a user copying a command out of the log and back into a terminal, which is
+ * where the version gets typed wrong and the failure repeats.
+ *
+ * Two constraints keep it narrow. The package name is derived from the
+ * interpreter this code itself chose, never from anything the user sent, and only
+ * one package is ever installed — so the worst case is the wrong venv module for
+ * an interpreter already on the machine, not arbitrary package installation.
+ */
+async function ensureVenvWithRecovery(
+  name: string,
+  bound: string | undefined,
+  onProgress: (line: string) => void,
+  opts: Pick<InstallOpts, 'password' | 'onNeedsPrivilege'>,
+): Promise<void> {
+  try {
+    await ensureVenv(name, bound, onProgress);
+    return;
+  } catch (err) {
+    const missing = (err as Error).cause;
+    if (!(missing instanceof MissingVenvPackage)) throw err;
+    await installVenvPackage(missing, onProgress, opts);
+  }
+  // The package is in place now, so the failure that brought us here should not
+  // repeat. If it does, this second failure is a different problem and says so.
+  await ensureVenv(name, bound, onProgress);
+}
+
+/** Installs the one distro package that unblocks `python -m venv`. */
+async function installVenvPackage(
+  pkg: MissingVenvPackage,
+  onProgress: (line: string) => void,
+  { password, onNeedsPrivilege }: Pick<InstallOpts, 'password' | 'onNeedsPrivilege'>,
+): Promise<void> {
+  // Only apt-based systems have a scripted answer here. On anything else the
+  // message already names the right package, and guessing a dnf or pacal
+  // command here would be worse than printing what the interpreter said.
+  if (process.platform !== 'linux') {
+    throw new Error(
+      `This Python is missing the venv module and this app cannot install it on ${platformLabel()}. ` +
+        'Install it with your package manager, then install the runtime again.',
+    );
+  }
+
+  if (!password) {
+    // No password yet: report the need so the browser prompts, and say exactly
+    // what will run. This is the same contract every other elevating step uses.
+    onNeedsPrivilege?.(pkg.command);
+    throw new Error(
+      `This Python is missing the venv module. Installing it needs your password:   ${pkg.command}   ` +
+        'Supply your password to let it run, or run that command in a terminal and install the runtime again.',
+    );
+  }
+
+  onProgress(`Installing ${pkg.command} — this needs your password…`);
+  const scrub = (text: string) =>
+    password.length >= 3 ? text.split(password).join('[redacted]') : text;
+  let tail = '';
+  const code = await new Promise<number>((resolve) => {
+    // `sudo -S` reads the password from stdin; `-p ''` stops sudo printing a
+    // second prompt of its own. `-k` is deliberately not passed, so a recent
+    // sudo authentication in a terminal is reused instead of asking again.
+    const child = spawn('sudo', ['-S', '-p', '', 'apt-get', 'install', '-y', `python${pkg.version}-venv`], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    child.stdin?.on('error', () => {
+      /* sudo exited early — a wrong password does exactly that */
+    });
+    child.stdin?.end(`${password}\n`);
+    const bufs: Record<'out' | 'err', string> = { out: '', err: '' };
+    const pump = (stream: NodeJS.ReadableStream | null, key: 'out' | 'err') => {
+      stream?.setEncoding('utf8');
+      stream?.on('data', (c: string) => {
+        bufs[key] += c;
+        const lines = bufs[key].split('\n');
+        bufs[key] = lines.pop() ?? '';
+        for (const line of lines) {
+          const text = scrub(line.replace(/\s+$/, '')).trim();
+          if (text) onProgress(text);
+          tail = `${tail}\n${text}`.slice(-4000);
+        }
+      });
+    };
+    pump(child.stdout, 'out');
+    pump(child.stderr, 'err');
+    child.on('error', (err) => {
+      const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
+      onProgress(
+        missing
+          ? 'apt-get is not on this machine, so the package cannot be installed automatically.'
+          : `Could not start apt-get: ${scrub(err.message)}`,
+      );
+      resolve(127);
+    });
+    child.on('close', (c) => {
+      for (const key of ['out', 'err'] as const) {
+        const rest = scrub(bufs[key]).trim();
+        if (rest) {
+          onProgress(rest);
+          tail = `${tail}\n${rest}`.slice(-4000);
+        }
+      }
+      resolve(c ?? 0);
+    });
+  });
+
+  if (/incorrect password|Sorry, try again|authentication failure/i.test(tail)) {
+    throw new Error('That password was not accepted, so nothing was changed.');
+  }
+  if (code !== 0) {
+    throw new Error(
+      needsPrivilege(tail)
+        ? `The package could not be installed because it needs root:   ${pkg.command}`
+        : `Installing ${pkg.command} failed (apt-get exited ${code}) — see the log above.`,
+    );
+  }
+  onProgress('Installed.');
+  invalidateRuntimeProbes();
+}
+
 
 /**
  * Installs the given groups into their venvs, torch first when anything needs
@@ -1780,7 +1935,7 @@ export async function installRuntimes({
   onNeedsPrivilege,
 }: InstallOpts): Promise<void> {
   // The shared venv is the baseline, so it exists from the first install on.
-  await ensureVenv('venv', undefined, onProgress);
+  await ensureVenvWithRecovery('venv', undefined, onProgress, { password, onNeedsPrivilege });
 
   // pip is about to change these venvs: drop the cached answers up front and
   // again when it is finished, so a failed run cannot leave a stale half in
@@ -1836,7 +1991,9 @@ export async function installRuntimes({
     // again printed "Reusing the existing environment" twice for every install
     // and, now that this check costs a subprocess, asked the same question
     // twice as well.
-    if (name !== 'venv') await ensureVenv(name, bound, onProgress);
+    if (name !== 'venv') {
+      await ensureVenvWithRecovery(name, bound, onProgress, { password, onNeedsPrivilege });
+    }
     const py = venvPython(name);
     const where = name === 'venv' ? 'the environment' : `${list[0].label}'s own environment`;
 
