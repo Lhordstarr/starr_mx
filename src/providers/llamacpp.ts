@@ -25,7 +25,7 @@ function compat(): Provider {
   if (!inner) {
     inner = openAICompatible({
       id: 'llamacpp',
-      label: 'llama.cpp',
+      label: 'llama.cpp (local)',
       baseUrl: `http://127.0.0.1:${port()}/v1`,
       // Loopback, no key: the server this app starts authenticates nothing.
       getApiKey: () => '',
@@ -43,7 +43,7 @@ function compat(): Provider {
 export const llamacpp: Provider = {
   info: {
     id: 'llamacpp',
-    label: 'llama.cpp',
+    label: 'llama.cpp (local)',
     /**
      * Installed runtime and at least one chat model. Both halves matter: the
      * binary without a model has nothing to run, and a model without the

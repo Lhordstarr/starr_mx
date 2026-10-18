@@ -836,10 +836,7 @@ async function loadProviders(saved) {
   const local = providers.filter((p) => p.local);
   const cloud = providers.filter((p) => !p.local);
   els.providerList.innerHTML =
-    (local.length
-      ? `<div class="popover__group">On this machine (${local.length})</div>` +
-        local.map(renderRow).join('')
-      : '') +
+    local.map(renderRow).join('') +
     (cloud.length
       ? `<div class="popover__group">Cloud &amp; API keys</div>` +
         cloud.map(renderRow).join('')
