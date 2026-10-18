@@ -313,6 +313,87 @@ section('Installing the missing venv package');
   report('the real environment is untouched by the fixture', process.env.RUNTIMES_PYTHON === saved.py);
 }
 
+/* ---- 1d. Installing Ollama must not need Python at all ---- */
+section('A vendor installer never builds a Python environment');
+{
+  // A machine with no python3-venv, and a group that installs a vendored binary.
+  // The shared environment used to be created before the selection was looked
+  // at, so this died in a Python error with no Ollama anywhere in it.
+  const home = mkdtempSync(join(tmpdir(), 'starr-novenv-'));
+  const badPy = join(home, 'python3');
+  writeFileSync(
+    badPy,
+    [
+      '#!/bin/sh',
+      'case "$*" in',
+      '  *"-c import sys;print"*) echo "3.13"; exit 0 ;;',
+      '  *"-m venv"*) echo "No module named venv" >&2; exit 1 ;;',
+      '  *) exit 0 ;;',
+      'esac',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(badPy, 0o755);
+
+  const saved = { dir: process.env.RUNTIMES_DIR, py: process.env.RUNTIMES_PYTHON };
+  process.env.RUNTIMES_PYTHON = badPy;
+  process.env.RUNTIMES_DIR = join(home, '.runtimes');
+
+  const said: string[] = [];
+  const asked: string[] = [];
+  let caught = '';
+  try {
+    await installRuntimes({
+      groups: [{ id: 'ollama', installer: 'ollama', pkgs: [] }] as never,
+      device: 'cpu',
+      onProgress: (l: string) => said.push(l),
+      onNeedsPrivilege: (c: string) => asked.push(c),
+    });
+  } catch (err) {
+    caught = (err as Error).message;
+  }
+  report(
+    'installing Ollama never builds a Python environment',
+    !said.some((l) => /Creating the Python environment/.test(l)),
+    said.join(' | '),
+  );
+  report(
+    'so a Python without the venv module cannot stop it',
+    !/venv/i.test(caught),
+    caught,
+  );
+  report(
+    'and it never asks for a password for a package it did not need',
+    asked.every((c) => !/python3/.test(c)),
+    JSON.stringify(asked),
+  );
+  report('it actually reaches the Ollama installer', said.some((l) => /Ollama/i.test(l)), said.join(' | '));
+
+  // The other direction: a group that genuinely goes through pip must still get
+  // its environment, or this would just be a quieter way of breaking installs.
+  const pipLines: string[] = [];
+  try {
+    await installRuntimes({
+      groups: [{ id: 'onnxruntime', pkgs: ['onnxruntime'] }] as never,
+      device: 'cpu',
+      onProgress: (l: string) => pipLines.push(l),
+    });
+  } catch {
+    /* it is meant to fail here — this Python has no venv module */
+  }
+  report(
+    'a pip group still builds its environment',
+    pipLines.some((l) => /Creating the Python environment/.test(l)),
+    pipLines.join(' | '),
+  );
+
+  if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+  else process.env.RUNTIMES_DIR = saved.dir;
+  if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+  else process.env.RUNTIMES_PYTHON = saved.py;
+  rmSync(home, { recursive: true, force: true });
+}
+
 /* ---- 1b. An environment with no pip in it ---- */
 section('An environment without pip');
 {

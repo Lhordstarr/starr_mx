@@ -2222,54 +2222,74 @@ async function aptInstall(
   onProgress(`Installing ${command} — this needs your password…`);
   const scrub = (text: string) =>
     password.length >= 3 ? text.split(password).join('[redacted]') : text;
-  let tail = '';
-  const code = await new Promise<number>((resolve) => {
-    // `sudo -S` reads the password from stdin; `-p ''` stops sudo printing a
-    // second prompt of its own. `-k` is deliberately not passed, so a recent
-    // sudo authentication in a terminal is reused instead of asking again.
-    const child = spawn('sudo', ['-S', '-p', '', 'apt-get', 'install', '-y', pkg], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    child.stdin?.on('error', () => {
-      /* sudo exited early — a wrong password does exactly that */
-    });
-    child.stdin?.end(`${password}\n`);
-    const bufs: Record<'out' | 'err', string> = { out: '', err: '' };
-    const pump = (stream: NodeJS.ReadableStream | null, key: 'out' | 'err') => {
-      stream?.setEncoding('utf8');
-      stream?.on('data', (c: string) => {
-        bufs[key] += c;
-        const lines = bufs[key].split('\n');
-        bufs[key] = lines.pop() ?? '';
-        for (const line of lines) {
-          const text = scrub(line.replace(/\s+$/, '')).trim();
-          if (text) onProgress(text);
-          tail = `${tail}\n${text}`.slice(-4000);
-        }
+  const run = async (argv: string[]): Promise<{ code: number; tail: string }> => {
+    let tail = '';
+    const code = await new Promise<number>((resolve) => {
+      // `sudo -S` reads the password from stdin; `-p ''` stops sudo printing a
+      // second prompt of its own. `-k` is deliberately not passed, so a recent
+      // sudo authentication in a terminal is reused instead of asking again.
+      const child = spawn('sudo', ['-S', '-p', '', ...argv], { stdio: ['pipe', 'pipe', 'pipe'] });
+      child.stdin?.on('error', () => {
+        /* sudo exited early — a wrong password does exactly that */
       });
-    };
-    pump(child.stdout, 'out');
-    pump(child.stderr, 'err');
-    child.on('error', (err) => {
-      const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
-      onProgress(
-        missing
-          ? 'apt-get is not on this machine, so the package cannot be installed automatically.'
-          : `Could not start apt-get: ${scrub(err.message)}`,
-      );
-      resolve(127);
-    });
-    child.on('close', (c) => {
-      for (const key of ['out', 'err'] as const) {
-        const rest = scrub(bufs[key]).trim();
-        if (rest) {
-          onProgress(rest);
-          tail = `${tail}\n${rest}`.slice(-4000);
+      child.stdin?.end(`${password}\n`);
+      const bufs: Record<'out' | 'err', string> = { out: '', err: '' };
+      const pump = (stream: NodeJS.ReadableStream | null, key: 'out' | 'err') => {
+        stream?.setEncoding('utf8');
+        stream?.on('data', (c: string) => {
+          bufs[key] += c;
+          const lines = bufs[key].split('\n');
+          bufs[key] = lines.pop() ?? '';
+          for (const line of lines) {
+            const text = scrub(line.replace(/\s+$/, '')).trim();
+            if (text) onProgress(text);
+            tail = `${tail}\n${text}`.slice(-4000);
+          }
+        });
+      };
+      pump(child.stdout, 'out');
+      pump(child.stderr, 'err');
+      child.on('error', (err) => {
+        const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
+        onProgress(
+          missing
+            ? 'apt-get is not on this machine, so the package cannot be installed automatically.'
+            : `Could not start apt-get: ${scrub(err.message)}`,
+        );
+        resolve(127);
+      });
+      child.on('close', (c) => {
+        for (const key of ['out', 'err'] as const) {
+          const rest = scrub(bufs[key]).trim();
+          if (rest) {
+            onProgress(rest);
+            tail = `${tail}\n${rest}`.slice(-4000);
+          }
         }
-      }
-      resolve(c ?? 0);
+        resolve(c ?? 0);
+      });
     });
-  });
+    return { code, tail };
+  };
+
+  let { code, tail } = await run(['apt-get', 'install', '-y', pkg]);
+
+  /* "Unable to locate package" means apt has never been told where the packages
+     are, not that the package is missing. A container image that has not run an
+     update since it was built fails exactly this way, so the update is run and
+     the install retried — the pair is what a person types at a terminal, and
+     doing only the second half is what made this need a manual fix. */
+  if (code !== 0 && /unable to locate package|no such package|not found|404\s+Not Found/i.test(tail)) {
+    onProgress('Refreshing the package list (apt-get update)…');
+    const update = await run(['apt-get', 'update']);
+    if (update.code !== 0) {
+      throw new Error(
+        'apt-get update failed, so the package list is unknown. Run it in a terminal ' +
+          'to see why, then install the runtime again.',
+      );
+    }
+    ({ code, tail } = await run(['apt-get', 'install', '-y', pkg]));
+  }
 
   if (/incorrect password|Sorry, try again|authentication failure/i.test(tail)) {
     throw new Error('That password was not accepted, so nothing was changed.');
@@ -2296,6 +2316,14 @@ async function aptInstall(
  * gets one built on an interpreter its bound allows before anything is
  * installed into it.
  */
+/** Does this group's install go through pip, and so need a Python environment? */
+function usesPython(group: RuntimeGroup): boolean {
+  // Ollama and llama.cpp ship their own installers. Neither imports a package,
+  // neither reads an interpreter, and neither is blocked by a Python that
+  // cannot build a venv.
+  return group.installer !== 'ollama' && group.installer !== 'llama-cpp';
+}
+
 export async function installRuntimes({
   groups,
   device,
@@ -2303,8 +2331,12 @@ export async function installRuntimes({
   password,
   onNeedsPrivilege,
 }: InstallOpts): Promise<void> {
-  // The shared venv is the baseline, so it exists from the first install on.
-  await ensureVenvWithRecovery('venv', undefined, onProgress, { password, onNeedsPrivilege });
+  // Only the groups that actually go through pip. Ollama and llama.cpp have
+  // their own installers, so they carry no venv — which matters, because
+  // building one is what used to fail: the environment was created before the
+  // selection was looked at, so installing Ollama on a machine with no
+  // python3-venv died in a Python error with no Ollama involved at all.
+  const pipGroups = groups.filter(usesPython);
 
   // pip is about to change these venvs: drop the cached answers up front and
   // again when it is finished, so a failed run cannot leave a stale half in
@@ -2312,11 +2344,16 @@ export async function installRuntimes({
   invalidateRuntimeProbes();
 
   const members = new Map<string, RuntimeGroup[]>();
-  for (const g of groups) {
+  for (const g of pipGroups) {
     const name = venvName(g);
     const list = members.get(name) ?? [];
     list.push(g);
     members.set(name, list);
+  }
+  // The shared venv is the baseline for pip groups, built here rather than in
+  // the loop so a selection of nothing but vendor installers creates nothing.
+  if (members.has('venv')) {
+    await ensureVenvWithRecovery('venv', undefined, onProgress, { password, onNeedsPrivilege });
   }
 
   const presence = await detectGpu();
@@ -2380,18 +2417,23 @@ export async function installRuntimes({
 
     for (const g of list) {
       if (g.id === 'torch') continue;
-      if (g.installer === 'ollama') {
-        await installOllama({ onProgress, password, onNeedsPrivilege });
-        continue;
-      }
-      if (g.installer === 'llama-cpp') {
-        await installLlamaCpp(onProgress);
-        continue;
-      }
       if (!g.pkgs.length) continue;
       onProgress(`Installing ${g.label} into ${where}…`);
       await runPip(py, [...common, ...g.pkgs], g.label);
       onProgress(`${g.label} installed.`);
+    }
+  }
+
+  /* The two that ship their own installers, outside the pip loop because they
+     carry no environment. Run after it so a selection of both does the Python
+     work first and leaves a vendored binary to a second. */
+  for (const g of groups) {
+    if (g.installer === 'ollama') {
+      await installOllama({ onProgress, password, onNeedsPrivilege });
+      continue;
+    }
+    if (g.installer === 'llama-cpp') {
+      await installLlamaCpp(onProgress);
     }
   }
 
