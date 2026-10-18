@@ -34,8 +34,8 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
 
 export type Device = 'cpu' | 'nvidia' | 'amd' | 'auto';
@@ -1000,6 +1000,14 @@ export interface RuntimeStatus {
   python: string | null;
   /** Group id -> installed version, or null. */
   installed: Record<string, string | null>;
+  /**
+   * Whether Ollama is pinned to its Vulkan backend by this app's drop-in.
+   * Separate from `installed`, because it is how Ollama will run rather than
+   * whether it is present. False on every platform but Linux, and false when
+   * the drop-in is absent — which includes machines where Ollama happens to
+   * have Vulkan on by default, so this means "configured", not "using".
+   */
+  ollamaVulkan: boolean;
   /** What torch reports about usable devices, when torch is present. */
   torch: {
     version: string | null;
@@ -1274,6 +1282,7 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
     venv: false,
     python: null,
     installed: {},
+    ollamaVulkan: false,
     torch: { version: null, cudaAvailable: false, deviceCount: 0, deviceName: null },
     busy,
   };
@@ -1313,6 +1322,10 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
     venv: true,
     python: venvPython(),
     installed,
+    // Reported separately from `installed` because it is a property of the
+    // install's configuration, not of whether Ollama is present. The Runtimes
+    // page shows it so "is it on the GPU?" is answerable without a terminal.
+    ollamaVulkan: await ollamaVulkanEnabled(),
     torch: {
       version: main.torch?.version ?? null,
       cudaAvailable: main.torch?.cuda ?? false,
@@ -1824,6 +1837,193 @@ async function ensureVenvWithRecovery(
   await ensureVenv(name, bound, onProgress);
 }
 
+/**
+ * Runs one command behind `sudo -S`, streaming its output. Resolves the exit code.
+ *
+ * The password arrives on stdin and is scrubbed from everything that comes back,
+ * because a tool that echoes its own input must not put it in the browser. The
+ * argument vector is passed through untouched — nothing here builds a shell
+ * string, which is the constraint the rest of this file is written to.
+ */
+async function sudoExec(
+  argv: string[],
+  password: string,
+  onProgress: (line: string) => void,
+): Promise<number> {
+  const scrub = (text: string) =>
+    password.length >= 3 ? text.split(password).join('[redacted]') : text;
+  let tail = '';
+  const code = await new Promise<number>((resolve) => {
+    // `-p ''` stops sudo printing a second prompt of its own. `-k` is
+    // deliberately not passed, so a recent sudo authentication in a terminal is
+    // reused instead of asking again.
+    const child = spawn('sudo', ['-S', '-p', '', ...argv], { stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdin?.on('error', () => {
+      /* sudo exited early — a wrong password does exactly that */
+    });
+    child.stdin?.end(`${password}\n`);
+    const bufs: Record<'out' | 'err', string> = { out: '', err: '' };
+    const pump = (stream: NodeJS.ReadableStream | null, key: 'out' | 'err') => {
+      stream?.setEncoding('utf8');
+      stream?.on('data', (c: string) => {
+        bufs[key] += c;
+        const lines = bufs[key].split('\n');
+        bufs[key] = lines.pop() ?? '';
+        for (const line of lines) {
+          const text = scrub(line.replace(/\s+$/, '')).trim();
+          if (text) onProgress(text);
+          tail = `${tail}\n${text}`.slice(-4000);
+        }
+      });
+    };
+    pump(child.stdout, 'out');
+    pump(child.stderr, 'err');
+    child.on('error', (err) => {
+      const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
+      onProgress(
+        missing ? 'sudo is not on this machine.' : `Could not start sudo: ${scrub(err.message)}`,
+      );
+      resolve(127);
+    });
+    child.on('close', (c) => {
+      for (const key of ['out', 'err'] as const) {
+        const rest = scrub(bufs[key]).trim();
+        if (rest) {
+          onProgress(rest);
+          tail = `${tail}\n${rest}`.slice(-4000);
+        }
+      }
+      resolve(c ?? 0);
+    });
+  });
+  if (/incorrect password|Sorry, try again|authentication failure/i.test(tail)) {
+    throw new Error('That password was not accepted, so nothing was changed.');
+  }
+  return code;
+}
+
+/**
+ * The systemd drop-in that turns Ollama's Vulkan backend on.
+ *
+ * Current Ollama enables Vulkan by default, so this is belt-and-braces for the
+ * versions that did not — but it is also the only place the setting can be
+ * pinned per machine. Writing `Environment=` into the unit itself would be
+ * overwritten by the next Ollama upgrade; a drop-in in `ollama.service.d` is
+ * merged on top and survives, which is why the vendor says `systemctl edit`
+ * rather than edit the unit.
+ */
+const OLLAMA_VULKAN_DROPIN = '[Service]\nEnvironment="OLLAMA_VULKAN=1"\n';
+const OLLAMA_DROPIN_PATH = '/etc/systemd/system/ollama.service.d/override.conf';
+
+/** True when this machine already has Ollama pinned to its Vulkan backend. */
+export async function ollamaVulkanEnabled(): Promise<boolean> {
+  if (process.platform !== 'linux') return false;
+  try {
+    return /OLLAMA_VULKAN=1/.test(await readFile(OLLAMA_DROPIN_PATH, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Points Ollama at Vulkan on a machine that has it.
+ *
+ * Two things, and the second is the one that actually decides whether it works:
+ *
+ *  - `OLLAMA_VULKAN=1`, pinned in a systemd drop-in so it survives upgrades.
+ *  - the `ollama` user in the `render` group. Ollama runs as its own system
+ *    user, and without that membership it cannot open `/dev/dri/renderD*` at
+ *    all — so the driver is present, the setting is on, and Ollama silently
+ *    falls back to the CPU. The vendor calls this out specifically for AMD.
+ *
+ * Best-effort by design: Ollama is installed and working by the time this runs,
+ * so a step that cannot finish is reported and the install carries on rather
+ * than throwing away a completed install over a GPU preference.
+ */
+async function enableOllamaVulkan(opts: PrivilegedInstall): Promise<void> {
+  const { onProgress, password, onNeedsPrivilege } = opts;
+  if (process.platform !== 'linux') return;
+
+  const vk = await detectVulkan();
+  if (!(vk.available || hasVulkan())) {
+    onProgress(
+      'No working Vulkan driver here, so Ollama is left on its default backend. ' +
+        'Install vulkan-tools and your GPU driver, then install Ollama again.',
+    );
+    return;
+  }
+  const card = vk.device ? ` (${vk.device})` : '';
+
+  if (await ollamaVulkanEnabled()) {
+    onProgress(`Ollama is already set to use Vulkan${card}.`);
+    return;
+  }
+
+  if (!password) {
+    // Report the need rather than failing on it: the browser prompts, and this
+    // is the same contract every other elevating step uses.
+    onNeedsPrivilege?.(
+      'sudo systemctl edit ollama   # sets OLLAMA_VULKAN=1, then sudo usermod -aG render ollama',
+    );
+    onProgress(
+      `This machine has Vulkan${card}, but turning it on for Ollama needs your password. ` +
+        'Supply it to finish, or run the command above in a terminal.',
+    );
+    return;
+  }
+
+  onProgress(`Setting Ollama to use Vulkan${card}…`);
+
+  // Written to a temporary file and installed from there rather than piped into
+  // a shell, so no part of this is ever interpreted by one.
+  const tmp = await mkdtemp(path.join(tmpdir(), 'ollama-vk-'));
+  const dropin = path.join(tmp, 'override.conf');
+  try {
+    await writeFile(dropin, OLLAMA_VULKAN_DROPIN, 'utf8');
+    // `install -D` creates the drop-in directory systemd looks in, which does
+    // not exist on a fresh install.
+    const put = await sudoExec(
+      ['install', '-D', '-m', '0644', dropin, OLLAMA_DROPIN_PATH],
+      password,
+      onProgress,
+    );
+    if (put !== 0) {
+      onProgress('Could not write the Ollama service setting — Ollama is left as it was.');
+      return;
+    }
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+
+  // The group membership is what makes the setting mean anything. Asked rather
+  // than assumed, so a machine that already has it does not get a pointless
+  // sudo round trip.
+  const groups = spawnSync('id', ['-nG', 'ollama'], { encoding: 'utf8' });
+  if (groups.status === 0 && /(^|\s)render(\s|$)/.test(groups.stdout ?? '')) {
+    onProgress('The ollama user can already open the GPU.');
+  } else if ((await sudoExec(['usermod', '-aG', 'render', 'ollama'], password, onProgress)) !== 0) {
+    onProgress(
+      'Could not add the ollama user to the render group, so Ollama stays on the CPU until you run: ' +
+        'sudo usermod -aG render ollama',
+    );
+  } else {
+    onProgress('Added the ollama user to the render group so it can open the GPU.');
+  }
+
+  // The service has to reread the unit and restart for either change to land.
+  await sudoExec(['systemctl', 'daemon-reload'], password, onProgress);
+  const restart = await sudoExec(['systemctl', 'restart', 'ollama'], password, onProgress);
+  if (restart !== 0) {
+    onProgress(
+      'Could not restart Ollama, so the setting applies next time it starts. ' +
+        'Start it with `ollama serve`.',
+    );
+  } else {
+    onProgress('Ollama restarted with Vulkan enabled.');
+  }
+  invalidateRuntimeProbes();
+}
+
 /** Installs the one distro package that unblocks `python -m venv`. */
 async function installVenvPackage(
   pkg: MissingVenvPackage,
@@ -2190,6 +2390,11 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
     throw new Error(`The Ollama installer exited ${code} — see the log above.`);
   }
   onProgress('Ollama installed. Start it with `ollama serve` if the daemon is not already running.');
+  // After the install, so the daemon exists to be restarted. Best-effort by
+  // design — this reports and returns rather than throwing, because Ollama is
+  // already installed and working at this point and a GPU preference is not a
+  // reason to call the whole install a failure.
+  await enableOllamaVulkan(opts);
 }
 
 /**

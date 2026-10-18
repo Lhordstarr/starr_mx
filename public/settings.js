@@ -1400,7 +1400,7 @@ function restoreDevice() {
   }
 }
 
-function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}) {
+function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}, ollamaVulkan = false) {
   const blockedBy = new Map(blocked.map((b) => [b.id, b]));
 
   // Reconcile the selection with reality. Anything already installed, blocked
@@ -1465,6 +1465,15 @@ function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}) {
       // so any package without an `unlocks` list left an empty span in the
       // document — invisible, but markup that means nothing.
       meta.append(state);
+      // Which backend Ollama will actually use. Without it, the only way to tell
+      // whether the card is being used is to read the service's own logs, and
+      // "Installed" says nothing about where it runs.
+      if (g.id === 'ollama' && isIn) {
+        const vk = document.createElement('span');
+        vk.className = 'rt-unlocks';
+        vk.textContent = ollamaVulkan ? 'Vulkan' : 'default backend';
+        meta.append(vk);
+      }
       // A better build is available for this machine (e.g. Vulkan instead of
       // the CPU build). Offer a one-click reinstall that swaps it in.
       if (isIn && upgrades[g.id]) {
@@ -1829,7 +1838,13 @@ async function loadRuntimes({ force = false } = {}) {
     renderRuntimeStatus(r);
     runtimeBlockedIds = new Set((data.blocked ?? []).map((b) => b.id));
     rtCurrentGroups = data.groups ?? [];
-    renderRuntimeGroups(rtCurrentGroups, r.installed ?? {}, data.blocked ?? [], data.upgrades ?? {});
+    renderRuntimeGroups(
+      rtCurrentGroups,
+      r.installed ?? {},
+      data.blocked ?? [],
+      data.upgrades ?? {},
+      r.ollamaVulkan === true,
+    );
     // renderRuntimeGroups already disabled this when nothing is ticked; that
     // decision was being overwritten by the busy check alone, so an empty
     // selection looked installable.

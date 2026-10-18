@@ -31,6 +31,7 @@ import {
   needsPrivilege,
   ollamaCommand,
   ollamaRecipe,
+  ollamaVulkanEnabled,
   permissionMessage,
   unwritableAncestor,
   venvHasPip,
@@ -545,6 +546,10 @@ section('Ollama installer per OS');
     fetcher === null || fetcher === 'curl' || fetcher === 'wget',
     String(fetcher),
   );
+  // The status field is how the Runtimes page answers "is it on the GPU?"
+  // without a terminal, so it has to exist and have to be a boolean.
+  const vkState = await ollamaVulkanEnabled();
+  report('the Ollama Vulkan setting is readable as a boolean', typeof vkState === 'boolean', String(vkState));
 
   // The escalated and bare forms are the same installer with a wrapper, so the
   // two argument vectors have to agree apart from that wrapper.
