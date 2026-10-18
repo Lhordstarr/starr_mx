@@ -75,6 +75,7 @@ const SCRIPT_RUNTIMES: Record<string, string[]> = {
   'speak.py': ['torch', 'kokoro'],
   'generate.py': ['torch', 'diffusers'],
   'llama-server': ['llama-cpp'],
+  'chat_transformers.py': ['torch', 'transformers'],
 };
 
 let seq = 0;

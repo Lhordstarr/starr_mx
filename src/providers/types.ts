@@ -5,6 +5,7 @@ import type { ToolDefinition } from '../tools.js';
 export type BuiltinProviderId =
   | 'ollama'
   | 'llamacpp'
+  | 'transformers-chat'
   | 'openai'
   | 'openrouter'
   | 'anthropic'

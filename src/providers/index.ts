@@ -3,6 +3,7 @@ import { customApiKey, listCustomProviders } from './custom.js';
 import { gemini } from './gemini.js';
 import { llamacpp } from './llamacpp.js';
 import { ollama } from './ollama.js';
+import { transformersChat } from './transformers-chat.js';
 import { openAICompatible } from './openai-compat.js';
 import type { BuiltinProviderId, Provider, ProviderId } from './types.js';
 
@@ -40,6 +41,7 @@ export const groq = openAICompatible({
 export const builtinProviders: Record<BuiltinProviderId, Provider> = {
   ollama,
   llamacpp,
+  'transformers-chat': transformersChat,
   openai,
   openrouter,
   anthropic,
@@ -51,6 +53,7 @@ export const builtinProviders: Record<BuiltinProviderId, Provider> = {
 export const builtinOrder: BuiltinProviderId[] = [
   'ollama',
   'llamacpp',
+  'transformers-chat',
   'openai',
   'openrouter',
   'anthropic',

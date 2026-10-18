@@ -153,6 +153,15 @@ export const CATALOG: CatalogSection[] = [
         runtime: 'transformers',
         files: [{ name: 'model-00001-of-00004.safetensors', label: 'safetensors shard 1/4', bytes: 3763 * MB }],
       },
+      {
+        repo: 'HuggingFaceTB/SmolLM2-135M-Instruct',
+        label: 'SmolLM2 135M Instruct',
+        task: 'text',
+        blurb: 'Tiny instruct model in safetensors form, for the transformers runtime.',
+        runtime: 'Transformers',
+        files: [{ name: 'model.safetensors', label: 'weights', bytes: 269 * MB }],
+        bundle: true,
+      },
     ],
   },
   {

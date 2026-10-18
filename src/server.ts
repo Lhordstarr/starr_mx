@@ -45,6 +45,7 @@ import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGe
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
 import { ggufModels, llamaServerState, stopLlamaServer } from './llamacpp.js';
 import { llamaCppUpgradeKind } from './runtimes.js';
+import { stopTransformersServer, transformersChatModels } from './transformers-chat.js';
 import { allProviders, providerOrder } from './providers/index.js';
 import { discoverLocalServers, discoveredProvider, type DiscoveredServer } from './discovery.js';
 import { backendReports } from './backends.js';
@@ -206,6 +207,7 @@ app.get('/api/providers', async (_req, res) => {
   // warm-up here keeps a freshly started server (or a fresh page load) from
   // reporting "no models" for the first second.
   await ggufModels().catch(() => undefined);
+  await transformersChatModels().catch(() => undefined);
 
   const registry = providerRegistry();
 
@@ -1571,11 +1573,18 @@ app.get('/api/hf/files', async (_req, res) => {
   // browser — the collision rule that qualifies two same-named files with their
   // repo has to have exactly one implementation, or a "Chat" button leads to a
   // model the server cannot resolve.
-  const byFile = new Map((await ggufModels().catch(() => [])).map((m) => [`${m.repo}\n${m.file}`, m]));
+  const gguf = new Map((await ggufModels().catch(() => [])).map((m) => [`${m.repo}\n${m.file}`, m]));
+  const tf = (await transformersChatModels().catch(() => [])).filter((m) => m.chat);
+  const tfRoots = new Set(tf.map((m) => m.root));
+  const tfByRepo = new Map(tf.map((m) => [m.repo, m]));
   res.json({
     files: files.map((f) => {
-      const model = byFile.get(`${f.repo}\n${f.file}`);
-      return model?.chat ? { ...f, llama: { provider: 'llamacpp', model: model.id } } : f;
+      const g = gguf.get(`${f.repo}\n${f.file}`);
+      if (g?.chat) return { ...f, llama: { provider: 'llamacpp', model: g.id } };
+      if (tfRoots.has(f.root) && tfByRepo.has(f.repo)) {
+        return { ...f, transformers: { provider: 'transformers-chat', model: f.repo } };
+      }
+      return f;
     }),
   });
 });

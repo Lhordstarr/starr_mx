@@ -2060,7 +2060,7 @@ const FORMAT_RUNTIME = [
     ext: /\.(safetensors|bin|pth|pt)$/i,
     label: 'Transformers',
     requires: ['torch', 'transformers'],
-    blurb: 'Torch weights. Loaded by transformers, on top of PyTorch.',
+    blurb: 'Torch weights. Chat models run here through transformers; others need their own program.',
   },
   {
     id: 'diffusers',
@@ -2100,9 +2100,18 @@ const LLAMA_CHAT_RUNTIME = {
   blurb: 'A quantised GGUF chat model. Runs on this machine through llama.cpp.',
 };
 
+const TRANSFORMERS_CHAT_RUNTIME = {
+  id: 'transformers',
+  label: 'Transformers',
+  requires: ['torch', 'transformers'],
+  blurb: 'A transformers chat model. Runs on this machine through torch + transformers.',
+};
+
 /** `null` when this row is not a chat model. */
 function chatRuntimeFor(d) {
-  return d?.llama ? { ...LLAMA_CHAT_RUNTIME, provider: d.llama.provider, model: d.llama.model } : null;
+  if (d?.llama) return { ...LLAMA_CHAT_RUNTIME, provider: d.llama.provider, model: d.llama.model };
+  if (d?.transformers) return { ...TRANSFORMERS_CHAT_RUNTIME, provider: d.transformers.provider, model: d.transformers.model };
+  return null;
 }
 
 /** What it takes to run this file, based on its extension. */
@@ -2770,7 +2779,7 @@ async function refreshHub() {
       // tuner, a TTS architecture nothing here speaks. The row says so
       // instead of leaving a runtime label that reads as usable. A GGUF chat
       // model is not jobless: the chat page's llama.cpp provider loads it.
-      jobless: anchor.llama ? false : usableRepos ? !usableRepos.has(anchor.repo) : false,
+      jobless: anchor.llama || anchor.transformers ? false : usableRepos ? !usableRepos.has(anchor.repo) : false,
       entry: entry ?? null,
       // One model can span several files; the runner is pointed at the weights.
       file: anchor.file,
@@ -5044,7 +5053,9 @@ function renderLocalDownload(d, resolved) {
   // llama.cpp provider runs it, and the server already worked out the id that
   // names it. Offered only once the runtime is installed — a button that lands
   // on a provider that cannot start is worse than the Install button beside it.
-  const chatLink = d.llama && runtimeReady(LLAMA_CHAT_RUNTIME, catalogInstalled) ? d.llama : null;
+  const chatMarker = d.llama || d.transformers;
+  const chatRuntime = d.llama ? LLAMA_CHAT_RUNTIME : (d.transformers ? TRANSFORMERS_CHAT_RUNTIME : null);
+  const chatLink = chatMarker && chatRuntime && runtimeReady(chatRuntime, catalogInstalled) ? chatMarker : null;
   if (chatLink) {
     const btn = document.createElement('button');
     btn.type = 'button';
