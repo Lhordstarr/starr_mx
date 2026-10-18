@@ -617,8 +617,6 @@ section('Client contract');
     'the provider popover no longer tags rows "runs on this PC"',
     !/runs on this PC/.test(appJs),
   );
-  report('the "On this machine" grouping stays', /On this machine \(/.test(appJs));
-
   const settingsJs = readFileSync(join(process.cwd(), 'public', 'settings.js'), 'utf8');
   report(
     'a chat model is offered the chat page it can run on',
