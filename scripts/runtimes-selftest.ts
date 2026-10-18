@@ -1887,6 +1887,265 @@ if (browser && serverUp) {
   }
 }
 
+/* ---- every meter is the same bar ----
+ *
+ * Last, because it drives a third browser and intercepts /api/processes.
+ *
+ * Two things are load-bearing here and both are the kind that pass a naive
+ * check while the page is wrong:
+ *
+ *  - `hidden` loses to an element's own `display`, so an indicator that was
+ *    only ever hidden by attribute stayed on screen. These assert the computed
+ *    display, not the property;
+ *  - a figure that is *absent* is a different thing from a figure that is
+ *    *zero*. Zero gets a bar with an empty half; absent gets no bar at all,
+ *    because an empty track beside a blank legend reads as a failed render.
+ */
+if (browser && serverUp) {
+  const PORT3 = PORT + 2;
+  const PROFILE3 = join(tmpdir(), `starr-bars-${process.pid}`);
+  rmSync(PROFILE3, { recursive: true, force: true });
+  const GIB = 1024 ** 3;
+  const procBody = Buffer.from(
+    JSON.stringify({
+      active: [
+        { id: 'j1', kind: 'image', repo: 'stabilityai/sd-turbo', pid: 4242, startedAt: Date.now() - 90_000, memoryBytes: 3.2 * GIB, device: 'cuda', resolvedDevice: 'cuda', runtimes: ['diffusers'] },
+        { id: 'j2', kind: 'stt', script: 'transcribe', pid: 4243, startedAt: Date.now() - 8_000, memoryBytes: 0.9 * GIB, device: 'cpu', runtimes: [] },
+        { id: 'j3', kind: 'tts', script: 'speak', pid: 4244, startedAt: Date.now() - 4_000, memoryBytes: null, device: 'cpu', runtimes: [] },
+      ],
+      recent: [],
+      ramTotalBytes: 16 * GIB,
+      ollama: {
+        ok: true,
+        models: [
+          { name: 'qwen2.5:7b', sizeBytes: 6 * GIB, vramBytes: 4.5 * GIB, expires: '5m', device: 'gpu' },
+          { name: 'tiny:1b', sizeBytes: 1 * GIB, vramBytes: 0, expires: 'never', device: 'cpu' },
+        ],
+      },
+    }),
+  ).toString('base64');
+
+  const chrome3 = spawn(
+    browser,
+    [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--window-size=1280,1400',
+      `--remote-debugging-port=${PORT3}`,
+      `--user-data-dir=${PROFILE3}`,
+      'about:blank',
+    ],
+    { stdio: 'ignore' },
+  );
+  const sleep3 = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const done3 = () => {
+    try {
+      chrome3.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+    try {
+      rmSync(PROFILE3, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      /* leaving it behind */
+    }
+  };
+  try {
+    let ws3 = '';
+    for (let i = 0; i < 60 && !ws3; i += 1) {
+      try {
+        const l = (await (
+          await fetch(`http://127.0.0.1:${PORT3}/json/list`)
+        ).json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+        ws3 = l.find((t) => t.type === 'page')?.webSocketDebuggerUrl ?? '';
+      } catch {
+        await sleep3(250);
+      }
+    }
+    if (!ws3) throw new Error('chromium never came up');
+
+    const sock = new WebSocket(ws3);
+    await new Promise<void>((resolve, reject) => {
+      sock.addEventListener('open', () => resolve());
+      sock.addEventListener('error', () => reject(new Error('cdp socket failed')));
+    });
+    let cid = 0;
+    const cwait = new Map<number, (m: any) => void>();
+    sock.addEventListener('message', (ev) => {
+      const m = JSON.parse(String((ev as MessageEvent).data));
+      if (m.id && cwait.has(m.id)) {
+        cwait.get(m.id)!(m);
+        cwait.delete(m.id);
+      }
+      if (m.method === 'Fetch.requestPaused') {
+        const url = String(m.params?.request?.url ?? '');
+        const post = (method: string, params: Record<string, unknown>) => {
+          const n = ++cid;
+          cwait.delete(n);
+          sock.send(JSON.stringify({ id: n, method, params }));
+        };
+        if (url.includes('/api/processes')) {
+          post('Fetch.fulfillRequest', {
+            requestId: m.params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'content-type', value: 'application/json' }],
+            body: procBody,
+          });
+        } else {
+          post('Fetch.continueRequest', { requestId: m.params.requestId });
+        }
+      }
+    });
+    const call = (method: string, params: Record<string, unknown> = {}) =>
+      new Promise<any>((resolve) => {
+        const n = ++cid;
+        cwait.set(n, resolve);
+        sock.send(JSON.stringify({ id: n, method, params }));
+      });
+    const run = async (expression: string) => {
+      const r = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (r.result?.exceptionDetails) {
+        throw new Error(String(r.result.exceptionDetails.exception?.description ?? 'eval failed'));
+      }
+      return r.result?.result?.value;
+    };
+    const until = async (expression: string, timeoutMs = 20000) => {
+      const end = Date.now() + timeoutMs;
+      for (;;) {
+        if (await run(`Boolean(${expression})`)) return true;
+        if (Date.now() > end) return false;
+        await sleep3(150);
+      }
+    };
+
+    await call('Page.enable');
+    await call('Runtime.enable');
+    await call('Fetch.enable', { patterns: [{ urlPattern: `${APP_URL}/api/processes*` }] });
+    await call('Page.navigate', { url: 'about:blank' });
+    await sleep3(400);
+    await call('Page.navigate', { url: `${APP_URL}/` });
+    await sleep3(3000);
+    await run(`document.getElementById('open-procman').click(); true`);
+    if (!(await until(`document.querySelectorAll('.procman__row').length >= 5`, 25000))) {
+      throw new Error('the process rows did not render');
+    }
+    await sleep3(800);
+
+    const bars = JSON.parse(
+      String(
+        await run(`JSON.stringify([...document.querySelectorAll('.procman__row')].map(r => {
+          const split = r.querySelector('.procman__split');
+          return {
+            name: (r.querySelector('.procman__name')?.textContent ?? r.textContent),
+            parts: [...r.querySelectorAll('.procman__split i')].map(i => i.dataset.part + ':' + i.style.width),
+            legend: [...r.querySelectorAll('.procman__legend-item b')].map(b => b.textContent),
+            aria: split ? split.getAttribute('aria-label') : null,
+            visible: split ? getComputedStyle(split).display !== 'none' : false,
+            height: split ? getComputedStyle(split).height : null,
+            radius: split ? getComputedStyle(split).borderTopLeftRadius : null,
+          };
+        }))`),
+      ),
+    );
+    const named = (frag: string) => bars.find((b: any) => b.name.includes(frag));
+    const jobs = bars.filter((b: any) => b.visible && b.parts.some((p: string) => p.startsWith('job:')));
+    const models = bars.filter((b: any) => b.visible && b.parts.some((p: string) => p.startsWith('vram:')));
+
+    report('a local job gets the same bar an Ollama model gets', jobs.length === 2, JSON.stringify(bars.map((b: any) => b.parts)));
+    report(
+      'and it is a share of the machine, not a four-pixel sliver',
+      jobs.some((j: any) => j.legend.join(' ').includes('this job') && j.parts.some((p: string) => p.startsWith('rest:'))),
+      JSON.stringify(jobs.map((j: any) => j.legend)),
+    );
+    const big = named('sd-turbo');
+    const pct = Number(
+      String(big?.parts.find((p: string) => p.startsWith('job:')) ?? 'job:0%').split(':')[1].replace('%', ''),
+    );
+    report("the width is the job's share of memory", Math.abs(pct - 20) < 1.5, `${pct}%`);
+    report(
+      'both Ollama models keep their VRAM/RAM split',
+      models.length === 2 && models.every((m: any) => m.parts.some((p: string) => p.startsWith('ram:'))),
+      JSON.stringify(models.map((m: any) => m.parts)),
+    );
+    report(
+      'the bar is one rounded pill everywhere',
+      [...jobs, ...models].every((b: any) => b.radius === '99px' && b.height === '8px'),
+      JSON.stringify([...jobs, ...models].map((b: any) => [b.height, b.radius])),
+    );
+    report(
+      'and it carries the same sentence for a screen reader',
+      [...jobs, ...models].every((b: any) => typeof b.aria === 'string' && b.aria.length > 4),
+      JSON.stringify([...jobs, ...models].map((b: any) => b.aria)),
+    );
+
+    // Zero is an answer; absent is not.
+    const zero = named('tiny:1b');
+    report(
+      'a model with zero VRAM still gets a painted bar',
+      zero?.visible === true && zero.parts[0] === 'vram:0%' && zero.parts[1] === 'ram:100%',
+      JSON.stringify(zero),
+    );
+    report(
+      'with a legend that says so rather than sitting blank',
+      zero?.legend.length === 2 && zero.legend.every((l: string) => l.trim().length > 0),
+      JSON.stringify(zero?.legend),
+    );
+    const blind = named('speak');
+    report(
+      'a job whose memory could not be read shows no bar at all',
+      blind?.visible === false && blind.aria === null,
+      JSON.stringify(blind),
+    );
+
+    // The number moves every poll. Node identity is what separates a repaint
+    // from a rebuild, and a rebuild would restart the width transition from
+    // zero once a second, so the bar would never appear to move.
+    const repaint = JSON.parse(
+      String(
+        await run(`(async () => {
+          const before = document.querySelector('.procman__row .procman__split');
+          await new Promise(r => setTimeout(r, 2500));
+          return JSON.stringify({ sameNode: before === document.querySelector('.procman__row .procman__split') });
+        })()`),
+      ),
+    );
+    report('a bar whose number moves is repainted, not rebuilt', repaint.sameNode === true, JSON.stringify(repaint));
+
+    // The size knob must not be the top bar's height. `--bar-h` is set on
+    // :root for the page header, so a meter that reached for it came out 34px
+    // tall and every use site had to override it.
+    const meter = JSON.parse(
+      String(
+        await run(`JSON.stringify((() => {
+          const probe = document.createElement('span');
+          probe.className = 'bar';
+          probe.style.position = 'absolute';
+          probe.style.left = '-9999px';
+          document.body.append(probe);
+          const h = getComputedStyle(probe).height;
+          probe.remove();
+          return { height: h, rootBarH: getComputedStyle(document.documentElement).getPropertyValue('--bar-h').trim() };
+        })())`),
+      ),
+    );
+    report(
+      'a bare bar is bar-sized, not sized from the page header',
+      meter.height === '8px' && meter.rootBarH !== '8px',
+      JSON.stringify(meter),
+    );
+
+    await call('Fetch.disable');
+    sock.close();
+  } catch (err) {
+    failures.push('the meter bar checks');
+    console.log(`  FAIL  the meter bar checks — ${(err as Error).message}`);
+  } finally {
+    done3();
+  }
+}
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) console.log(failures.map((f) => `  - ${f}`).join('\n'));
 process.exit(failures.length ? 1 : 0);

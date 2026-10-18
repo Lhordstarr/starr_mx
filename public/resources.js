@@ -331,8 +331,13 @@ export function mountResources() {
       meta,
       btn: null,
       action: null,
-      extraSig: '',
+      // null, not '': a row's extra is built on the first pass whenever its signature
+      // differs from the slot's, and a row that legitimately has no extra uses
+      // the empty string. Starting at '' would make the first pass of such a row
+      // look unchanged and it would never build its bar at all.
+      extraSig: null,
       extraNodes: [],
+      updateExtra: null,
       item: null,
     };
     rowSlots.set(key, slot);
@@ -354,19 +359,27 @@ export function mountResources() {
     }
     slot.meta.replaceChildren(metaLine(metaParts));
 
-    // The split bar's numbers only move when a model is (un)loaded, so it is
-    // keyed by them and rebuilt only when they change — a rebuild would
-    // restart its width transitions from zero.
+    // The extra is the expensive half of a row: it builds elements and wires a
+    // legend. It is only rebuilt when its shape changes; when the shape held
+    // and just the numbers moved, the bar repaints. A job's memory ticks every
+    // poll, so a rebuild on every poll would drag the width transition back to
+    // zero once a second and the bar would never appear to move at all.
     if (extraSig !== slot.extraSig) {
       slot.extraSig = extraSig;
       for (const n of slot.extraNodes) n.remove();
       slot.extraNodes = [];
+      slot.updateExtra = null;
       if (makeExtra) {
-        slot.text.append(makeExtra());
-        // The appended nodes land after the name and the meta line.
-        slot.extraNodes = [...slot.text.childNodes].slice(2);
+        const built = makeExtra();
+        slot.text.append(...built.nodes);
+        slot.extraNodes = built.nodes;
+        slot.updateExtra = built.update ?? null;
       }
     }
+    // Painted on every pass, including the one that built it: `makeExtra` hands
+    // back an empty bar and the numbers come from `item`, which is only correct
+    // once the row exists.
+    if (slot.updateExtra) slot.updateExtra(slot.item);
 
     if (!action && slot.btn) {
       slot.btn.remove();
@@ -408,19 +421,6 @@ export function mountResources() {
         frag.append(document.createTextNode(p));
         return;
       }
-      if (p && typeof p.bar === 'number') {
-        // A small inline bar for a job's share of system RAM. Width is the
-        // fraction of total memory; the transition is on the element so it
-        // slides rather than steps between polls.
-        const wrap = document.createElement('span');
-        wrap.className = 'procman__membar';
-        const fill = document.createElement('i');
-        fill.style.width = `${Math.min(100, Math.max(0, p.bar))}%`;
-        wrap.append(fill);
-        wrap.title = `${Math.round(p.bar)}% of system RAM`;
-        frag.append(wrap);
-        return;
-      }
       const b = document.createElement('b');
       b.textContent = p.strong;
       frag.append(b, document.createTextNode(` ${p.rest}`));
@@ -429,55 +429,78 @@ export function mountResources() {
   }
 
   /**
-   * How one loaded model's memory is divided between the card and system RAM.
+   * A two-part bar for one row: what the row is about, and everything else.
    *
-   * Ollama reports a total size and how much is resident in video memory; what
-   * is left spilled into system RAM. When a model is bigger than the card it is
-   * sitting on both at once, and that is the case the numbers have to explain.
+   * Ollama and a local job are not the same measurement — one is where a loaded
+   * model's weights sit between card and system RAM, the other is how much of
+   * this machine's memory a running process holds — but the reader is asking the
+   * same question in both cases, so both get the same bar and the same legend.
+   * Nothing here is specialised to either one; `read` pulls the current numbers
+   * out of the row's payload and the caller names its two parts.
+   *
+   * That split matters more than it looks. A job's resident memory moves every
+   * second, so its bar cannot simply be rebuilt when the number does — a rebuild
+   * restarts the width transition from zero, and the bar twitches up from
+   * nothing once a second. It repaints in place instead, which is why `update`
+   * takes the live payload rather than closing over one poll's figures.
+   *
    * Width carries the ratio, a stripe tells the halves apart when the numbers
    * are close, and an empty half is the plainest statement that nothing is being
    * spent there.
    */
-  function splitBar(vramBytes, totalBytes) {
-    const ram = Math.max(0, totalBytes - vramBytes);
-    const total = Math.max(1, totalBytes);
-    const pct = Math.max(0, Math.min(100, (vramBytes / total) * 100));
-
-    const wrap = document.createDocumentFragment();
-
+  function splitBar(read, subject, rest) {
     const bar = document.createElement('div');
     bar.className = 'procman__split';
     bar.setAttribute('role', 'img');
-    bar.setAttribute(
-      'aria-label',
-      `${fmtBytesFor(vramBytes)} of ${fmtBytesFor(totalBytes)} on the GPU, ${fmtBytesFor(ram)} in RAM`,
-    );
-    const gpuSeg = document.createElement('i');
-    gpuSeg.dataset.part = 'vram';
-    gpuSeg.style.width = `${pct}%`;
-    const ramSeg = document.createElement('i');
-    ramSeg.dataset.part = 'ram';
-    ramSeg.style.width = `${100 - pct}%`;
-    bar.append(gpuSeg, ramSeg);
+    const head = document.createElement('i');
+    head.dataset.part = subject.part;
+    const tail = document.createElement('i');
+    tail.dataset.part = rest.part;
+    bar.append(head, tail);
 
     const legend = document.createElement('div');
     legend.className = 'procman__legend';
-    for (const [part, label, bytes] of [
-      ['vram', 'GPU', vramBytes],
-      ['ram', 'RAM', ram],
-    ]) {
+    const cells = [subject, rest].map((s) => {
       const cell = document.createElement('span');
       cell.className = 'procman__legend-item';
       const dot = document.createElement('i');
-      dot.dataset.part = part;
+      dot.dataset.part = s.part;
       const text = document.createElement('b');
-      text.textContent = `${fmtBytesFor(bytes)} ${label}`;
       cell.append(dot, text);
       legend.append(cell);
-    }
+      return { label: s.label, text };
+    });
 
-    wrap.append(bar, legend);
-    return wrap;
+    const update = (item) => {
+      const { used, total } = read(item);
+      // Zero is a real answer and gets a bar: "none of it fits in VRAM" is
+      // exactly what an empty half is for. What gets no bar is a figure that is
+      // not there at all — and then the bar hides rather than sitting there as
+      // an empty track beside a blank legend, which reads as a failed render
+      // rather than as nothing to report.
+      const known = Number.isFinite(used) && used >= 0 && Number.isFinite(total) && total > 0;
+      bar.hidden = !known;
+      legend.hidden = !known;
+      if (!known) return;
+      const other = Math.max(0, total - used);
+      const pct = Math.max(0, Math.min(100, (used / total) * 100));
+      head.style.width = `${pct}%`;
+      tail.style.width = `${100 - pct}%`;
+      // The floor keeps a thin-but-real part from vanishing out of the sum. At
+      // exactly zero it would be a lie — a 3px sliver reads as "a little" — so
+      // it is lifted for the part that has nothing.
+      head.style.minWidth = pct > 0 ? '' : '0';
+      tail.style.minWidth = 100 - pct > 0 ? '' : '0';
+      bar.setAttribute(
+        'aria-label',
+        `${fmtBytesFor(used)} ${cells[0].label}, ${fmtBytesFor(other)} ${cells[1].label}`,
+      );
+      for (const [i, cell] of cells.entries()) {
+        cell.text.textContent = `${fmtBytesFor(i === 0 ? used : other)} ${cell.label}`;
+      }
+    };
+
+    return { nodes: [bar, legend], update };
   }
 
   /* Group headers and the empty message live as long as the manager does;
@@ -553,7 +576,12 @@ export function mountResources() {
           name: m.name,
           metaParts: [{ strong: fmtBytesFor(m.sizeBytes), rest: 'loaded' }, where, when],
           extraSig: `${m.vramBytes}/${m.sizeBytes}`,
-          makeExtra: () => splitBar(m.vramBytes, m.sizeBytes),
+          makeExtra: () =>
+            splitBar(
+              (x) => ({ used: x.vramBytes, total: x.sizeBytes }),
+              { part: 'vram', label: 'on the GPU' },
+              { part: 'ram', label: 'in RAM' },
+            ),
           action: {
             label: 'Unload',
             title: 'Let go of this model and free the memory it is holding',
@@ -579,7 +607,6 @@ export function mountResources() {
         // goes, rather than showing a zero that was never true.
         if (typeof j.memoryBytes === 'number' && j.memoryBytes > 0) {
           parts.push({ strong: fmtBytesFor(j.memoryBytes), rest: 'in memory' });
-          if (ramTotal > 0) parts.push({ bar: (j.memoryBytes / ramTotal) * 100 });
         }
         // The runner's own answer where it has one: the request ("auto") is
         // not the truth on a machine that cannot run on a GPU at all.
@@ -589,6 +616,19 @@ export function mountResources() {
           item: j,
           name: `${TASK_LABEL[j.kind] ?? 'Working'} · ${j.repo ?? j.script}`,
           metaParts: parts,
+          // Every local job gets the bar Ollama gets. A job that is holding
+          // three gigabytes of weights should not be the one row in the list
+          // whose cost is a four-pixel sliver — this is the same question, so
+          // it gets the same answer. The split is against total machine RAM
+          // because that is all a local job reports; a job on the GPU has its
+          // weights in VRAM, which this payload has no figure for and so does
+          // not claim to break out.
+          makeExtra: () =>
+            splitBar(
+              (x) => ({ used: x.memoryBytes, total: ramTotal }),
+              { part: 'job', label: 'this job' },
+              { part: 'rest', label: 'everything else' },
+            ),
           action: isStopping
             ? null
             : {

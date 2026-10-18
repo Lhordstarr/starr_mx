@@ -1671,12 +1671,54 @@ body.modal-open {
 }
 
 .rt-log__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 6px;
   font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.11em;
   text-transform: uppercase;
   color: var(--text-faint);
+}
+
+/* The live indicator beside the "Install log" heading.
+ *
+ * A runtime install has no honest percentage to show: pip reports a figure per
+ * wheel, and the venv build, the apt step and a 600 MB llama.cpp unpack all
+ * report nothing at all. Dressing any of those up as "43%" would be a nicer
+ * lie, so this is the indeterminate form — a fixed share of the bar with its
+ * sheen sliding across — and the label says which step is running. */
+.rt-log__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  /* The heading is set in small caps; the label is running text and loses the
+     letterspacing, which at this size reads as a typo otherwise. */
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+/* `hidden` loses to this element's own `display: inline-flex`, so a finished
+   install would leave the bar spinning on screen forever. */
+.rt-log__state[hidden] {
+  display: none;
+}
+
+.rt-log__state .bar {
+  --meter-h: 6px;
+  width: 96px;
+  flex-shrink: 0;
+}
+
+.rt-log__statelabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rt-log pre {

@@ -1013,6 +1013,36 @@ function logAppend(el, text) {
   if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
+/**
+ * Marks the install log as live and names the step it is on.
+ *
+ * A runtime install has no percentage worth putting on a bar: pip reports a
+ * figure per wheel, and the venv build, the apt step and a 600 MB llama.cpp
+ * unpack report none at all. Turning any one of those into "43%" would be a
+ * prettier lie, so the bar stays indeterminate and the label carries the news
+ * instead — the last thing the installer said, which is the only honest
+ * "what is happening now" available.
+ */
+function logWorking(text) {
+  if (!rtLogState) return;
+  rtLogState.hidden = false;
+  if (text === undefined || !rtLogStateLabel) return;
+  const line = String(text).trim();
+  if (!line) return;
+  rtLogStateLabel.textContent = line;
+  rtLogStateLabel.title = line;
+}
+
+/** Takes the bar down and leaves the log standing on its own. */
+function logIdle() {
+  if (!rtLogState) return;
+  rtLogState.hidden = true;
+  if (rtLogStateLabel) {
+    rtLogStateLabel.textContent = '';
+    rtLogStateLabel.removeAttribute('title');
+  }
+}
+
 function driverLog(line) {
   if (!rtDriverLog) return;
   rtDriverLog.hidden = false;
@@ -1301,6 +1331,8 @@ rtCheck?.addEventListener('click', async () => {
 const rtRemove = document.getElementById('rt-remove');
 const rtLog = document.getElementById('rt-log');
 const rtLogBody = document.getElementById('rt-log-body');
+const rtLogState = document.getElementById('rt-log-state');
+const rtLogStateLabel = document.getElementById('rt-log-statelabel');
 const rtWarning = document.getElementById('rt-warning');
 /** Set when the GPU choice cannot actually help the local Python runtimes. */
 let gpuInertReason = '';
@@ -1956,6 +1988,7 @@ async function runRuntimeInstall(password) {
   rtInstall.disabled = true;
   rtInstall.textContent = 'Installing…';
   rtLog.hidden = false;
+  logWorking(password ? 'Retrying with your password…' : 'starting the install…');
   logAppend(rtLogBody, password ? 'Retrying with your password…\n' : '');
   rtLog.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
@@ -1995,6 +2028,7 @@ async function runRuntimeInstall(password) {
           rtLogBody,
           'Already running on the server — watch it on the Downloads page.\n',
         );
+        logIdle();
         setSubview('downloads');
         void syncTransfers();
         return;
@@ -2004,10 +2038,12 @@ async function runRuntimeInstall(password) {
     await sseStream(res.body, async (event, parsed) => {
       if (event === 'progress') {
         logAppend(rtLogBody, `${parsed}\n`);
+        logWorking(parsed);
       } else if (event === 'privilege') {
         // An installer really did hit a password prompt. This is the only
         // thing in the app that opens the box for a runtime install.
         logAppend(rtLogBody, `This step needs your password: ${parsed.command}\n`);
+        logWorking('waiting for your password…');
         needsPassword = true;
         if (!privilegeAsked) {
           privilegeAsked = true;
@@ -2039,6 +2075,9 @@ async function runRuntimeInstall(password) {
     await loadRuntimes();
     // An install can turn a "needs X" note into a Run button.
     await refreshCatalogRunState();
+    // Down before the refresh reads finish, not after: the bar must not still
+    // be spinning while a finished install sits there claiming to be running.
+    logIdle();
     // The prompt stays open when it is still the useful thing to do; a closed
     // one would leave the user with a failed install and no way to retry it.
     if (!rtInstall.disabled && !needsPassword) rtInstall.focus();

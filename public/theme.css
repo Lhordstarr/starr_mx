@@ -838,6 +838,77 @@ label.field-label {
   -webkit-backdrop-filter: var(--glass-blur);
 }
 
+/* ---------- Meter bars ----------
+ *
+ * One shape for every bar in the app: a pill track with a gradient fill, so a
+ * memory meter, a process split and the install progress read as the same
+ * object at three sizes.
+ *
+ * It lives here rather than in a page stylesheet because theme.css is the one
+ * file every page loads — chat, settings and studio. A bar defined in styles.css
+ * renders on the chat page and vanishes on the settings page, which is exactly
+ * the kind of half-present thing that reads as a bug and takes an afternoon to
+ * trace.
+ *
+ * The hues come from the theme's own tokens rather than being written in. Both
+ * palettes are deliberately near-achromatic, and a bar that ignored that would
+ * be the only saturated thing on the page — which reads as a different app, not
+ * as a nicer bar.
+ *
+ * The size knob is `--meter-h`, not `--bar-h`: that name is already taken, for
+ * the height of the page's top bar, and it is set on `:root`. Reusing it made
+ * every meter a 34px-tall slab that was far too tall to read as a bar and had
+ * to be overridden at each use site.
+ */
+.bar {
+  position: relative;
+  display: block;
+  height: var(--meter-h, 8px);
+  border-radius: 99px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text) 10%, var(--bg));
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 99px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text) 74%, var(--bg)),
+    var(--text)
+  );
+  transition: width var(--speed) var(--ease);
+}
+
+/* Indeterminate: the fill holds a fixed share and its sheen slides across, so
+   the bar says "working" without claiming a number. Used only where the app
+   genuinely has no figure to give — running it across a real 43% would be a
+   prettier lie, not a clearer one. */
+.bar--live > i {
+  width: 42%;
+  transition: none;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text) 48%, var(--bg)) 0%,
+    var(--text) 45%,
+    color-mix(in srgb, var(--text) 48%, var(--bg)) 100%
+  );
+  background-size: 220% 100%;
+  animation: bar-sheen 1.6s linear infinite;
+}
+
+@keyframes bar-sheen {
+  from { background-position: 130% 0; }
+  to   { background-position: -130% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The fill still shows something is happening; it just stops moving. */
+  .bar--live > i { animation: none; background-position: 0 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

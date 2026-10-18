@@ -2448,13 +2448,24 @@ a.icon-btn {
    the two apart even where the numbers are close. An empty half is deliberate
    too — it is the plainest statement that nothing is being spent there. */
 
+/* The pill-and-gradient bar itself is a shared primitive and lives in
+   theme.css, which is the one stylesheet every page loads. */
+
 .procman__split {
   display: flex;
-  height: 6px;
+  height: 8px;
   margin-top: 8px;
-  border-radius: 3px;
+  border-radius: 99px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--text) 12%, var(--bg));
+  background: color-mix(in srgb, var(--text) 10%, var(--bg));
+}
+
+/* `hidden` loses to this element's own `display: flex`, so a row with nothing
+   to report would still show an empty track. Asked for explicitly, the way the
+   rest of the panels here do it. */
+.procman__split[hidden],
+.procman__legend[hidden] {
+  display: none;
 }
 
 .procman__split i {
@@ -2462,45 +2473,30 @@ a.icon-btn {
   height: 100%;
   /* A sliver at either end would otherwise be invisible and silently vanish
      from the sum, so each half keeps a floor. */
-  min-width: 2px;
+  min-width: 3px;
   transition: width var(--speed) var(--ease);
 }
 
 /* The part the card is holding: solid and the strongest ink on the row. */
-.procman__split i[data-part='vram'] {
-  background: var(--text);
+.procman__split i[data-part='vram'],
+.procman__split i[data-part='job'] {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text) 72%, var(--bg)),
+    var(--text)
+  );
 }
 
-/* What spilled into system RAM: a lighter tint, and striped so it cannot be
-   mistaken for the solid half at a glance. */
-.procman__split i[data-part='ram'] {
-  background: color-mix(in srgb, var(--text) 34%, var(--bg));
+/* Everything else: a lighter tint, and striped so it cannot be mistaken for the
+   subject of the row at a glance. */
+.procman__split i[data-part='ram'],
+.procman__split i[data-part='rest'] {
+  background: color-mix(in srgb, var(--text) 26%, var(--bg));
   background-image: repeating-linear-gradient(
     115deg,
     transparent 0 3px,
     color-mix(in srgb, var(--text) 30%, transparent) 3px 5px
   );
-}
-
-/* A single-segment bar for a job's share of system RAM. Used by the local
-   models (llama.cpp, transformers) that do not report a VRAM figure. */
-.procman__membar {
-  display: inline-block;
-  width: 48px;
-  height: 4px;
-  margin-left: 6px;
-  vertical-align: middle;
-  border-radius: 2px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--text) 12%, var(--bg));
-}
-
-.procman__membar > i {
-  display: block;
-  height: 100%;
-  width: 0%;
-  background: var(--text);
-  transition: width var(--speed) var(--ease);
 }
 
 .procman__legend {
@@ -2527,12 +2523,14 @@ a.icon-btn {
   flex-shrink: 0;
 }
 
-.procman__legend-item i[data-part='vram'] {
+.procman__legend-item i[data-part='vram'],
+.procman__legend-item i[data-part='job'] {
   background: var(--text);
 }
 
-.procman__legend-item i[data-part='ram'] {
-  background: color-mix(in srgb, var(--text) 34%, var(--bg));
+.procman__legend-item i[data-part='ram'],
+.procman__legend-item i[data-part='rest'] {
+  background: color-mix(in srgb, var(--text) 26%, var(--bg));
   background-image: repeating-linear-gradient(
     115deg,
     transparent 0 3px,
@@ -2674,9 +2672,9 @@ a.icon-btn {
 
 .resources__bar {
   position: relative;
-  height: 5px;
-  border-radius: 3px;
-  background: var(--panel-3);
+  height: 8px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--text) 10%, var(--bg));
   overflow: hidden;
 }
 
@@ -2684,8 +2682,12 @@ a.icon-btn {
   display: block;
   height: 100%;
   width: 0;
-  border-radius: 3px;
-  background: var(--text-dim);
+  border-radius: 99px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text) 74%, var(--bg)),
+    var(--text)
+  );
   /* The fill glides between readings rather than stepping to them. The page
      polls once a second, so a transition nearly that long leaves the bar in
      motion almost continuously; an ease would make every second pulse, which
@@ -2694,7 +2696,9 @@ a.icon-btn {
   transition: width 0.95s linear, background 0.45s var(--ease);
 }
 
-/* Warm, then hot. Stays achromatic until there is something to say. */
+/* Warm, then hot. Stays achromatic until there is something to say — and when
+   it does, the band takes the whole fill, gradient included: a state should
+   read as a state. */
 .resources__row[data-load='warn'] .resources__bar > i { background: var(--warning); }
 .resources__row[data-load='high'] .resources__bar > i { background: var(--danger); }
 .resources__row[data-load='none'] .resources__bar > i { background: var(--text-faint); opacity: 0.35; }

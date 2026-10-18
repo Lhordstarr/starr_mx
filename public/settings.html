@@ -267,7 +267,13 @@
       </div>
 
       <div class="rt-log" id="rt-log" hidden>
-        <div class="rt-log__head">Install log</div>
+        <div class="rt-log__head">
+          <span>Install log</span>
+          <span class="rt-log__state" id="rt-log-state" hidden>
+            <span class="bar bar--live" aria-hidden="true"><i></i></span>
+            <span class="rt-log__statelabel" id="rt-log-statelabel">working…</span>
+          </span>
+        </div>
         <pre id="rt-log-body"></pre>
       </div>
     </section>
