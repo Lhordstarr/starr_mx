@@ -936,6 +936,22 @@ if (!browser) {
   console.log('\nBrowser: the password prompt is on demand');
   const PROFILE = join(tmpdir(), `starr-runtimes-${process.pid}`);
   rmSync(PROFILE, { recursive: true, force: true });
+  // The real status with onnxruntime removed, so the check below sees a machine
+  // that does not have it — the situation the pre-ticked box was actually seen
+  // in. On a machine where it *is* installed the row is disabled and unchecked
+  // already, so the check would pass without ever reaching the bug.
+  const realStatus = await (
+    await fetch(`${APP_URL}/api/runtimes`, { signal: AbortSignal.timeout(60000) })
+  ).json();
+  const doctoredRuntimes = Buffer.from(
+    JSON.stringify(
+      (() => {
+        const copy = JSON.parse(JSON.stringify(realStatus));
+        delete copy.runtimes?.installed?.onnxruntime;
+        return copy;
+      })(),
+    ),
+  ).toString('base64');
   const chrome = spawn(
     browser,
     [
@@ -1006,6 +1022,36 @@ if (!browser) {
             '\n',
           )[0],
         );
+      }
+      /* Only ever armed for the check below, and only for this one endpoint:
+         fulfilling every /api/* answer with the runtimes body breaks the page. */
+      if (m.method === 'Fetch.requestPaused') {
+        if (m.params?.request?.url?.includes('/api/runtimes')) {
+          pending.set(
+            ++id,
+            () => {},
+          );
+          ws.send(
+            JSON.stringify({
+              id: id,
+              method: 'Fetch.fulfillRequest',
+              params: {
+                requestId: m.params.requestId,
+                responseCode: 200,
+                responseHeaders: [{ name: 'content-type', value: 'application/json' }],
+                body: doctoredRuntimes,
+              },
+            }),
+          );
+        } else {
+          ws.send(
+            JSON.stringify({
+              id: ++id,
+              method: 'Fetch.continueRequest',
+              params: { requestId: m.params.requestId },
+            }),
+          );
+        }
       }
     });
     const cdp = (method: string, params: Record<string, unknown> = {}) =>
@@ -1354,6 +1400,88 @@ if (!browser) {
     );
 
     await evalJs(`window.fetch = window.__origFetch; true`);
+
+    /* F. Nothing is pre-ticked. ONNX Runtime used to be seeded into the
+     * selection on every fresh page, so it read "always on" and put an 18 MB
+     * download in front of anyone who had not asked for one — for a runtime
+     * whose own blurb says none of the bundled runners use it.
+     *
+     * The status is doctored first, because on a machine where it *is*
+     * installed the row is disabled and unchecked already, and the check would
+     * pass without ever exercising the bug. */
+    /* The trailing star matters: the page asks for /api/runtimes?device=cpu, and a
+       pattern without a wildcard does not match that. */
+    await cdp('Fetch.enable', { patterns: [{ urlPattern: `${APP_URL}/api/runtimes*` }] });
+    /* Blank first. Page.navigate resolves as the new document *commits*, while
+       the old one — which still has the rows the earlier checks left on it — is
+       still there to be polled. Waiting on that stale copy returns immediately,
+       and the assertions then read the fresh document before it has rendered
+       anything. Clearing first makes the wait mean what it says. */
+    await cdp('Page.navigate', { url: 'about:blank' });
+    await sleep(400);
+    await cdp('Page.navigate', { url: `${APP_URL}/settings#models/runtimes` });
+    await waitFor(`document.querySelectorAll('.rt-row').length > 0`, 30000);
+    await sleep(600);
+    const readRows = async () =>
+      JSON.parse(
+        String(
+          await evalJs(`JSON.stringify([...document.querySelectorAll('.rt-row')].map(r => ({
+            label: r.querySelector('.rt-row__title')?.textContent,
+            checked: r.querySelector('input[type=checkbox]')?.checked,
+            disabled: r.querySelector('input[type=checkbox]')?.disabled,
+          })))`),
+        ),
+      );
+    let allRows = await readRows();
+    const onnxRow = allRows.find((r: any) => r.label === 'ONNX Runtime');
+    report(
+      'onnxruntime is offered as installable when it is not installed',
+      onnxRow?.disabled === false,
+      JSON.stringify(onnxRow),
+    );
+    report(
+      'onnxruntime is not ticked before the user asks for it',
+      onnxRow?.checked === false,
+      JSON.stringify(onnxRow),
+    );
+    report(
+      'no runtime at all is pre-ticked',
+      allRows.every((r: any) => !r.checked),
+      JSON.stringify(allRows.filter((r: any) => r.checked)),
+    );
+
+    // And the tick still works, which is what removing the seed could have cost.
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('.rt-row')]
+        .find(r => r.querySelector('.rt-row__title').textContent === 'ONNX Runtime');
+      const box = row.querySelector('input');
+      box.checked = true;
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep(300);
+    allRows = await readRows();
+    report(
+      'it can still be ticked',
+      allRows.find((r: any) => r.label === 'ONNX Runtime')?.checked === true,
+      String(await evalJs(`document.getElementById('rt-total')?.textContent ?? ''`)),
+    );
+    await evalJs(`(() => {
+      const row = [...document.querySelectorAll('.rt-row')]
+        .find(r => r.querySelector('.rt-row__title').textContent === 'ONNX Runtime');
+      const box = row.querySelector('input');
+      box.checked = false;
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep(300);
+    allRows = await readRows();
+    report(
+      'and it can be unticked again',
+      allRows.find((r: any) => r.label === 'ONNX Runtime')?.checked === false,
+    );
+    await cdp('Fetch.disable');
+
     report(
       'the settings page ran without a single uncaught error',
       pageErrors.length === 0,

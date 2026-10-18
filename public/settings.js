@@ -1308,19 +1308,21 @@ const rtTotal = document.getElementById('rt-total');
  *  commits to a multi-gigabyte wheel index. */
 let rtDevice = 'cpu';
 /**
- * Runtimes the user has chosen to install.
+ * Runtimes the user has chosen to install. Nothing is pre-selected.
  *
- * Seeded from `rtPreferred`, resolved against what is actually installed when
- * the list renders. Seeding it directly made ONNX Runtime permanently
- * selected-but-disabled: already installed means the checkbox is disabled, and
- * a disabled checkbox cannot be cleared — so the total read "1 selected" for
- * the life of the page and Install would try to reinstall what was already
- * there.
+ * This used to be seeded with ONNX Runtime on every fresh page, which made it
+ * read "always on" and put an 18 MB download in front of people who had not
+ * asked for it — for a runtime whose own blurb says none of the bundled runners
+ * use it. A default that costs a download has to be one that unlocks something.
+ *
+ * What is left of the old code is the part that was genuinely load-bearing: a
+ * pick has to be reconciled against what is actually installable when the list
+ * renders, because a group that is already installed is disabled, and a disabled
+ * checkbox cannot be cleared. Without that, a stale pick survives for the life
+ * of the page, the total reads "1 selected", and Install tries to reinstall what
+ * is already there.
  */
-const rtPreferred = ['onnxruntime'];
 let rtPicked = new Set();
-/** Set once the preference has been resolved, so later visits keep the user's own picks. */
-let rtPickedInit = false;
 /** The groups from the last loadRuntimes, so "Install all" can select them. */
 let rtCurrentGroups = [];
 /** True once the user has clicked a device, so auto-detection stops second-guessing them. */
@@ -1407,10 +1409,6 @@ function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}) {
   const selectable = new Set(
     groups.filter((g) => !installed[g.id] && !blockedBy.has(g.id)).map((g) => g.id),
   );
-  if (!rtPickedInit) {
-    rtPickedInit = true;
-    rtPicked = new Set(rtPreferred.filter((id) => selectable.has(id)));
-  }
   for (const id of [...rtPicked]) {
     if (!selectable.has(id)) rtPicked.delete(id);
   }
