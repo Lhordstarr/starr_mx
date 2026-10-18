@@ -12,13 +12,12 @@ import type { Provider, StreamOptions } from './types.js';
 const baseUrl = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
 
 /**
- * Brings the daemon up before anything is asked of it.
+ * Makes sure the daemon is up, then does the thing.
  *
- * Listing models deliberately does NOT do this. That runs on every page load
- * and on every settings refresh, and starting a daemon because someone opened
- * the settings page is exactly the surprise this app has spent its life
- * avoiding. Only a real request starts it, which is also the only moment a model
- * is genuinely wanted.
+ * Never used by `listModels`, which runs on every page load and every settings
+ * refresh: starting a daemon because someone opened the settings page is the
+ * surprise this app has spent its life avoiding. A chat request and a model pull
+ * are the two moments a daemon is genuinely wanted.
  */
 async function withDaemon<T>(what: () => Promise<T>): Promise<T> {
   hookOllamaExit();
@@ -47,6 +46,10 @@ export const ollama: Provider = {
   },
 
   async listModels() {
+    // No `withDaemon` here on purpose. This runs on every page load and every
+    // settings refresh, and launching a daemon because someone opened a page is
+    // the kind of surprise this app has spent its life avoiding. An empty list
+    // simply means nothing is running; a pull or a chat will start it.
     try {
       const res = await fetch(`${baseUrl}/api/tags`);
       if (!res.ok) return [];
@@ -90,9 +93,7 @@ export const ollama: Provider = {
   },
 
   async *stream({ model, messages, signal, temperature }: StreamOptions) {
-    hookOllamaExit();
-    if (!(await ollamaReachable())) await ensureOllamaRunning();
-    noteOllamaUsed();
+    await withDaemon(async () => undefined);
     const res = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

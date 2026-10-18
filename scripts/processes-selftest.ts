@@ -283,6 +283,22 @@ process.env.OLLAMA_BASE_URL = `http://127.0.0.1:${OLLAMA_PORT}`;
     await srv.stopOllama('user');
     await srv.stopOllama('idle');
   });
+
+  /* The daemon comes up for a pull, not just a chat. `/api/pull` is served by
+     the daemon, so with nothing listening the request fails before a byte moves
+     and the error names a port the user cannot act on. This was the symptom of
+     the daemon start being wired into the chat path only, so what is checked
+     here is the sequence a pull performs: stopped, then asked to run again. */
+  await test('a pull can bring the daemon back after it was stopped', async () => {
+    assert.equal(existsSync(pidFile), false, 'the previous test stopped it');
+    assert.equal(await srv.ollamaReachable(), false, 'nothing should be answering');
+    await srv.ensureOllamaRunning();
+    assert.equal(await srv.ollamaReachable(), true, 'the pull path must be able to start it');
+    assert.ok(existsSync(pidFile), 'a real process should have been started again');
+    await srv.stopOllama('user');
+    await sleep(400);
+    assert.equal(existsSync(pidFile), false, 'and it stops again afterwards');
+  });
 }
 
 console.log(

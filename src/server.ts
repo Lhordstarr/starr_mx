@@ -23,6 +23,7 @@ import {
   unloadModel,
   validateModelName,
 } from './ollama-models.js';
+import { ensureOllamaRunning, hookOllamaExit, ollamaReachable } from './ollama-server.js';
 import { listProcesses, processMemoryBytes, stopAllProcesses, stopProcess } from './processes.js';
 import {
   acquireDownload,
@@ -872,6 +873,21 @@ app.post('/api/ollama/pull', async (req, res) => {
   if (isRunning(pullIdEarly)) return res.json({ attached: pullIdEarly });
   if (!acquirePull(name)) {
     return res.status(503).json({ error: 'Already pulling a model — wait a moment' });
+  }
+
+  /* The daemon comes up first, and before the stream opens. A pull is the one
+     operation that cannot happen without it — `/api/pull` is served by the
+     daemon, so with nothing listening the request fails before a byte moves and
+     the error names a port rather than anything the user can act on. Starting
+     it after the headers would leave the browser watching a stream that was
+     already doomed, and starting it as a separate step in the UI would be the
+     terminal trip this is meant to remove. */
+  try {
+    hookOllamaExit();
+    if (!(await ollamaReachable())) await ensureOllamaRunning((line) => console.log('[ollama]', line));
+  } catch (err) {
+    releasePull();
+    return res.status(503).json({ error: (err as Error).message });
   }
 
   res.writeHead(200, {
