@@ -1704,6 +1704,189 @@ if (!browser) {
   }
 }
 
+/* ---- the install log follows its own tail ----
+ *
+ * Last, because it navigates and intercepts. Driven through a stubbed install
+ * rather than by calling the helper: settings.js is a module, so its functions
+ * are not reachable from the page, and a check that re-implements the scroll
+ * logic proves nothing about it.
+ */
+if (browser && serverUp) {
+  const PORT2 = PORT + 1;
+  const PROFILE2 = join(tmpdir(), `starr-logtail-${process.pid}`);
+  rmSync(PROFILE2, { recursive: true, force: true });
+  const real = await (await fetch(`${APP_URL}/api/runtimes`, { signal: AbortSignal.timeout(60000) })).json();
+  const statusBody = Buffer.from(
+    JSON.stringify({
+      ...real,
+      runtimes: { ...real.runtimes, installed: { ...real.runtimes.installed, onnxruntime: null } },
+    }),
+  ).toString('base64');
+  const LINES = 400;
+  const frames: string[] = [];
+  for (let i = 1; i <= LINES; i++) {
+    frames.push(`event: progress\ndata: ${JSON.stringify(`installing line ${i} — pip output`)}\n\n`);
+  }
+  frames.push(`event: done\ndata: ${JSON.stringify({ runtimes: { installed: {} } })}\n\n`);
+  const installBody = Buffer.from(frames.join('')).toString('base64');
+
+  const chrome2 = spawn(
+    browser,
+    [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--window-size=1280,1400',
+      `--remote-debugging-port=${PORT2}`,
+      `--user-data-dir=${PROFILE2}`,
+      'about:blank',
+    ],
+    { stdio: 'ignore' },
+  );
+  const sleep2 = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const done2 = () => {
+    try {
+      chrome2.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+    try {
+      rmSync(PROFILE2, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      /* leaving it behind */
+    }
+  };
+  try {
+    let ws2 = '';
+    for (let i = 0; i < 60 && !ws2; i += 1) {
+      try {
+        const l = (await (
+          await fetch(`http://127.0.0.1:${PORT2}/json/list`)
+        ).json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+        ws2 = l.find((t) => t.type === 'page')?.webSocketDebuggerUrl ?? '';
+      } catch {
+        await sleep2(250);
+      }
+    }
+    if (!ws2) throw new Error('chromium never came up');
+
+    const sock = new WebSocket(ws2);
+    await new Promise<void>((resolve, reject) => {
+      sock.addEventListener('open', () => resolve());
+      sock.addEventListener('error', () => reject(new Error('cdp socket failed')));
+    });
+    let cid = 0;
+    const cwait = new Map<number, (m: any) => void>();
+    sock.addEventListener('message', (ev) => {
+      const m = JSON.parse(String((ev as MessageEvent).data));
+      if (m.id && cwait.has(m.id)) {
+        cwait.get(m.id)!(m);
+        cwait.delete(m.id);
+      }
+      if (m.method === 'Fetch.requestPaused') {
+        const url = String(m.params?.request?.url ?? '');
+        const post = (method: string, params: Record<string, unknown>) => {
+          const n = ++cid;
+          cwait.delete(n);
+          sock.send(JSON.stringify({ id: n, method, params }));
+        };
+        const body = url.includes('/api/runtimes/install') ? installBody : statusBody;
+        post('Fetch.fulfillRequest', {
+          requestId: m.params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'content-type', value: url.includes('/install') ? 'text/event-stream' : 'application/json' }],
+          body,
+        });
+      }
+    });
+    const call = (method: string, params: Record<string, unknown> = {}) =>
+      new Promise<any>((resolve) => {
+        const n = ++cid;
+        cwait.set(n, resolve);
+        sock.send(JSON.stringify({ id: n, method, params }));
+      });
+    const run = async (expression: string) => {
+      const r = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (r.result?.exceptionDetails) {
+        throw new Error(String(r.result.exceptionDetails.exception?.description ?? 'eval failed'));
+      }
+      return r.result?.result?.value;
+    };
+    const until = async (expression: string, timeoutMs = 20000) => {
+      const end = Date.now() + timeoutMs;
+      for (;;) {
+        if (await run(`Boolean(${expression})`)) return true;
+        if (Date.now() > end) return false;
+        await sleep2(150);
+      }
+    };
+
+    await call('Page.enable');
+    await call('Runtime.enable');
+    await call('Fetch.enable', { patterns: [{ urlPattern: `${APP_URL}/api/runtimes*` }] });
+    // Blank first: Page.navigate resolves as the new document commits, and the
+    // previous one is still pollable.
+    await call('Page.navigate', { url: 'about:blank' });
+    await sleep2(400);
+    await call('Page.navigate', { url: `${APP_URL}/settings#models/runtimes` });
+    if (!(await until(`document.querySelectorAll('.rt-row').length > 0`))) {
+      throw new Error('the runtime list did not render');
+    }
+    await run(`(() => {
+      const row = [...document.querySelectorAll('.rt-row')]
+        .find(r => r.querySelector('.rt-row__title')?.textContent === 'ONNX Runtime');
+      const box = row.querySelector('input');
+      box.checked = true; box.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep2(300);
+    await run(`document.getElementById('rt-install').click(); true`);
+    const got = await until(`document.getElementById('rt-log-body').textContent.includes('installing line ${LINES}')`, 30000);
+    report('a streamed install fills the install log', got);
+
+    const m = JSON.parse(
+      String(
+        await run(`JSON.stringify((() => {
+          const el = document.getElementById('rt-log-body');
+          return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight };
+        })())`),
+      ),
+    );
+    report('the log outgrew its box', m.scrollHeight > m.clientHeight, JSON.stringify(m));
+    report(
+      'and scrolled itself to the newest line',
+      Math.abs(m.scrollTop + m.clientHeight - m.scrollHeight) <= 2,
+      JSON.stringify(m),
+    );
+
+    const held = JSON.parse(
+      String(
+        await run(`JSON.stringify((() => {
+          const el = document.getElementById('rt-log-body');
+          el.scrollTop = 0;
+          const before = el.scrollTop;
+          el.textContent += 'a line that arrives after the reader scrolled up\\n';
+          return { before, after: el.scrollTop };
+        })())`),
+      ),
+    );
+    report(
+      'a reader who scrolled up is left where they are',
+      held.after === held.before,
+      JSON.stringify(held),
+    );
+
+    await call('Fetch.disable');
+    sock.close();
+  } catch (err) {
+    failures.push('the install log tail check');
+    console.log(`  FAIL  the install log tail check — ${(err as Error).message}`);
+  } finally {
+    done2();
+  }
+}
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) console.log(failures.map((f) => `  - ${f}`).join('\n'));
 process.exit(failures.length ? 1 : 0);

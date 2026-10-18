@@ -991,15 +991,32 @@ const rtInstall = document.getElementById('rt-install');
 const rtUpdateDrivers = document.getElementById('rt-update-drivers');
 const rtDriverLog = document.getElementById('rt-driver-log');
 
+/**
+ * Appends a line to a log that follows its own tail.
+ *
+ * The install log and the driver log are the same thing written by different
+ * steps, so they share one implementation — two copies of "am I at the bottom"
+ * would drift, and the drift shows up as a log that only half of the time
+ * follows along.
+ *
+ * The tail is followed only when the reader was already at it. Dragging the
+ * view back down mid-read is its own annoyance, and an install log is exactly
+ * the thing someone scrolls up in to re-read an error while the next line is
+ * still arriving. The 24px slack is the usual one: a reader a few pixels short
+ * of the bottom still counts as watching, so a stray scroll wheel does not pin
+ * them in place.
+ */
+function logAppend(el, text) {
+  if (!el || !text) return;
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+  el.textContent += text;
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
 function driverLog(line) {
   if (!rtDriverLog) return;
   rtDriverLog.hidden = false;
-  const atBottom =
-    rtDriverLog.scrollTop + rtDriverLog.clientHeight >= rtDriverLog.scrollHeight - 24;
-  rtDriverLog.textContent += `${line}\n`;
-  // Follow the tail only if the reader was already at it. Yanking the view back
-  // down while someone is reading an earlier error is its own annoyance.
-  if (atBottom) rtDriverLog.scrollTop = rtDriverLog.scrollHeight;
+  logAppend(rtDriverLog, `${line}\n`);
 }
 
 /** Runs the installer. `apply` is the only choice, so nothing user-supplied
@@ -1113,8 +1130,10 @@ function openPassPrompt(run, returnTo) {
   if (!rtPass) {
     // No prompt in the DOM: this build cannot ask, and starting over without a
     // password would just ask again. Say where to type it instead.
-    rtLogBody.textContent +=
-      'This build cannot ask for a password. Run the command above in a terminal.\n';
+    logAppend(
+      rtLogBody,
+      'This build cannot ask for a password. Run the command above in a terminal.\n',
+    );
     return;
   }
   rtPass.hidden = false;
@@ -1937,7 +1956,7 @@ async function runRuntimeInstall(password) {
   rtInstall.disabled = true;
   rtInstall.textContent = 'Installing…';
   rtLog.hidden = false;
-  rtLogBody.textContent += password ? 'Retrying with your password…\n' : '';
+  logAppend(rtLogBody, password ? 'Retrying with your password…\n' : '');
   rtLog.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
   // Set only after the server asks. A second ask means the password was
@@ -1972,8 +1991,10 @@ async function runRuntimeInstall(password) {
       const data = await res.json();
       if (data.attached) {
         rtInstall.textContent = 'Install selected';
-        rtLogBody.textContent +=
-          'Already running on the server — watch it on the Downloads page.\n';
+        logAppend(
+          rtLogBody,
+          'Already running on the server — watch it on the Downloads page.\n',
+        );
         setSubview('downloads');
         void syncTransfers();
         return;
@@ -1982,11 +2003,11 @@ async function runRuntimeInstall(password) {
     }
     await sseStream(res.body, async (event, parsed) => {
       if (event === 'progress') {
-        rtLogBody.textContent += `${parsed}\n`;
+        logAppend(rtLogBody, `${parsed}\n`);
       } else if (event === 'privilege') {
         // An installer really did hit a password prompt. This is the only
         // thing in the app that opens the box for a runtime install.
-        rtLogBody.textContent += `This step needs your password: ${parsed.command}\n`;
+        logAppend(rtLogBody, `This step needs your password: ${parsed.command}\n`);
         needsPassword = true;
         if (!privilegeAsked) {
           privilegeAsked = true;
