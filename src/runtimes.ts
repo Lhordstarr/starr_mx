@@ -1466,6 +1466,21 @@ const VENV_MODULE_HINT =
   'On Ubuntu/Debian: sudo apt install python3-venv (or python3.<version>-venv, to match this interpreter)   ' +
   '(Fedora: sudo dnf install python3-libs; Arch: sudo pacman -S python).';
 
+/**
+ * What to try when the interpreter could not create an environment at all, and
+ * the reason was not the missing venv module.
+ *
+ * This used to be the bare `python -m venv failed: <stderr>` with nothing else,
+ * which is the message that reached Ubuntu. Being unable to build the
+ * environment is not a diagnosis — the interpreter's own words rarely are — so
+ * the three things that account for nearly all of it are named instead:
+ * PEP 668, a filesystem that cannot do what a venv needs, and no room to write.
+ */
+const VENV_BUILD_ADVICE =
+  'A Python environment is a directory of symlinks, so it needs a filesystem that supports them and room to write.   ' +
+  'Point RUNTIMES_DIR somewhere on your home filesystem if the app sits on a network or Windows-formatted drive, ' +
+  'and check there is free space. Or set RUNTIMES_PYTHON to a different interpreter.';
+
 /** Said when there is an environment but no way to install into it. */
 export const MISSING_PIP_MESSAGE =
   'This Python cannot install packages — the environment has no pip, and it could not be repaired. ' +
@@ -1483,19 +1498,54 @@ export const MISSING_PIP_MESSAGE =
  */
 export function describeVenvFailure(stderr: string): string {
   const text = stderr.trim();
+  // Ubuntu and Debian print the same cause several ways depending on the
+  // release and the Python build: the prose "ensurepip module is not available",
+  // and the bare traceback "No module named ensurepip". Both mean one package.
   if (/\bensurepip\b/i.test(text)) {
     return (
       'This Python cannot create environments — the venv module is missing. ' +
       `${VENV_MODULE_HINT} Then install the runtime again.`
     );
   }
-  if (/No module named venv/i.test(text)) {
+  if (/No module named ['"]?venv/i.test(text)) {
     return (
       'This Python was built without the venv module. ' +
       `${VENV_MODULE_HINT} Or set RUNTIMES_PYTHON to point at another interpreter.`
     );
   }
-  return `python -m venv failed: ${text.slice(0, 300)}`;
+  // PEP 668. Ubuntu 23.04+ and every current Debian mark the system interpreter
+  // externally managed, so pip inside a directory that is not a real venv refuses
+  // to run at all. Reaching this means the environment was not one.
+  if (/externally-managed-environment/i.test(text)) {
+    return (
+      "This Python's package manager refuses to install anything outside a real virtual environment (PEP 668). " +
+      `${VENV_MODULE_HINT} Then install the runtime again.`
+    );
+  }
+  // The environment is a set of symlinks. exFAT, some network mounts and a
+  // Windows drive mounted into Linux refuse to make them, and venv reports the
+  // refusal as a bare OSError with no mention of what it wanted to do.
+  if (/Invalid cross-device link|Operation not supported|os\.symlink|Too many levels of symbolic links|Errno 18\b|Errno 95\b/i.test(text)) {
+    return (
+      `The filesystem this app is on cannot create the symbolic links a Python environment is made of — Python said: ` +
+      `${text.slice(0, 200)}   ${VENV_BUILD_ADVICE}`
+    );
+  }
+  if (/No space left on device|Errno 28\b/i.test(text)) {
+    return (
+      'There is not enough free disk space to build the Python environment. ' +
+      'Free some space — or point RUNTIMES_DIR at a drive with room — then install the runtime again.'
+    );
+  }
+  if (/Permission denied|Errno 13\b/i.test(text)) {
+    return (
+      `The Python environment could not be written to (${text.slice(0, 120)}). ` +
+      `${VENV_BUILD_ADVICE} If it is a permissions problem on this app's folder, fixing that and installing again will do it.`
+    );
+  }
+  // Anything else keeps the interpreter's own words, because a guess would be
+  // worse than the truth — but it is no longer the end of the sentence.
+  return `python -m venv failed: ${text.slice(0, 300)}   ${VENV_BUILD_ADVICE}`;
 }
 
 /**

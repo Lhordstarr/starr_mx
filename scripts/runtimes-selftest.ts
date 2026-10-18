@@ -67,13 +67,47 @@ section('Python environment errors');
   const noVenv = describeVenvFailure('No module named venv');
   report('a missing venv module also names the package', /python3-venv/.test(noVenv), noVenv);
 
+  // The same cause as a bare traceback rather than prose.
+  const traceback = describeVenvFailure("ModuleNotFoundError: No module named 'ensurepip'");
+  report(
+    'a traceback-shaped ensurepip failure is recognised too',
+    /python3-venv/.test(traceback) && !/ModuleNotFoundError/.test(traceback),
+    traceback,
+  );
+
   // Anything unrecognised keeps the interpreter's own words: a guess here
-  // would be worse than the truth.
-  const odd = describeVenvFailure('Error: [Errno 28] No space left on device');
+  // would be worse than the truth. A full disk used to be the example here and
+  // is now diagnosed, so this is something no branch claims to understand.
+  const odd = describeVenvFailure(
+    "ValueError: Refusing to create a venv in '/x' because it contains the PATH separator ':'.",
+  );
   report(
     'an unrecognised failure keeps the raw message',
-    odd.includes('No space left on device'),
+    odd.includes('PATH separator'),
     odd,
+  );
+  report(
+    'but it is no longer the end of the sentence',
+    /RUNTIMES_DIR/.test(odd) && /RUNTIMES_PYTHON/.test(odd),
+    odd,
+  );
+  report(
+    'a full disk is diagnosed as a full disk',
+    /free disk space/i.test(describeVenvFailure('OSError: [Errno 28] No space left on device')),
+    describeVenvFailure('OSError: [Errno 28] No space left on device'),
+  );
+  report(
+    'PEP 668 is named as PEP 668',
+    /PEP 668/.test(describeVenvFailure('error: externally-managed-environment')),
+    describeVenvFailure('error: externally-managed-environment'),
+  );
+  const symlink = describeVenvFailure(
+    "OSError: [Errno 18] Invalid cross-device link: '/x/bin/python3' -> '/y/bin/python'",
+  );
+  report(
+    'a filesystem that cannot symlink says so, and names the fix',
+    /symbolic links/i.test(symlink) && /RUNTIMES_DIR/.test(symlink),
+    symlink,
   );
   report('an empty failure does not become an empty error', describeVenvFailure('').length > 0);
 }
