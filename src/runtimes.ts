@@ -1346,11 +1346,26 @@ async function createVenv(
       // -m venv, not the venv console script: no activation state, no shell.
       const child = spawn(interpreter, ['-m', 'venv', venvDir(name)], { stdio: ['ignore', 'pipe', 'pipe'] });
       let err = '';
+      // Both streams, because the interpreter picks and we do not know which one
+      // it used. `python3 -m venv` reports on stderr, but the pip/ensurepip
+      // machinery behind it writes to stdout, and a distribution's wrapper can
+      // use either. Reading only stderr is how this ended up reporting
+      // "python -m venv failed: " with nothing after it.
+      child.stdout.on('data', (d) => (err += d));
       child.stderr.on('data', (d) => (err += d));
       child.on('error', reject);
-      child.on('close', (code) =>
-        code === 0 ? resolve() : reject(new Error(describeVenvFailure(err))),
-      );
+      child.on('close', (code, signal) => {
+        if (code === 0) return resolve();
+        // A process killed by a signal has `code === null`, so this used to be
+        // indistinguishable from a clean non-zero exit and produced an empty
+        // message. SIGKILL here is the out-of-memory killer, which is a real
+        // answer and not a venv problem at all.
+        reject(
+          new Error(
+            describeVenvFailure(err, signal ? `The interpreter was killed by ${signal} before it could report anything.` : undefined),
+          ),
+        );
+      });
     });
     if (!(await exists(venvPython(name)))) throw new Error('The environment was created but has no interpreter.');
   } catch (err) {
@@ -1443,9 +1458,13 @@ function runPython(
       clearTimeout(timer);
       resolve({ code: 127, out, err: err + e.message });
     });
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       clearTimeout(timer);
-      resolve({ code: code ?? 0, out, err });
+      // A killed process reports `code === null`, and `?? 0` turned that into a
+      // *success* — so an interpreter killed by the out-of-memory killer, or by
+      // this timeout, was reported as having pip and the install carried on
+      // assuming the environment was fine. A death is never a success.
+      resolve({ code: code ?? 128, out, err: err + (signal ? `\n[killed by ${signal}]` : '') });
     });
   });
 }
@@ -1496,8 +1515,19 @@ export const MISSING_PIP_MESSAGE =
  * package, and anything else keeps the interpreter's own message, which is more
  * use than a guess would be.
  */
-export function describeVenvFailure(stderr: string): string {
+export function describeVenvFailure(stderr: string, killed?: string): string {
   const text = stderr.trim();
+  // Killed before it could speak. SIGKILL is the out-of-memory killer; SIGTERM
+  // is something outside this app asking it to stop. Neither is a venv fault,
+  // so neither gets venv advice.
+  if (killed) {
+    return (
+      `${killed} That is not a fault in the Python environment itself. ` +
+      (killed.includes('SIGKILL')
+        ? 'SIGKILL here is almost always the out-of-memory killer: free memory, add swap, or close other applications, then install the runtime again.'
+        : 'Something outside the app stopped it — check whether a system update or a package manager was running, then try again.')
+    );
+  }
   // Ubuntu and Debian print the same cause several ways depending on the
   // release and the Python build: the prose "ensurepip module is not available",
   // and the bare traceback "No module named ensurepip". Both mean one package.
@@ -1541,6 +1571,17 @@ export function describeVenvFailure(stderr: string): string {
     return (
       `The Python environment could not be written to (${text.slice(0, 120)}). ` +
       `${VENV_BUILD_ADVICE} If it is a permissions problem on this app's folder, fixing that and installing again will do it.`
+    );
+  }
+  // Exited non-zero having said nothing. This is the case that produced a bare
+  // "python -m venv failed: " with no reason at all: there is no text to relay,
+  // so the sentence has to be built from what is actually known.
+  if (!text) {
+    return (
+      'The Python interpreter exited without creating an environment and without saying why. ' +
+      'Running `python3 -m venv .venv` in a terminal shows the error it is swallowing here — ' +
+      'that output is the missing half. ' +
+      VENV_BUILD_ADVICE
     );
   }
   // Anything else keeps the interpreter's own words, because a guess would be

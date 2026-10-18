@@ -110,6 +110,35 @@ section('Python environment errors');
     symlink,
   );
   report('an empty failure does not become an empty error', describeVenvFailure('').length > 0);
+  // This is the exact failure a real Ubuntu box produced: the interpreter exited
+  // non-zero and wrote nothing at all, so the message was the advice tail with no
+  // reason in front of it.
+  const mute = describeVenvFailure('');
+  report(
+    'a silent interpreter is reported as silent, not as a mystery',
+    /without saying why/i.test(mute) && !/^python -m venv failed: $/.test(mute),
+    mute,
+  );
+  report(
+    'a silent interpreter is told how to see the real error',
+    /python3 -m venv/.test(mute),
+    mute,
+  );
+  // A process killed by a signal reports code === null, which used to be
+  // indistinguishable from a clean non-zero exit.
+  const killed = describeVenvFailure('', 'The interpreter was killed by SIGKILL before it could report anything.');
+  report(
+    'a killed interpreter is named as killed',
+    /SIGKILL/.test(killed) && /out-of-memory/i.test(killed),
+    killed,
+  );
+  report(
+    'a killed interpreter is not blamed on the filesystem',
+    !/RUNTIMES_DIR/.test(killed),
+    killed,
+  );
+  const term = describeVenvFailure('', 'The interpreter was killed by SIGTERM before it could report anything.');
+  report('a SIGTERM death is not called the out-of-memory killer', !/out-of-memory/i.test(term), term);
 }
 
 /* ---- 1b. An environment with no pip in it ---- */
