@@ -1197,31 +1197,39 @@ export function hasVulkan(): boolean {
 }
 
 /**
- * Is there an NVIDIA card, and which CUDA runtime does the machine already have?
+ * Which CUDA build this machine can actually run.
  *
- * Upstream publishes CUDA 12.8 and CUDA 13.4 builds of the same pin, and they
- * are not interchangeable: a 13.4 build wants a driver that a 12.8 machine may
- * not have. torch is asked first because it is the version already known to run
- * on this machine — on a Colab box that is `cu128`, and matching it means the
- * driver question has already been answered. nvidia-smi is the fallback for a
- * machine where torch was never installed.
+ * Upstream publishes CUDA 12.8 and 13.4 of the same pin and they are not
+ * interchangeable: 13.4 needs a newer driver, and asking for it on a machine
+ * that has an older one produces a server that unpacks fine and then dies on the
+ * first device with "CUDA driver version is insufficient for CUDA runtime
+ * version".
+ *
+ * torch is asked first, because its version is the one already known to run on
+ * this machine — matching it answers the question rather than guessing at it.
+ *
+ * The fallback is the driver, mapped through NVIDIA's own support matrix rather
+ * than compared against a CUDA number: CUDA 12.x needs 525 or newer, CUDA 13.x
+ * needs 580 or newer. An earlier version of this read the driver's major as if
+ * it were a CUDA major, so 550 — a perfectly normal 12.x driver — came out as
+ * 13.4 and the wrong build was fetched. When the driver is older than either,
+ * the answer is null and the CPU build is the honest one.
  */
 export function cudaRuntimeVersion(): string | null {
-  const fromTorch = (cached?: VenvProbe | null) =>
-    cached?.torch?.cudaVersion ? String(cached.torch.cudaVersion) : null;
-  const t = fromTorch(probeCache.get('venv')?.value ?? null);
+  const cached = probeCache.get('venv')?.value ?? null;
+  const t = cached?.torch?.cudaVersion ? String(cached.torch.cudaVersion) : null;
   if (t && /^\d+\.\d+$/.test(t)) return t;
-  // nvidia-smi prints "CUDA Version: 12.8" in its header. Absent on a card with
-  // no driver, which is the same answer as "not usable".
   const smi = spawnSync('nvidia-smi', ['--query-gpu=driver_version', '--format=csv,noheader'], {
     encoding: 'utf8',
   });
   if (smi.status !== 0 || !smi.stdout) return null;
-  const cut = /^(\d+)\.(\d+)/.exec(String(smi.stdout).trim());
-  // The driver number is not the CUDA number; mapping it needs the support
-  // matrix, and guessing it is how a build silently fails to load. A CUDA 12
-  // build is the safe choice for anything too new to have a published pairing.
-  return cut && Number(cut[1]) >= 130 ? '13.4' : '12.8';
+  // "550.54.14" — the major is the driver series, which is what the minimums
+  // below are stated in.
+  const major = Number(/^(\d+)\./.exec(String(smi.stdout).trim())?.[1]);
+  if (!Number.isFinite(major) || major <= 0) return null;
+  if (major >= 580) return '13.4';
+  if (major >= 525) return '12.8';
+  return null;
 }
 
 /** Whether an NVIDIA card this app can build for is present. */
@@ -1260,7 +1268,12 @@ function bestLlamaKind(): LlamaKind {
   return 'cpu';
 }
 
-/** Which CUDA tag upstream published for this machine, e.g. '12.8'. */
+/** Which CUDA tag upstream published for this machine, e.g. '12.8'.
+ *
+ * 12.8 is the default rather than the newest: it runs on every driver from 525
+ * up, so a machine too new to have been classified still gets a build that
+ * works. Falling forward to 13.4 on an unrecognised driver is what installed a
+ * build Colab could not load. */
 function cudaTag(): string {
   const v = cudaRuntimeVersion();
   return v === '13.4' ? '13.4' : '12.8';
@@ -1427,19 +1440,17 @@ async function probeVenv(name: string): Promise<VenvProbe | null> {
   }
 }
 
-/** Runs the probe in every venv and reports per group. Returns a blank status
- *  if the shared venv has no interpreter yet. */
+/** Runs the probe in every venv and reports per group.
+ *
+ *  A machine with no Python environment is not a machine with nothing installed.
+ *  This used to return a blank status when the shared venv had no interpreter,
+ *  which reported Ollama and llama.cpp as absent too — on a fresh Linux image
+ *  with no python3-venv, installing llama.cpp succeeded and the page went on
+ *  saying it was not there and offering to install it again. Neither of those
+ *  two uses Python at all, so they are answered directly, and only the groups
+ *  that really run through pip depend on the venv probe. */
 export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
-  const blank: RuntimeStatus = {
-    venv: false,
-    python: null,
-    installed: {},
-    ollamaVulkan: false,
-    torch: { version: null, cudaAvailable: false, deviceCount: 0, deviceName: null },
-    busy,
-  };
   const main = await probeVenv('venv');
-  if (!main) return blank;
 
   // A group with its own venv is answered by that venv's probe, so "is Kokoro
   // installed?" asks the interpreter Kokoro would actually run on, not the one
@@ -1463,7 +1474,7 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
       continue;
     }
     if (g.id === 'torch') {
-      installed[g.id] = main.torch?.version ?? null;
+      installed[g.id] = main?.torch?.version ?? null;
       continue;
     }
     const probe = venvName(g) === 'venv' ? main : (side.get(venvName(g)) ?? null);
@@ -1471,18 +1482,18 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
   }
 
   return {
-    venv: true,
-    python: venvPython(),
+    venv: main !== null,
+    python: main ? venvPython() : null,
     installed,
     // Reported separately from `installed` because it is a property of the
     // install's configuration, not of whether Ollama is present. The Runtimes
     // page shows it so "is it on the GPU?" is answerable without a terminal.
     ollamaVulkan: await ollamaVulkanEnabled(),
     torch: {
-      version: main.torch?.version ?? null,
-      cudaAvailable: main.torch?.cuda ?? false,
-      deviceCount: main.torch?.count ?? 0,
-      deviceName: main.torch?.name ?? null,
+      version: main?.torch?.version ?? null,
+      cudaAvailable: main?.torch?.cuda ?? false,
+      deviceCount: main?.torch?.count ?? 0,
+      deviceName: main?.torch?.name ?? null,
     },
     busy,
   };

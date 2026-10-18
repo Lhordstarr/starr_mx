@@ -34,6 +34,8 @@ import {
   ollamaRecipe,
   ollamaVulkanEnabled,
   permissionMessage,
+  RUNTIME_GROUPS,
+  runtimeStatus,
   unwritableAncestor,
   venvHasPip,
   venvPython,
@@ -385,6 +387,50 @@ section('A vendor installer never builds a Python environment');
     'a pip group still builds its environment',
     pipLines.some((l) => /Creating the Python environment/.test(l)),
     pipLines.join(' | '),
+  );
+
+  if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+  else process.env.RUNTIMES_DIR = saved.dir;
+  if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+  else process.env.RUNTIMES_PYTHON = saved.py;
+  rmSync(home, { recursive: true, force: true });
+}
+
+/* ---- 1e. No Python environment is not the same as nothing installed ---- */
+section('A vendored runtime is reported without a Python environment');
+{
+  const home = mkdtempSync(join(tmpdir(), 'starr-novenv2-'));
+  const rt = join(home, '.runtimes');
+  const badPy = join(home, 'python3');
+  writeFileSync(badPy, '#!/bin/sh\nexit 1\n');
+  chmodSync(badPy, 0o755);
+
+  // A llama.cpp install, laid out the way its own installer leaves it.
+  mkdirSync(join(rt, 'llama-b99999', 'bin'), { recursive: true });
+  writeFileSync(join(rt, 'llama-b99999', 'bin', 'llama-server'), 'x');
+  mkdirSync(join(rt, 'llama.cpp'), { recursive: true });
+  writeFileSync(join(rt, 'llama.cpp', 'build.txt'), 'llama-b99999/bin');
+
+  const saved = { dir: process.env.RUNTIMES_DIR, py: process.env.RUNTIMES_PYTHON };
+  process.env.RUNTIMES_PYTHON = badPy;
+  process.env.RUNTIMES_DIR = rt;
+
+  const status = await runtimeStatus(false);
+  report('it admits there is no Python environment', status.venv === false && status.python === null);
+  report(
+    'but still reports the vendored runtime as installed',
+    status.installed['llama-cpp'] === 'installed',
+    JSON.stringify(status.installed),
+  );
+  report(
+    'and still reports the pip runtimes as absent',
+    status.installed.onnxruntime === null && status.installed.torch === null,
+    JSON.stringify(status.installed),
+  );
+  report(
+    'every group is present in the map, not just the ones with a venv',
+    Object.keys(status.installed).length === RUNTIME_GROUPS.length,
+    `${Object.keys(status.installed).length} of ${RUNTIME_GROUPS.length}`,
   );
 
   if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
