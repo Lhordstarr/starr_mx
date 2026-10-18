@@ -304,17 +304,26 @@ export const RUNTIME_GROUPS: RuntimeGroup[] = [
     label: 'llama.cpp',
     blurb:
       'The GGUF inference engine, installed as a pinned prebuilt binary into ' +
-      'this app’s own folder — no root, no Python, no compiler. Vulkan build ' +
-      'when a GPU is usable, CPU build otherwise. Download the quantized chat ' +
-      'models in Get models (Qwen3, Llama 3.2, Gemma) and they show up in the ' +
-      'chat provider picker, run on this machine.',
+      'this app’s own folder — no root, no Python, no compiler. The build ' +
+      'matches the card: CUDA on NVIDIA, Vulkan where a render node and ' +
+      'vulkaninfo are both present, CPU otherwise. Download the quantized ' +
+      'chat models in Get models (Qwen3, Llama 3.2, Gemma) and they show up ' +
+      'in the chat provider picker, run on this machine. A GPU build is a much ' +
+      'larger download than the CPU one — roughly 173 MB, and up to 766 MB ' +
+      'more if this machine has no CUDA runtime of its own.',
     unlocks: ['text'],
     // Not a pip package either: the upstream project ships prebuilt CPU
     // tarballs per build. Kept beside Ollama so "the two chat runtimes" read
     // as a pair, but this one installs into the app and can be removed again.
     pkgs: [],
     needsTorch: false,
-    approxMB: 17,
+    // The CPU and Vulkan builds are ~17 MB. The CUDA build is ~173 MB, plus a
+// ~594 MB CUDA runtime archive when the machine has no runtime of its own —
+// and "≈ 17 MB" on a card that will download 766 is worse than no figure at
+// all. The real figure is only known once the machine has been inspected, so
+// the Runtimes page is told it in the blurb rather than here, where a static
+// number cannot be right for more than one of the three builds.
+approxMB: 17,
     installer: 'llama-cpp',
   },
   {
