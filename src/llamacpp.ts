@@ -188,6 +188,8 @@ export async function resolveGgufModel(id: string): Promise<GgufModel | null> {
 
 interface Serving {
   child: ChildProcess;
+  /** Held so the supervisor's death-watch pipe is not garbage-collected. */
+  stdin: NodeJS.WritableStream | null;
   model: string;
   /** Managed-process id, so the resource manager can show and stop it. */
   jobId?: string;
@@ -287,9 +289,7 @@ function touchIdle() {
   clearIdle();
   const ms = idleMs();
   if (!Number.isFinite(ms) || ms <= 0) return;
-  idleTimer = setTimeout(() => void stopLlamaServer(), ms);
-  // Never a reason for the process to stay alive on its own.
-  idleTimer.unref?.();
+  idleTimer = setTimeout(() => { console.error('[llama-debug] timer fired at', Date.now(), 'ms was', ms); void stopLlamaServer(); }, ms);
 }
 
 /**
@@ -402,7 +402,7 @@ async function start(bin: string, model: GgufModel, onProgress: (line: string) =
     // app never writes to it and the pipe closing is the whole message.
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  serving = { child, model: model.id };
+  serving = { child, stdin: child.stdin, model: model.id };
 
   child.stdout?.on('data', remember);
   child.stderr?.on('data', remember);
@@ -491,9 +491,11 @@ export async function prepareLlama(
   }
 
   if (serving?.model === model.id) {
+    console.error('[llama-debug] reuse path, model=', model.id);
     touchIdle();
     return;
   }
+  console.error('[llama-debug] prepare: serving.model=', serving?.model, 'requested=', model.id);
   if (starting) {
     // Someone else is already starting a server; wait for their attempt to
     // settle before deciding whether this request needs its own.

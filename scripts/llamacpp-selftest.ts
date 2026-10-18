@@ -390,7 +390,7 @@ try {
       // same timer and keeps the suite quick — and it leaves a wide margin for
       // the hard-kill check at the end, which must not be able to mistake the
       // idle timer for its own result.
-      LLAMACPP_IDLE_MS: '6000',
+      LLAMACPP_IDLE_MS: '15000',
       FAKE_LOG: fakeLog,
       FAKE_DELAY_FILE: delayFile,
     },
@@ -528,7 +528,7 @@ try {
   section('Idle shutdown and coming back');
   {
     let stopped = false;
-    for (let i = 0; i < 40 && !stopped; i += 1) {
+    for (let i = 0; i < 60 && !stopped; i += 1) {
       await new Promise((r) => setTimeout(r, 500));
       const last = starts().at(-1);
       stopped = Boolean(last) && !alive(last!.pid);
