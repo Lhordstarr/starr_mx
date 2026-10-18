@@ -78,8 +78,10 @@ function buildMarkup() {
            byte counts and a bar, and the counts state the fraction already. -->
       <div class="resources__row resources__row--sub" data-metric="vram">
         <span class="resources__label">VRAM</span>
-        <span class="resources__bar"><i></i></span>
         <span class="resources__value">—</span>
+      </div>
+      <div class="resources__row resources__row--sub resources__row--vrambar" data-metric="vram-bar">
+        <span class="resources__bar"><i></i></span>
       </div>
     </div>
 
@@ -213,6 +215,8 @@ export function mountResources() {
       const vramText = hasTotal ? `${fmtMB(used)} / ${fmtMB(total)}` : typeof used === 'number' ? fmtMB(used) : '—';
       const vramPct = hasTotal ? (used / total) * 100 : null;
       setMeter('vram', vramText, vramPct, vramPct === null ? null : loadBand(vramPct));
+      const vramBarFill = host.querySelector('.resources__row--vrambar .resources__bar > i');
+      if (vramBarFill) vramBarFill.style.width = vramPct === null ? '0%' : `${Math.min(100, Math.max(0, vramPct))}%`;
 
       const what = [
         r.gpu.vendor === 'amd' ? 'AMD' : r.gpu.vendor === 'nvidia' ? 'NVIDIA' : '',
@@ -227,6 +231,8 @@ export function mountResources() {
       // Say why, rather than showing a permanently empty bar.
       setMeter('gpu', 'none', null, null);
       setMeter('vram', 'none', null, null);
+      const vramBarFill = host.querySelector('.resources__row--vrambar .resources__bar > i');
+      if (vramBarFill) vramBarFill.style.width = '0%';
       if (gpuRow) gpuRow.title = r.gpu.reason ?? 'No GPU detected';
       if (vramRow) vramRow.title = r.gpu.reason ?? 'No GPU detected';
     }

@@ -2645,6 +2645,18 @@ a.icon-btn {
   color: var(--text-faint);
 }
 
+/* VRAM bar on its own line: the value is long and there is no room for a
+   label, two byte counts and a bar on one row. Full width keeps it readable. */
+.resources__row--vrambar {
+  margin-top: -6px;
+  grid-template-columns: 1fr;
+  padding-left: 70px;
+}
+
+.resources__row--vrambar .resources__bar {
+  width: 100%;
+}
+
 .resources__bar {
   position: relative;
   height: 5px;
