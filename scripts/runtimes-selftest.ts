@@ -26,6 +26,7 @@ import {
   downloadTool,
   ensureVenv,
   installRuntimes,
+  missingInstallerPrerequisite,
   MISSING_PIP_MESSAGE,
   MissingVenvPackage,
   needsPrivilege,
@@ -545,6 +546,45 @@ section('Ollama installer per OS');
     'the downloader probe names the one this machine actually has',
     fetcher === null || fetcher === 'curl' || fetcher === 'wget',
     String(fetcher),
+  );
+
+  /* The exact failure a lean image produces: Ollama's tarball is zstd, and a
+     machine without it stops the installer dead. */
+  const zstdReport = [
+    'ERROR: This version requires zstd for extraction. Please install zstd and try again:',
+    '- Debian/Ubuntu: sudo apt-get install zstd',
+    '- RHEL/CentOS/Fedora: sudo dnf install zstd',
+  ].join('\n');
+  report(
+    'the installer naming zstd is recognised',
+    missingInstallerPrerequisite(zstdReport) === 'zstd',
+    zstdReport,
+  );
+  report(
+    'a reworded version of the same message still works',
+    missingInstallerPrerequisite('This version requires ZSTD for decompression.') === 'zstd',
+  );
+  report(
+    'the please-install phrasing works too',
+    missingInstallerPrerequisite('Please install curl and try again') === 'curl',
+  );
+  report(
+    'an unrelated installer failure names nothing to install',
+    missingInstallerPrerequisite('curl: (23) Failure writing output to destination') === null,
+  );
+  /* This text comes from a script fetched over the network. Letting it choose
+     the apt argument would make "install this" an instruction. */
+  report(
+    'a package outside the fixed list is not acted on',
+    missingInstallerPrerequisite('This version requires netcat for extraction.') === null,
+  );
+  report(
+    'a chained command is not read as a package name',
+    missingInstallerPrerequisite('Please install rm -rf / --force') === null,
+  );
+  report(
+    'an apt flag is not read as a package name',
+    missingInstallerPrerequisite('requires --allow-downgrades for extraction') === null,
   );
   // The status field is how the Runtimes page answers "is it on the GPU?"
   // without a terminal, so it has to exist and have to be a boolean.

@@ -2301,94 +2301,130 @@ async function installOllama(opts: PrivilegedInstall): Promise<void> {
   // macOS and Windows the installer runs as the user, so there is nothing to
   // ask for and the prompt never opens.
   const elevates = recipe.needsRoot;
-  onProgress(`Installing Ollama on ${platformLabel()} — ${recipe.shown}…`);
 
   const scrub = (text: string) =>
     password && password.length >= 3 ? text.split(password).join('[redacted]') : text;
-  // Whether sudo is on the other end of the pipe decides stdin: a password has
-  // to be written, anything else is told to ignore input.
-  const escalating = Boolean(password && elevates);
-  let tail = '';
-  let code: number;
-  try {
-    code = await new Promise<number>((resolve) => {
-      const { cmd, args: cmdArgs } = ollamaCommand(recipe, escalating);
-      const child: ReturnType<typeof spawn> = spawn(cmd, cmdArgs, {
-        stdio: escalating ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
-      });
-      if (escalating) {
-        child.stdin?.on('error', () => {
-          /* sudo exited early — a wrong password does exactly that */
+
+  /** Runs the vendor installer once; returns its exit code and last words. */
+  const runInstaller = async (): Promise<{ code: number; tail: string }> => {
+    onProgress(`Installing Ollama on ${platformLabel()} — ${recipe.shown}…`);
+    // Whether sudo is on the other end of the pipe decides stdin: a password has
+    // to be written, anything else is told to ignore input.
+    const escalating = Boolean(password && elevates);
+    let tail = '';
+    let code: number;
+    try {
+      code = await new Promise<number>((resolve) => {
+        const { cmd, args: cmdArgs } = ollamaCommand(recipe, escalating);
+        const child: ReturnType<typeof spawn> = spawn(cmd, cmdArgs, {
+          stdio: escalating ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
         });
-        child.stdin?.end(`${password}\n`);
-      }
-      const bufs: Record<'out' | 'err', string> = { out: '', err: '' };
-      const pump = (stream: NodeJS.ReadableStream | null, key: 'out' | 'err') => {
-        stream?.setEncoding('utf8');
-        stream?.on('data', (c: string) => {
-          bufs[key] += c;
-          const lines = bufs[key].split('\n');
-          bufs[key] = lines.pop() ?? '';
-          for (const line of lines) emit(line);
-        });
-      };
-      const emit = (raw: string) => {
-        const text = scrub(raw.replace(/\s+$/, ''));
-        if (!text.trim()) return;
-        onProgress(text.trim());
-        tail = `${tail}\n${text}`.slice(-4000);
-      };
-      pump(child.stdout, 'out');
-      pump(child.stderr, 'err');
-      child.on('error', (err) => {
-        const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
-        emit(
-          missing && recipe.argv[0] === 'brew'
-            ? 'Homebrew is not installed on this machine.'
-            : `Could not start the installer: ${err.message}`,
-        );
-        resolve(127);
-      });
-      child.on('close', (c) => {
-        for (const key of ['out', 'err'] as const) {
-          emit(bufs[key]);
-          bufs[key] = '';
+        if (escalating) {
+          child.stdin?.on('error', () => {
+            /* sudo exited early — a wrong password does exactly that */
+          });
+          child.stdin?.end(`${password}\n`);
         }
-        resolve(c ?? 0);
+        const bufs: Record<'out' | 'err', string> = { out: '', err: '' };
+        const pump = (stream: NodeJS.ReadableStream | null, key: 'out' | 'err') => {
+          stream?.setEncoding('utf8');
+          stream?.on('data', (c: string) => {
+            bufs[key] += c;
+            const lines = bufs[key].split('\n');
+            bufs[key] = lines.pop() ?? '';
+            for (const line of lines) emit(line);
+          });
+        };
+        const emit = (raw: string) => {
+          const text = scrub(raw.replace(/\s+$/, ''));
+          if (!text.trim()) return;
+          onProgress(text.trim());
+          tail = `${tail}\n${text}`.slice(-4000);
+        };
+        pump(child.stdout, 'out');
+        pump(child.stderr, 'err');
+        child.on('error', (err) => {
+          const missing = (err as NodeJS.ErrnoException).code === 'ENOENT';
+          emit(
+            missing && recipe.argv[0] === 'brew'
+              ? 'Homebrew is not installed on this machine.'
+              : `Could not start the installer: ${err.message}`,
+          );
+          resolve(127);
+        });
+        child.on('close', (c) => {
+          for (const key of ['out', 'err'] as const) {
+            emit(bufs[key]);
+            bufs[key] = '';
+          }
+          resolve(c ?? 0);
+        });
       });
-    });
-  } catch (err) {
-    throw new Error(`Could not start the Ollama installer: ${(err as Error).message}`);
-  }
+    } catch (err) {
+      throw new Error(`Could not start the Ollama installer: ${(err as Error).message}`);
+    }
+    return { code, tail };
+  };
 
-  if (password && /incorrect password|Sorry, try again|authentication failure/i.test(tail)) {
-    throw new Error('That password was not accepted, so nothing was changed.');
-  }
-
-  // It stopped because it wanted a password it had no way to get, not because
-  // the installer is broken. That distinction is the whole reason this checks
-  // the output rather than the exit code.
-  if (code !== 0 && needsPrivilege(tail)) {
-    const shown = `sudo ${recipe.shown}`;
-    onNeedsPrivilege?.(shown);
-    throw new Error(
-      'The Ollama installer needs root and could not elevate. ' +
-        'Supply your password to let it run, or run this in a terminal yourself: ' +
-        shown,
-    );
-  }
-
-  if (code !== 0) {
-    // A missing Homebrew is the difference between "this will never work" and
-    // "install this one thing first", and the log line above only half says it.
-    if (recipe.argv[0] === 'brew' && /Homebrew is not installed/.test(tail)) {
+  /**
+   * Turns one run into: done, throw, or "install this first and try again".
+   *
+   * The vendor tarball is zstd-compressed, so a machine without zstd stops with
+   * "This version requires zstd for extraction" — the same dead end as a missing
+   * curl, and on a lean image just as common. Reading the package out of that
+   * message is what makes it self-healing instead of a manual trip to a
+   * terminal.
+   *
+   * Checked against a fixed list rather than installed on trust: this text comes
+   * from a script fetched over the network, and an installer that could name any
+   * package would be a way to run apt with a name it picked.
+   */
+  const classify = (run: { code: number; tail: string }): string | null => {
+    if (run.code === 0) return null;
+    if (password && /incorrect password|Sorry, try again|authentication failure/i.test(run.tail)) {
+      throw new Error('That password was not accepted, so nothing was changed.');
+    }
+    // It stopped because it wanted a password it had no way to get, not because
+    // the installer is broken. That distinction is the whole reason this checks
+    // the output rather than the exit code.
+    if (needsPrivilege(run.tail)) {
+      const shown = `sudo ${recipe.shown}`;
+      onNeedsPrivilege?.(shown);
+      throw new Error(
+        'The Ollama installer needs root and could not elevate. ' +
+          'Supply your password to let it run, or run this in a terminal yourself: ' +
+          shown,
+      );
+    }
+    if (recipe.argv[0] === 'brew' && /Homebrew is not installed/.test(run.tail)) {
       throw new Error(
         'Homebrew is not installed, and macOS installs Ollama through it. ' +
           'Install Homebrew from https://brew.sh, then install this again.',
       );
     }
-    throw new Error(`The Ollama installer exited ${code} — see the log above.`);
+    return missingInstallerPrerequisite(run.tail);
+  };
+
+  let pending = classify(await runInstaller());
+
+  // One retry, after installing what the installer said it needed. Bounded on
+  // purpose: asked for the same package twice, it is a machine in a state this
+  // cannot fix, and retrying would just repeat the same message.
+  if (pending) {
+    await aptInstall(pending, `The Ollama installer needs ${pending}`, onProgress, opts);
+    const again = classify(await runInstaller());
+    if (again === pending) {
+      throw new Error(
+        `The Ollama installer still needs ${pending} after it was installed — see the log above.`,
+      );
+    }
+    pending = again;
   }
+
+  if (pending) {
+    throw new Error(`The Ollama installer says it needs ${pending}. See the log above.`);
+  }
+
   onProgress('Ollama installed. Start it with `ollama serve` if the daemon is not already running.');
   // After the install, so the daemon exists to be restarted. Best-effort by
   // design — this reports and returns rather than throwing, because Ollama is
@@ -2412,6 +2448,36 @@ export async function downloadTool(): Promise<'curl' | 'wget' | null> {
     if (await onPath(t)) return t;
   }
   return null;
+}
+
+/**
+ * The only packages this app will install because a downloaded script said it
+ * wanted them.
+ *
+ * A fixed list, not whatever the message names. The text comes from an
+ * installer fetched over the network; letting it choose an apt argument would
+ * make "install this" an instruction rather than a report.
+ */
+const INSTALLER_PREREQUISITES = ['zstd', 'curl', 'ca-certificates', 'xz-utils'] as const;
+
+/**
+ * The package a failed vendor installer said it needs, or null.
+ *
+ * Ollama's tarball is zstd-compressed, so a machine without zstd stops with
+ * "This version requires zstd for extraction. Please install zstd and try
+ * again". The name is read from that sentence rather than from a list of its
+ * own phrasings, so a wording change upstream keeps working — and anything
+ * outside the allowlist returns null, which leaves the user with the
+ * installer's own message rather than an app acting on it.
+ */
+export function missingInstallerPrerequisite(output: string): string | null {
+  const named =
+    /\brequires\s+([a-z0-9][a-z0-9.+-]*)\b/i.exec(output)?.[1] ??
+    /\bplease install\s+([a-z0-9][a-z0-9.+-]*)\b/i.exec(output)?.[1] ??
+    null;
+  if (!named) return null;
+  const pkg = named.toLowerCase();
+  return (INSTALLER_PREREQUISITES as readonly string[]).includes(pkg) ? pkg : null;
 }
 
 /**
