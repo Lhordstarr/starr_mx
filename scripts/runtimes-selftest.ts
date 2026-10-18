@@ -66,6 +66,34 @@ section('Python environment errors');
   );
   report('the Ubuntu hint says apt', /sudo apt install python3-venv/.test(ubuntu), ubuntu);
 
+  // The bug this log exposed: `python3-venv` is a metapackage that only covers
+  // the distro's *default* Python. When the interpreter in play is not that one,
+  // following the metapackage advice installs cleanly and fails identically
+  // again, which reads as the advice being wrong.
+  const versioned = describeVenvFailure(
+    'The virtual environment was not created successfully because the ensurepip module is not available.',
+    { version: '3.12' },
+  );
+  report(
+    'the package matches the interpreter that was used',
+    /sudo apt install python3\.12-venv/.test(versioned),
+    versioned,
+  );
+  report(
+    'and it says why the metapackage is not enough',
+    /does not cover this interpreter/.test(versioned) && /3\.12/.test(versioned),
+    versioned,
+  );
+  report(
+    'a versioned hint does not leave the placeholder in it',
+    !/python3\.<version>/.test(versioned),
+    versioned,
+  );
+  report(
+    'the version is not invented when it is unknown',
+    /python3\.<version>-venv/.test(describeVenvFailure('ensurepip is not available')),
+  );
+
   const noVenv = describeVenvFailure('No module named venv');
   report('a missing venv module also names the package', /python3-venv/.test(noVenv), noVenv);
 
@@ -182,7 +210,9 @@ section('Python environment errors');
   );
   // A process killed by a signal reports code === null, which used to be
   // indistinguishable from a clean non-zero exit.
-  const killed = describeVenvFailure('', 'The interpreter was killed by SIGKILL before it could report anything.');
+  const killed = describeVenvFailure('', {
+    killed: 'The interpreter was killed by SIGKILL before it could report anything.',
+  });
   report(
     'a killed interpreter is named as killed',
     /SIGKILL/.test(killed) && /out-of-memory/i.test(killed),
@@ -193,7 +223,9 @@ section('Python environment errors');
     !/RUNTIMES_DIR/.test(killed),
     killed,
   );
-  const term = describeVenvFailure('', 'The interpreter was killed by SIGTERM before it could report anything.');
+  const term = describeVenvFailure('', {
+    killed: 'The interpreter was killed by SIGTERM before it could report anything.',
+  });
   report('a SIGTERM death is not called the out-of-memory killer', !/out-of-memory/i.test(term), term);
 }
 

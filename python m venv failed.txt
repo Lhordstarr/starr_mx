@@ -1,1 +1,0 @@
-python -m venv failed: A Python environment is a directory of symlinks, so it needs a filesystem that supports them and room to write. Point RUNTIMES_DIR somewhere on your home filesystem if the app sits on a network or Windows-formatted drive, and check there is free space. Or set RUNTIMES_PYTHON to a different interpreter.

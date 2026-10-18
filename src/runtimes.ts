@@ -1393,6 +1393,10 @@ async function createVenv(
       : `Creating ${name} with ${interpreter}${bound ? ` (needs Python ${bound})` : ''}…`,
   );
   try {
+    // Probed before the build rather than after the failure: the failure is the
+    // only place it is wanted, and asking for it there would mean a second wait
+    // with the user already staring at a failure message.
+    const version = await probeVersion(interpreter);
     await new Promise<void>((resolve, reject) => {
       // -m venv, not the venv console script: no activation state, no shell.
       const child = spawn(interpreter, ['-m', 'venv', venvDir(name)], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1413,7 +1417,12 @@ async function createVenv(
         // answer and not a venv problem at all.
         reject(
           new Error(
-            describeVenvFailure(err, signal ? `The interpreter was killed by ${signal} before it could report anything.` : undefined),
+            describeVenvFailure(err, {
+              killed: signal ? `The interpreter was killed by ${signal} before it could report anything.` : undefined,
+              // One extra subprocess, and only on the failure path: it is what
+              // turns "python3.<version>-venv" into the package name to type.
+              version: version || undefined,
+            }),
           ),
         );
       });
@@ -1537,6 +1546,26 @@ const VENV_MODULE_HINT =
   '(Fedora: sudo dnf install python3-libs; Arch: sudo pacman -S python).';
 
 /**
+ * The same hint, with the package named exactly.
+ *
+ * `python3-venv` is a metapackage that only ever installs the module for the
+ * distro's *default* Python. When the interpreter this code picked is not that
+ * one — a group with an upper bound, on a machine whose default is newer — the
+ * metapackage installs cleanly and the very next attempt fails identically,
+ * which reads as the advice being wrong. It is: the versioned package is the
+ * one that matches the interpreter, and the interpreter is already known here.
+ */
+function venvModuleHint(version?: string): string {
+  if (!version) return VENV_MODULE_HINT;
+  return (
+    `On Ubuntu/Debian: sudo apt install python${version}-venv   ` +
+    `(sudo apt install python3-venv on its own does not cover this interpreter — ` +
+    `that package follows the distro's default Python, and this one is ${version})   ` +
+    '(Fedora: sudo dnf install python3-libs; Arch: sudo pacman -S python).'
+  );
+}
+
+/**
  * What to try when the interpreter could not create an environment at all, and
  * the reason was not the missing venv module.
  *
@@ -1588,15 +1617,23 @@ export const MISSING_PIP_MESSAGE =
  * package, and anything else keeps the interpreter's own message, which is more
  * use than a guess would be.
  */
-export function describeVenvFailure(stderr: string, killed?: string): string {
+export interface VenvFailureDetail {
+  /** Set when the child was killed by a signal rather than exiting on its own. */
+  killed?: string;
+  /** The interpreter that was used, e.g. '3.12'. Names the exact package. */
+  version?: string;
+}
+
+export function describeVenvFailure(stderr: string, detail: VenvFailureDetail = {}): string {
   const text = stderr.trim();
+  const hint = venvModuleHint(detail.version);
   // Killed before it could speak. SIGKILL is the out-of-memory killer; SIGTERM
   // is something outside this app asking it to stop. Neither is a venv fault,
   // so neither gets venv advice.
-  if (killed) {
+  if (detail.killed) {
     return (
-      `${killed} That is not a fault in the Python environment itself. ` +
-      (killed.includes('SIGKILL')
+      `${detail.killed} That is not a fault in the Python environment itself. ` +
+      (detail.killed.includes('SIGKILL')
         ? 'SIGKILL here is almost always the out-of-memory killer: free memory, add swap, or close other applications, then install the runtime again.'
         : 'Something outside the app stopped it — check whether a system update or a package manager was running, then try again.')
     );
@@ -1607,13 +1644,13 @@ export function describeVenvFailure(stderr: string, killed?: string): string {
   if (/\bensurepip\b/i.test(text)) {
     return (
       'This Python cannot create environments — the venv module is missing. ' +
-      `${VENV_MODULE_HINT} Then install the runtime again.`
+      `${hint} Then install the runtime again.`
     );
   }
   if (/No module named ['"]?venv/i.test(text)) {
     return (
       'This Python was built without the venv module. ' +
-      `${VENV_MODULE_HINT} Or set RUNTIMES_PYTHON to point at another interpreter.`
+      `${hint} Or set RUNTIMES_PYTHON to point at another interpreter.`
     );
   }
   // PEP 668. Ubuntu 23.04+ and every current Debian mark the system interpreter
@@ -1622,7 +1659,7 @@ export function describeVenvFailure(stderr: string, killed?: string): string {
   if (/externally-managed-environment/i.test(text)) {
     return (
       "This Python's package manager refuses to install anything outside a real virtual environment (PEP 668). " +
-      `${VENV_MODULE_HINT} Then install the runtime again.`
+      `${hint} Then install the runtime again.`
     );
   }
   // The environment is a set of symlinks. exFAT, some network mounts and a
