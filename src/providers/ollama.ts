@@ -1,9 +1,31 @@
-import { ensureOk, parseNDJSON } from '../sse.js';
+import { parseNDJSON } from '../sse.js';
 import { toOllamaMessage } from '../attachments.js';
 import { ollamaChatTools } from '../agent.js';
+import {
+  ensureOllamaRunning,
+  hookOllamaExit,
+  noteOllamaUsed,
+  ollamaReachable,
+} from '../ollama-server.js';
 import type { Provider, StreamOptions } from './types.js';
 
 const baseUrl = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
+
+/**
+ * Brings the daemon up before anything is asked of it.
+ *
+ * Listing models deliberately does NOT do this. That runs on every page load
+ * and on every settings refresh, and starting a daemon because someone opened
+ * the settings page is exactly the surprise this app has spent its life
+ * avoiding. Only a real request starts it, which is also the only moment a model
+ * is genuinely wanted.
+ */
+async function withDaemon<T>(what: () => Promise<T>): Promise<T> {
+  hookOllamaExit();
+  if (!(await ollamaReachable())) await ensureOllamaRunning();
+  noteOllamaUsed();
+  return what();
+}
 
 /**
  * Fully local provider. Ollama streams newline-delimited JSON from /api/chat,
@@ -68,6 +90,9 @@ export const ollama: Provider = {
   },
 
   async *stream({ model, messages, signal, temperature }: StreamOptions) {
+    hookOllamaExit();
+    if (!(await ollamaReachable())) await ensureOllamaRunning();
+    noteOllamaUsed();
     const res = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -79,7 +104,12 @@ export const ollama: Provider = {
       }),
       signal,
     });
-    await ensureOk(res, 'Ollama');
+    if (!res.ok) {
+      throw new Error(
+        `Ollama is not answering at ${baseUrl} (HTTP ${res.status}). ` +
+          'Start it with `ollama serve` in a terminal, or reinstall the Ollama runtime.',
+      );
+    }
 
     for await (const event of parseNDJSON(res.body!)) {
       if (event.error) throw new Error(`Ollama: ${event.error}`);

@@ -10,6 +10,9 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
@@ -210,6 +213,77 @@ await test('memory of a gone process is null, not an invented figure', async () 
 await test('memory of a nonsense pid is null', async () => {
   assert.equal(await processMemoryBytes(-1), null);
 });
+
+/* ---- the Ollama daemon is started on demand and stopped again ----
+ *
+ * A stand-in daemon on its own port, so nothing here touches a real Ollama or
+ * the machine's 11434. What is under test is the lifecycle: started when a
+ * request needs it, once however many requests arrive, and stopped again.
+ */
+const OLLAMA_PORT = Number(process.env.FAKE_OLLAMA_PORT ?? 11734);
+process.env.OLLAMA_BASE_URL = `http://127.0.0.1:${OLLAMA_PORT}`;
+{
+  const home = mkdtempSync(join(tmpdir(), 'ollama-srv-'));
+  const binDir = join(home, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  const fake = join(binDir, 'ollama');
+  const pidFile = join(home, 'daemon.pid');
+  writeFileSync(
+    fake,
+    [
+      '#!/usr/bin/env node',
+      `const http = require('http'), fs = require('fs');`,
+      `http.createServer((req, res) => {`,
+      `  if (req.url === '/api/tags') { res.writeHead(200, {'content-type':'application/json'}); res.end('{"models":[]}'); }`,
+      `  else { res.writeHead(404); res.end(); }`,
+      `}).listen(${OLLAMA_PORT}, '127.0.0.1');`,
+      `fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+      `process.on('SIGTERM', () => { try { fs.unlinkSync(${JSON.stringify(pidFile)}); } catch {} process.exit(0); });`,
+      '',
+    ].join('\n'),
+  );
+  chmodSync(fake, 0o755);
+  process.env.PATH = `${binDir}:${process.env.PATH}`;
+
+  const srv = await import('../src/ollama-server.js');
+  await srv.stopOllama('user');
+
+  await test('a request starts the Ollama daemon when nothing is serving', async () => {
+    assert.equal(await srv.ollamaReachable(), false, 'nothing should be serving to start with');
+    await srv.ensureOllamaRunning();
+    assert.equal(await srv.ollamaReachable(), true, 'the daemon should answer afterwards');
+    assert.ok(existsSync(pidFile), 'a real process should have been started');
+  });
+
+  await test('however many requests arrive, exactly one daemon runs', async () => {
+    const first = readFileSync(pidFile, 'utf8');
+    await srv.ensureOllamaRunning();
+    await Promise.all([srv.ensureOllamaRunning(), srv.ensureOllamaRunning()]);
+    assert.equal(readFileSync(pidFile, 'utf8'), first, 'a second daemon would change the pid');
+  });
+
+  await test('the daemon shows up in the process manager', async () => {
+    const active = listProcesses().active.filter((p) => p.script === 'ollama serve');
+    assert.equal(active.length, 1, `expected one ollama job, saw ${active.length}`);
+    assert.equal(active[0].kind, 'llm');
+  });
+
+  await test('the Stop button stops it', async () => {
+    const job = listProcesses().active.find((p) => p.script === 'ollama serve');
+    assert.ok(job, 'the job must exist to be stopped');
+    const stopped = await stopProcess(job.id);
+    assert.ok(stopped, 'Stop should report the job it stopped');
+    assert.equal(stopped.stoppedByUser, true);
+    await sleep(600);
+    assert.equal(existsSync(pidFile), false, 'the daemon should have been terminated');
+    assert.equal(await srv.ollamaReachable(), false, 'and should no longer answer');
+  });
+
+  await test('stopping an already-stopped daemon is harmless', async () => {
+    await srv.stopOllama('user');
+    await srv.stopOllama('idle');
+  });
+}
 
 console.log(
   `\n${passed} passed, ${failures.length} failed` +

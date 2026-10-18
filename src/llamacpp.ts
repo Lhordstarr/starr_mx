@@ -39,6 +39,23 @@ import {
 const port = () => Number(process.env.LLAMACPP_PORT ?? 9932);
 
 /**
+ * The library search path a llama-server should start with.
+ *
+ * A CUDA build links against libcudart, libcublas and their neighbours. Where
+ * the machine has a CUDA toolkit they are already found; where it does not,
+ * they were unpacked beside the binary by this app's installer and nothing on
+ * the default path points there. Both the binary's own directory and a `lib/`
+ * one level up are added, because the runtime archive unpacks its libraries
+ * into a `lib/` under the same tree rather than next to the binary.
+ */
+function libPathFor(bin: string): string {
+  const dir = path.dirname(bin);
+  const parts = [dir, path.join(dir, 'lib'), path.resolve(dir, '..', 'lib')];
+  if (process.env.LD_LIBRARY_PATH) parts.push(process.env.LD_LIBRARY_PATH);
+  return parts.join(path.delimiter);
+}
+
+/**
  * Prompt context the server is started with.
  *
  * llama.cpp's default is the model's trained context, which for a modern GGUF
@@ -401,6 +418,13 @@ async function start(bin: string, model: GgufModel, onProgress: (line: string) =
     // stdin is the supervisor's death watch, not a conversation partner: the
     // app never writes to it and the pipe closing is the whole message.
     stdio: ['pipe', 'pipe', 'pipe'],
+    // A CUDA build links against libcudart, which on a machine with no system
+    // CUDA lives beside the binary in the runtime archive this app unpacked.
+    // Without this the loader never finds it and the server dies with a bare
+    // "libcudart.so.12: cannot open shared object file" naming no path. The
+    // directory is prepended rather than assigned so a machine with its own
+    // CUDA keeps it ahead in the search order.
+    env: { ...process.env, LD_LIBRARY_PATH: libPathFor(bin) },
   });
   serving = { child, stdin: child.stdin, model: model.id };
 

@@ -1051,6 +1051,10 @@ try:
         "cuda": bool(torch.cuda.is_available()),
         "count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        # Which CUDA runtime this build links against. The llama.cpp CUDA build
+        # has to match it: upstream ships 12.8 and 13.4 of the same pin, and
+        # picking wrong gives a build that loads and then fails on the first device.
+        "cuda_version": getattr(torch.version, "cuda", None),
     }
 except Exception:
     out["torch"] = None
@@ -1146,12 +1150,19 @@ export function llamaServerPath(): string | null {
 /** True when the pinned server binary exists — llama.cpp's own "installed". */
 /** Which backend the installed build actually has, read off the shared
  *  libraries beside the binary rather than off its name. */
-function installedLlamaKind(): 'vulkan' | 'cpu' | null {
+/** What kind of llama.cpp build is installed here. */
+type LlamaKind = 'vulkan' | 'cuda' | 'cpu';
+
+function installedLlamaKind(): LlamaKind | null {
   const p = llamaServerPath();
   if (!p) return null;
   try {
     const dir = path.dirname(p);
     const entries = readdirSync(dir);
+    // CUDA first: a CUDA build bundles its own copy of the Vulkan loader's
+    // neighbour libraries in some builds, and the name that proves the build is
+    // the CUDA one is the ggml backend it was compiled against.
+    if (entries.some((n) => /^libggml-cuda/i.test(n))) return 'cuda';
     if (entries.some((n) => /^libggml-vulkan/i.test(n))) return 'vulkan';
     return 'cpu';
   } catch {
@@ -1176,6 +1187,39 @@ export function hasVulkan(): boolean {
   }
 }
 
+/**
+ * Is there an NVIDIA card, and which CUDA runtime does the machine already have?
+ *
+ * Upstream publishes CUDA 12.8 and CUDA 13.4 builds of the same pin, and they
+ * are not interchangeable: a 13.4 build wants a driver that a 12.8 machine may
+ * not have. torch is asked first because it is the version already known to run
+ * on this machine — on a Colab box that is `cu128`, and matching it means the
+ * driver question has already been answered. nvidia-smi is the fallback for a
+ * machine where torch was never installed.
+ */
+export function cudaRuntimeVersion(): string | null {
+  const fromTorch = (cached?: VenvProbe | null) =>
+    cached?.torch?.cudaVersion ? String(cached.torch.cudaVersion) : null;
+  const t = fromTorch(probeCache.get('venv')?.value ?? null);
+  if (t && /^\d+\.\d+$/.test(t)) return t;
+  // nvidia-smi prints "CUDA Version: 12.8" in its header. Absent on a card with
+  // no driver, which is the same answer as "not usable".
+  const smi = spawnSync('nvidia-smi', ['--query-gpu=driver_version', '--format=csv,noheader'], {
+    encoding: 'utf8',
+  });
+  if (smi.status !== 0 || !smi.stdout) return null;
+  const cut = /^(\d+)\.(\d+)/.exec(String(smi.stdout).trim());
+  // The driver number is not the CUDA number; mapping it needs the support
+  // matrix, and guessing it is how a build silently fails to load. A CUDA 12
+  // build is the safe choice for anything too new to have a published pairing.
+  return cut && Number(cut[1]) >= 130 ? '13.4' : '12.8';
+}
+
+/** Whether an NVIDIA card this app can build for is present. */
+export function hasNvidiaGpu(): boolean {
+  return spawnSync('nvidia-smi', ['-L'], { stdio: 'ignore' }).status === 0;
+}
+
 async function llamaCppInstalled(): Promise<boolean> {
   const p = llamaServerPath();
   if (!p) return false;
@@ -1188,21 +1232,120 @@ async function llamaCppInstalled(): Promise<boolean> {
 }
 
 /** Non-null when a better (GPU) build is available than the one installed. */
-export async function llamaCppUpgradeKind(): Promise<'vulkan' | null> {
-  if (!hasVulkan()) return null;
+export async function llamaCppUpgradeKind(): Promise<LlamaKind | null> {
   const kind = installedLlamaKind();
   if (kind === null) return null; // nothing installed yet — install handles it
-  return kind === 'cpu' ? 'vulkan' : null;
+  const best = bestLlamaKind();
+  if (!best || best === 'cpu') return null;
+  return kind === 'cpu' ? best : null;
 }
 
-/** The build to fetch for this machine: Vulkan when a GPU is usable, the CPU
- *  build otherwise. Null when upstream has no build for this platform (macOS
- *  and Windows are not scripted yet). */
-function llamaAsset(): { name: string; kind: 'vulkan' | 'cpu' } | null {
+/** The GPU build this machine should be running, or 'cpu'. */
+function bestLlamaKind(): LlamaKind {
+  // CUDA before Vulkan. An NVIDIA card has no usable Vulkan story here (no
+  // render node in a container, and the CPU build is what the Vulkan check then
+  // falls back to), so an NVIDIA machine that reached the CPU build is exactly
+  // the case this fixes. On a card that answers both, CUDA is the native path.
+  if (hasNvidiaGpu()) return 'cuda';
+  if (hasVulkan()) return 'vulkan';
+  return 'cpu';
+}
+
+/** Which CUDA tag upstream published for this machine, e.g. '12.8'. */
+function cudaTag(): string {
+  const v = cudaRuntimeVersion();
+  return v === '13.4' ? '13.4' : '12.8';
+}
+
+/** The build to fetch for this machine. Null when upstream has no build for this
+ *  platform (macOS and Windows are not scripted yet).
+ *
+ *  The CUDA build is published as a pair: the server itself, and a separate
+ *  archive of the CUDA runtime libraries it links against. Both are named, so
+ *  the installer can take the runtime only when the machine has none of its
+ *  own. */
+function llamaAsset(): { name: string; kind: LlamaKind; cudart?: string } | null {
   if (process.platform !== 'linux') return null;
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  if (hasVulkan()) return { name: `llama-${LLAMA_BUILD}-bin-ubuntu-vulkan-${arch}.tar.gz`, kind: 'vulkan' };
+  const kind = bestLlamaKind();
+  if (kind === 'cuda') {
+    // Upstream ships CUDA for x64 only; there is no arm64 CUDA build at this pin
+    // for 12.8, so an arm64 NVIDIA box keeps the build it can actually run.
+    if (arch !== 'x64') return { name: `llama-${LLAMA_BUILD}-bin-ubuntu-${arch}.tar.gz`, kind: 'cpu' };
+    const tag = cudaTag();
+    return {
+      name: `llama-${LLAMA_BUILD}-bin-ubuntu-cuda-${tag}-${arch}.tar.gz`,
+      cudart: `cudart-llama-${LLAMA_BUILD}-bin-ubuntu-cuda-${tag}-${arch}.tar.gz`,
+      kind: 'cuda',
+    };
+  }
+  if (kind === 'vulkan') return { name: `llama-${LLAMA_BUILD}-bin-ubuntu-vulkan-${arch}.tar.gz`, kind: 'vulkan' };
   return { name: `llama-${LLAMA_BUILD}-bin-ubuntu-${arch}.tar.gz`, kind: 'cpu' };
+}
+
+/**
+ * Whether this machine already has the CUDA runtime libraries llama.cpp links.
+ *
+ * The matching cudart archive is 594 MB, against 173 MB for the server itself,
+ * so downloading it on a machine that already has them — every Colab runtime,
+ * most CUDA installs — is 594 MB of nothing. Looked for where they actually
+ * live: the CUDA toolkit, the loader's default paths, and the `nvidia-*` wheels
+ * torch installs, which is how a pip-installed torch finds them without any
+ * system CUDA at all.
+ */
+export function hasCudaRuntimeLibs(): boolean {
+  const roots = [
+    '/usr/local/cuda/lib64',
+    '/usr/local/cuda/targets/x86_64-linux/lib',
+    '/usr/lib/x86_64-linux-gnu',
+    '/usr/lib',
+  ];
+  for (const root of roots) {
+    try {
+      if (readdirSync(root).some((n) => /^libcudart\.so/i.test(n))) return true;
+    } catch {
+      /* not this root */
+    }
+  }
+  // The `nvidia-*` wheels torch pulls in, which is how a pip-installed torch
+  // finds libcudart without any system CUDA at all. The directory is named for
+  // whatever torch resolved, so it is searched for rather than constructed.
+  const libRoot = path.resolve(path.dirname(venvPython()), '..', 'lib');
+  return findCudart(libRoot, 0);
+}
+
+function findCudart(dir: string, depth: number): boolean {
+  if (depth > 6) return false;
+  let entries: Array<{ name: string; isDirectory(): boolean }>;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true }) as unknown as Array<{
+      name: string;
+      isDirectory(): boolean;
+    }>;
+  } catch {
+    return false;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const full = path.join(dir, e.name);
+    try {
+      for (const inner of readdirSync(full, { withFileTypes: true }) as unknown as Array<{
+        name: string;
+        isDirectory(): boolean;
+      }>) {
+        const libDir = path.join(full, inner.name, 'lib');
+        try {
+          if (readdirSync(libDir).some((n) => /^libcudart\.so/i.test(n))) return true;
+        } catch {
+          /* not a lib dir */
+        }
+      }
+    } catch {
+      /* keep looking */
+    }
+    if (findCudart(full, depth + 1)) return true;
+  }
+  return false;
 }
 
 /** One venv's answer to the probe, or null when that venv has no interpreter.
@@ -1210,7 +1353,7 @@ function llamaAsset(): { name: string; kind: 'vulkan' | 'cpu' } | null {
  *  environment looks like anyway. */
 type VenvProbe = {
   packages: Record<string, boolean>;
-  torch: { version: string; cuda: boolean; count: number; name: string | null } | null;
+  torch: { version: string; cuda: boolean; count: number; name: string | null; cudaVersion?: string | null } | null;
 };
 
 /**
@@ -2566,6 +2709,27 @@ function platformLabel(): string {
  * Ollama's can. The tarball is fetched with Node's fetch and unpacked with
  * the system `tar`, so nothing is piped into a shell.
  */
+/** Unpacks one archive into the runtimes dir.
+ *
+ * The archives unpack into llama-<build>/…; extract into the runtimes dir and
+ * remember which directory it was, since upstream's exact layout is not
+ * something this app should hard-code. */
+async function unpack(tarball: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('tar', ['-xzf', tarball, '-C', runtimesDir()], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let err = '';
+    child.stderr.on('data', (b) => (err += String(b)));
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`tar exited ${code}${err.trim() ? ` — ${err.trim()}` : ''}`)),
+    );
+  });
+}
+
 async function installLlamaCpp(onProgress: (line: string) => void): Promise<void> {
   if (await llamaCppInstalled() && !(await llamaCppUpgradeKind())) {
     onProgress('llama.cpp is already installed.');
@@ -2596,8 +2760,24 @@ async function installLlamaCpp(onProgress: (line: string) => void): Promise<void
     /* runtimes dir may not exist yet */
   }
 
-  onProgress(`Fetching llama.cpp ${LLAMA_BUILD} (${picked.kind === 'vulkan' ? 'Vulkan' : 'CPU'} build)…`);
+  const KIND_LABEL: Record<string, string> = {
+    vulkan: 'Vulkan',
+    cuda: `CUDA ${cudaTag()}`,
+    cpu: 'CPU',
+  };
+  onProgress(`Fetching llama.cpp ${LLAMA_BUILD} (${KIND_LABEL[picked.kind]} build)…`);
   const url = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${asset}`;
+
+  // The CUDA build links against libcudart and friends, which upstream ships as
+  // a separate 594 MB archive. Fetched only when this machine has none: a
+  // Colab runtime, a CUDA toolkit install, or the nvidia-* wheels torch already
+  // pulled in all provide them, and there is no reason to download a third
+  // copy of the runtime onto those.
+  const wantsCudart = picked.kind === 'cuda' && picked.cudart && !hasCudaRuntimeLibs();
+  if (picked.kind === 'cuda' && !wantsCudart) {
+    onProgress('This machine already has the CUDA runtime libraries.');
+  }
+
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) throw new Error(`Could not download ${asset} (HTTP ${res.status}).`);
   const bytes = Buffer.from(await res.arrayBuffer());
@@ -2607,22 +2787,18 @@ async function installLlamaCpp(onProgress: (line: string) => void): Promise<void
   const { writeFile, chmod } = await import('node:fs/promises');
   await writeFile(tarball, bytes);
   onProgress(`Unpacking ${(bytes.length / 1024 / 1024).toFixed(0)} MB…`);
-  await new Promise<void>((resolve, reject) => {
-    // The archive unpacks into llama-<build>/…; extract into the runtimes dir
-    // and remember which directory it was, since upstream's exact layout is
-    // not something this app should hard-code.
-    const child = spawn('tar', ['-xzf', tarball, '-C', runtimesDir()], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    let err = '';
-    child.stderr.on('data', (b) => (err += String(b)));
-    child.on('error', reject);
-    child.on('close', (code) =>
-      code === 0
-        ? resolve()
-        : reject(new Error(`tar exited ${code}${err.trim() ? ` — ${err.trim()}` : ''}`)),
-    );
-  });
+  await unpack(tarball);
+
+  if (wantsCudart && picked.cudart) {
+    const rtUrl = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${picked.cudart}`;
+    onProgress('Fetching the CUDA runtime libraries (~594 MB, one time)…');
+    const rt = await fetch(rtUrl, { redirect: 'follow' });
+    if (!rt.ok) throw new Error(`Could not download ${picked.cudart} (HTTP ${rt.status}).`);
+    const rtTarball = path.join(llamaDir(), picked.cudart);
+    await writeFile(rtTarball, Buffer.from(await rt.arrayBuffer()));
+    await unpack(rtTarball);
+    await rm(rtTarball, { force: true });
+  }
   await rm(tarball, { force: true });
 
   // Find the directory that actually holds llama-server, however it nested it.

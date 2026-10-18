@@ -54,11 +54,30 @@ Keys may come from either source:
 | `PORT` | — | no, defaults to `3000` |
 | `KEYS_FILE` | — | no, defaults to `./.keys.json` |
 
-Providers without a key still appear in the dropdown, labelled *no key*. The app
+Providers without a key still appear in the dropdown, labelled *no key* —
+except the local ones, which never need one and say *no models* instead when
+they have nothing to run. The app
 needs no cloud key at all: chat runs locally through Ollama, or through the
 llama.cpp runtime it installs itself — which starts with the GGUF model you
 pick (`LLAMACPP_IDLE_MS` overrides the ten-minute idle shutdown) and stops it
 again when you are done with it.
+
+Both chat backends are started for you. The llama.cpp server comes up with the
+model you pick; the Ollama daemon comes up the first time a request needs it,
+because listing models deliberately does not start it — opening the settings
+page should not launch anything. Both appear in the same process manager, stop
+from the same Stop button, shut down after ten idle minutes
+(`OLLAMA_IDLE_MS`), and are killed when the app exits.
+
+llama.cpp is installed as the build that suits the machine: **CUDA** on an NVIDIA
+card, **Vulkan** where a render node and `vulkaninfo` are both present, **CPU**
+otherwise. Upstream publishes the CUDA 12.8 and 13.4 builds separately, so the
+one matching the CUDA runtime already on the machine is chosen — otherwise the
+server loads and then fails on the first device. Its CUDA runtime libraries come
+down with it (594 MB, once) only when the machine has none of its own, which a
+Colab runtime, a CUDA toolkit install or torch's own `nvidia-*` wheels all
+already provide. A machine on the CPU build with a GPU it could use is offered a
+one-click upgrade to the right one.
 
 ### Security
 
