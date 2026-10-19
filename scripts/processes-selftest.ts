@@ -262,18 +262,21 @@ process.env.OLLAMA_BASE_URL = `http://127.0.0.1:${OLLAMA_PORT}`;
     assert.equal(readFileSync(pidFile, 'utf8'), first, 'a second daemon would change the pid');
   });
 
-  await test('the daemon shows up in the process manager', async () => {
+  await test('but it does NOT show up as a job to stop', async () => {
+    // It used to be registered, which put a permanent "ollama serve" row with a
+    // Stop button in the resource manager — a row for something the user never
+    // started and cannot usefully stop. The daemon is this app's own: started on
+    // the first request, idle-timed, killed on exit. Its loaded models are still
+    // listed, because that is memory someone needs to see.
     const active = listProcesses().active.filter((p) => p.script === 'ollama serve');
-    assert.equal(active.length, 1, `expected one ollama job, saw ${active.length}`);
-    assert.equal(active[0].kind, 'llm');
+    assert.equal(active.length, 0, `the daemon should not be a listed job, saw ${active.length}`);
+    const stopped = listProcesses().recent.filter((p) => p.script === 'ollama serve');
+    assert.equal(stopped.length, 0, 'nor should it linger in the recent list');
   });
 
-  await test('the Stop button stops it', async () => {
-    const job = listProcesses().active.find((p) => p.script === 'ollama serve');
-    assert.ok(job, 'the job must exist to be stopped');
-    const stopped = await stopProcess(job.id);
-    assert.ok(stopped, 'Stop should report the job it stopped');
-    assert.equal(stopped.stoppedByUser, true);
+  await test('and it is still stoppable directly', async () => {
+    assert.equal(await srv.ollamaReachable(), true, 'it should be up from the tests above');
+    await srv.stopOllama('user');
     await sleep(600);
     assert.equal(existsSync(pidFile), false, 'the daemon should have been terminated');
     assert.equal(await srv.ollamaReachable(), false, 'and should no longer answer');

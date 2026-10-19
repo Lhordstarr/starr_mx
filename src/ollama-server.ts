@@ -15,22 +15,21 @@
  * than two half-built ones.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import {
-  attachChild,
-  finishProcess,
-  registerProcess,
-  registerStopHandler,
-  unregisterStopHandler,
-} from './processes.js';
 
 const baseUrl = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
 /** Idle shutdown, same ten minutes llama.cpp uses unless told otherwise. */
 const IDLE_MS = Number(process.env.OLLAMA_IDLE_MS ?? 600_000);
 
+/**
+ * The daemon this app is currently keeping alive, if any.
+ *
+ * No managed-process id: the daemon is not offered as a stoppable job, so
+ * nothing here has to be cleaned up in the process registry. `stopOllama` owns
+ * the child directly, which is what makes that work.
+ */
 let serving: {
   child: ChildProcess;
-  jobId: string;
-  /** Set when the user stopped it, so the exit is not reported as a failure. */
+  /** Set when we stopped it, so the exit is not reported as a failure. */
   userStopped: boolean;
 } | null = null;
 let starting: Promise<void> | null = null;
@@ -103,16 +102,21 @@ export async function ensureOllamaRunning(
     }
     onProgress('Starting the Ollama daemon…');
     const child = spawn(bin, ['serve'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const job = registerProcess({
-      kind: 'llm',
-      script: 'ollama serve',
-      pid: child.pid ?? -1,
-      // Ollama picks its own device; there is nothing here that reports which.
-      device: 'cpu',
-    });
-    serving = { child, jobId: job.id, userStopped: false };
-    attachChild(job.id, child);
-    registerStopHandler(job.id, () => stopOllama('user'));
+    // Deliberately NOT registered as a managed process.
+    //
+    // It used to be, and that put a permanent "ollama serve" row with a Stop
+    // button in the resource manager — a row for something the user never
+    // started, cannot usefully stop, and is told about every time a chat is
+    // sent. The daemon is this app's own implementation detail: started on the
+    // first request, idle-timed, and killed on exit. Its *models* are still
+    // listed, because a loaded model is memory someone needs to see and is
+    // worth releasing by hand — that list is not the same thing as the daemon
+    // being up.
+    //
+    // Its lifetime no longer depends on the process registry. It never did:
+    // `stopOllama` owns the child directly, the idle timer calls it, and
+    // `hookOllamaExit` calls it on every exit path.
+    serving = { child, userStopped: false };
 
     const tail: string[] = [];
     const note = (b: Buffer) => {
@@ -123,7 +127,6 @@ export async function ensureOllamaRunning(
     child.stderr?.on('data', note);
 
     child.on('error', () => {
-      unregisterStopHandler(job.id);
       serving = null;
     });
     child.on('exit', (code, signal) => {
@@ -131,11 +134,10 @@ export async function ensureOllamaRunning(
       const userStopped = serving?.userStopped ?? false;
       if (mine) serving = null;
       clearIdle();
-      unregisterStopHandler(job.id);
-      // A daemon that exited on its own is a failure worth recording; one the
-      // user stopped from the process manager is the outcome they asked for.
+      // A daemon that exited on its own is a failure worth recording; one we
+      // stopped — idle, or because the app is closing — is the outcome asked
+      // for.
       if (mine && !userStopped) {
-        finishProcess(job.id, code ?? null, signal, false);
         console.error(
           `[ollama] the daemon exited${signal ? ` on ${signal}` : ` (${code})`}: ${tail.slice(-3).join(' | ')}`,
         );

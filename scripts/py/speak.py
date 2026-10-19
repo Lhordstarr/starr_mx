@@ -94,10 +94,6 @@ def main() -> int:
         return 1
 
     kind, _index = pick_device(device)
-    use_gpu = kind != "cpu"
-    # Told to the server as soon as it is known, so the resource manager shows
-    # where this is really running rather than what was requested.
-    print(json.dumps({"device": vendor_name() if use_gpu else "cpu"}), flush=True)
     try:
         # Everything the 82M checkpoint needs, anchored on the downloaded weights.
         weights = os.path.join(model_dir, KModel.MODEL_NAMES.get(repo, "kokoro-v1_0.pth"))
@@ -109,7 +105,30 @@ def main() -> int:
             config=config or None,
             model=weights if os.path.isfile(weights) else None,
         )
-        pipeline = KPipeline(lang_code="a", repo_id=repo, model=model)
+        # Move it here, and move it explicitly.
+        #
+        # KModel builds its submodules on the CPU and loads the weights with
+        # map_location='cpu'. KPipeline has two branches for its model argument:
+        # given a bool it constructs KModel(repo_id=...).to(device).eval(), but
+        # given a KModel instance it takes it verbatim and never touches
+        # `device` at all. This script builds its own KModel so it can point at
+        # the downloaded weights, so it always took the second branch — and
+        # Kokoro ran on the CPU on every machine while the process row said GPU.
+        # It was not a slow GPU; it was not a GPU at all.
+        #
+        # `.to()` before anything is read, so a move that fails is a real error
+        # rather than a synthesis that quietly comes out on the wrong device.
+        model = model.to(kind).eval()
+
+        # Where it actually ended up, read off the model rather than off the
+        # request. This is what the resource manager is told, so a move that did
+        # not take, or a torch build that quietly refused, cannot be reported as
+        # the device that was asked for — the row would say GPU again and the
+        # job would be slow for exactly the same reason.
+        landed = next(model.parameters()).device.type
+        print(json.dumps({"device": landed}), flush=True)
+
+        pipeline = KPipeline(lang_code="a", repo_id=repo, model=model, device=kind)
         print(json.dumps({"stage": "synthesising"}), flush=True)
         chunks = []
         for _, _, audio in pipeline(text, voice=voice_path or voice, speed=speed):
@@ -129,7 +148,7 @@ def main() -> int:
                     "path": out_path,
                     "samples": int(merged.shape[0]),
                     "seconds": round(merged.shape[0] / 24000, 2),
-                    "device": vendor_name() if use_gpu else "cpu",
+                    "device": landed,
                 }
             ),
             flush=True,
