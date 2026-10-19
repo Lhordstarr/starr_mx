@@ -1744,10 +1744,11 @@ let speakButton = null;
 /* ---------------- The card that says what is being read ----------------
 
    Speech is invisible: the only sign a reply is being read aloud is that it
-   sounds different. This is the sign — it rises above the composer while a
-   voice is being made and while it plays, and sinks back when it is done. It
-   carries only what the run itself reported: which model is speaking, the
-   device the runner landed on, and the real position in the clip. */
+   sounds different. This is the sign — it drops out from under the topbar
+   while a voice is being made and while it plays, and retreats back up when it
+   is done. It carries only what the run itself reported: which model is
+   speaking, the device the runner landed on, and the real position in the
+   clip. */
 
 /** The card currently up, if any. */
 let speaker = null;
@@ -1804,14 +1805,16 @@ function openSpeaker(title, sub) {
   for (let i = 0; i < 4; i += 1) eq.appendChild(document.createElement('b'));
 
   const btn = document.createElement('button');
-  btn.type = 'button'; // never a submit: the card lives inside the composer form
+  btn.type = 'button'; // nothing here submits anything, and nothing here should start
   btn.className = 'speaker__btn';
   const icon = document.createElement('span');
   btn.appendChild(icon);
 
   card.append(art, meta, eq, btn);
   slot.appendChild(card);
-  els.composer.appendChild(slot);
+  // On the window, not in the composer: it belongs to the top of the screen,
+  // out of the conversation's way, where the composer's growth cannot move it.
+  document.body.appendChild(slot);
 
   // One frame with the offset applied, then clear it, so the transition has a
   // start value to animate from. The timer is the safety net: a backgrounded

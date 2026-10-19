@@ -989,58 +989,66 @@ a.icon-btn {
    is that it sounds different — nothing says what is being read, by which
    voice, or how far along it is.
 
-   It floats above the composer, out of the reading column's way, and it rises
-   into place when speech starts and sinks back the way it came when it ends.
-   That motion is the point: a card that pops in reads as a notification, while
-   one that arrives from below reads as something surfacing to speak and
-   leaving when it is done. The equalizer arrives with a slight upward unfold
-   for the same reason — it is what "alive" looks like here.
+   It is pinned under the topbar rather than floating over the conversation:
+   the reply being read stays readable, the bar is in one place for every
+   reply, and nothing below it can move it — the composer growing with a long
+   message does not shift it a pixel. It is also the topmost thing in the
+   window short of a notification, so no bubble, menu or drawer can cover it.
 
-   The line is the app's own .bar, at the thickness of a line: indeterminate
-   while the voice is being made (there is no figure yet, and the sheen says
-   "working" without inventing one) and the real position in the clip once it
-   plays. */
+   It arrives by dropping in from the topbar's edge — travelling down into
+   place — and leaves by retreating back up to it. That is the nearest screen
+   edge, which is what a bar in that position reads as, and the equalizer
+   unfolds with it. A card that pops in reads as a notification; one that
+   surfaces and withdraws reads as a voice.
+
+   The travel is deliberately short: the bar is above the topbar in the stack
+   (below), so anything more than "flush with its edge" would show it sliding
+   across the topbar's own content instead of out of it.
+
+   The line is the app's own .bar, at the thickness of a hairline:
+   indeterminate while the voice is being made (there is no figure yet, and the
+   sheen says "working" without inventing one) and the real position in the
+   clip once it plays. */
 
 .speaker-slot {
-  position: absolute;
-  /* Above the composer, like .to-latest — which lives in the same airspace and
-     keeps priority: the card steps over the pill while the pill is up. */
-  bottom: calc(100% + 10px);
+  position: fixed;
+  /* Just clear of the topbar: --bar-h is its content height, and it carries
+     8px of padding above and below that. */
+  top: calc(var(--bar-h) + 24px);
   left: 0;
   right: 0;
-  padding: 0 10px;
+  padding: 0 12px;
   display: grid;
   place-items: center;
-  /* The slot spans the column; only the card itself takes clicks. */
+  /* The slot spans the window; only the card itself takes clicks. */
   pointer-events: none;
-  transition: bottom var(--speed) var(--ease);
-  z-index: 6;
-}
-.composer:has(.to-latest.show) .speaker-slot {
-  bottom: calc(100% + 52px);
+  /* Above the topbar (40), the drawer (60) and the model menu (70), because
+     nothing in the app is allowed to paint over what is being read. Toasts
+     (90) stay above it — they are the one thing more transient than this. */
+  z-index: 80;
 }
 
 .speaker {
   pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 13px;
+  gap: 11px;
   width: min(100%, 470px);
-  padding: 11px 13px 11px 11px;
-  border-radius: var(--radius-lg);
+  padding: 6px 12px 6px 7px;
+  border-radius: 999px;
   background: var(--glass-fill);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-sheen), var(--glass-shadow);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  /* Arriving: from below, a touch small, decelerating into place. Leaving: the
-     same move backwards and quicker — a card on its way out should not be as
-     much of an event as one arriving. */
+  /* Arriving: flush with the topbar's edge and a touch small, settling down
+     into place. Leaving: the same move backwards and quicker — a bar on its
+     way out should not be as much of an event as one arriving. */
   opacity: 0;
-  transform: translateY(16px) scale(0.965);
+  transform: translateY(-8px) scale(0.97);
   transition:
-    opacity 200ms var(--ease),
-    transform 300ms cubic-bezier(0.16, 0.84, 0.28, 1);
+    opacity 180ms var(--ease),
+    transform 280ms cubic-bezier(0.16, 0.84, 0.28, 1);
 }
 .speaker.is-in {
   opacity: 1;
@@ -1048,8 +1056,8 @@ a.icon-btn {
 }
 .speaker.is-out {
   opacity: 0;
-  transform: translateY(10px) scale(0.985);
-  transition-duration: 170ms, 200ms;
+  transform: translateY(-6px) scale(0.985);
+  transition-duration: 150ms, 180ms;
   pointer-events: none;
 }
 
@@ -1057,9 +1065,9 @@ a.icon-btn {
   flex: none;
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 13px;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
   color: var(--text-dim);
   background: var(--accent-soft);
   border: 1px solid var(--accent-border);
@@ -1069,8 +1077,13 @@ a.icon-btn {
   flex: 1;
   min-width: 0;
 }
+/* Both of these are <p>, and the browser gives a <p> a 1em margin above and
+   below it. Left alone that turned a 55px bar into a 107px one — the margin,
+   not the type, was most of the card. */
 .speaker__title {
+  margin: 0;
   font-size: 0.86rem;
+  line-height: 1.3;
   font-weight: 600;
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -1078,18 +1091,19 @@ a.icon-btn {
   text-overflow: ellipsis;
 }
 .speaker__sub {
-  margin-top: 1px;
+  margin: 1px 0 0;
   font-size: 0.74rem;
+  line-height: 1.3;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .speaker__line {
-  --meter-h: 3px;
-  margin-top: 9px;
+  --meter-h: 2px;
+  margin-top: 6px;
 }
-/* Leaving: the line empties as the card sinks, so the last thing it says is
+/* Leaving: the line empties as the card retreats, so the last thing it says is
    "finished" rather than "interrupted mid-sentence". */
 .speaker.is-out .speaker__line > i {
   width: 0 !important;
@@ -1102,8 +1116,8 @@ a.icon-btn {
   flex: none;
   display: flex;
   align-items: flex-end;
-  gap: 3px;
-  height: 20px;
+  gap: 2px;
+  height: 18px;
   transform-origin: bottom;
   transform: scaleY(0.25);
   transition: transform 320ms cubic-bezier(0.16, 0.84, 0.28, 1) 40ms;
@@ -1116,7 +1130,7 @@ a.icon-btn {
   transition-duration: 140ms;
 }
 .speaker__eq b {
-  width: 3px;
+  width: 2px;
   height: 22%;
   border-radius: 99px;
   background: color-mix(in srgb, var(--text) 62%, var(--bg));
@@ -1148,8 +1162,8 @@ a.icon-btn {
   flex: none;
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 50%;

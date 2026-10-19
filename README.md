@@ -206,15 +206,16 @@ The same rule as everywhere else applies to the device: it is read off the
 loaded model, never off the request, so a run that did not move cannot be
 reported as one that did.
 
-Speaking a reply is visible while it happens. The Speak button puts a card up
-above the composer — over the reading column, never over the input — from the
-moment the voice is asked for until the clip ends. It rises into place and sinks
-back the way it came, and it carries only what the run reported: the first words
-of the reply being read, the model that is reading it, the device the runner
-landed on, and the real position in the clip. While the voice is still being
-made the line is indeterminate, because there is no length to show yet, and the
-card's button stops the synthesis; once it plays, the same button pauses and
-resumes, and the equalizer holds still while it is paused.
+Speaking a reply is visible while it happens. The Speak button puts a slim bar
+up at the top of the window — under the topbar, out of the conversation's way,
+and above everything in the window short of a notification — from the moment the
+voice is asked for until the clip ends. It drops out from behind the topbar and
+retreats back up when it goes, and it carries only what the run reported: the
+first words of the reply being read, the model that is reading it, the device
+the runner landed on, and the real position in the clip. While the voice is
+still being made the line is indeterminate, because there is no length to show
+yet, and the bar's button stops the synthesis; once it plays, the same button
+pauses and resumes, and the equalizer holds still while it is paused.
 
 ## Attachments
 

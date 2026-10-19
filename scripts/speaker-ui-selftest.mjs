@@ -312,8 +312,8 @@ try {
     );
     report('and its icon is one that paints, not an empty button', await evalJs(PAINTS));
 
-    // The motion, stated as values rather than trusted as pixels: it arrives
-    // from below and slightly small, rests unshifted, and leaves the same way
+    // The motion, stated as values rather than trusted as pixels: it drops in
+    // from above and slightly small, rests unshifted, and leaves back the way
     // it came. Transitions are switched off for the read — otherwise both
     // reads return the value mid-flight and the check would pass on a card
     // that never moved at all.
@@ -338,10 +338,10 @@ try {
         });
       })()`),
     );
-    const rise = /matrix\(0\.9\d+/.test(motion.start) && /, 16\)$/.test(motion.start);
-    const sink = /matrix\(0\.9\d+/.test(motion.leaving) && /, 10\)$/.test(motion.leaving);
+    const rise = /matrix\(0\.9\d+/.test(motion.start) && /, -8\)$/.test(motion.start);
+    const sink = /matrix\(0\.9\d+/.test(motion.leaving) && /, -6\)$/.test(motion.leaving);
     report(
-      'it arrives by rising into place, and leaves by sinking back the way it came',
+      'it arrives by dropping in from the topbar edge, and leaves by retreating back up to it',
       motion.entered === 'none' && rise && sink,
       `entered ${motion.entered}, from ${motion.start}, leaving ${motion.leaving}`,
     );
@@ -434,8 +434,9 @@ try {
       `width was "${width}%" of a 2 s clip at 0.5 s`,
     );
 
-    // Pause and resume from the card, without submitting the composer form it
-    // lives in. A default-type button in there would send the message.
+    // Pause and resume from the card, and send nothing while doing it: the
+    // card is not in the composer form today, and it must never end up as a
+    // default-type button in one — that would send the message instead.
     const messagesBefore = await evalJs(`document.querySelectorAll('.message').length`);
     await evalJs(`document.querySelector('.speaker__btn')?.click(), true`);
     const paused = JSON.parse(
@@ -454,7 +455,7 @@ try {
     report('and the button then offers to resume', paused.icon === 'Resume reading', paused.icon);
     report('the play icon paints', await evalJs(PAINTS));
     report(
-      'the card is not a submit button: pressing it sent nothing',
+      'pressing it sent nothing — it is a button, never a submit',
       (await evalJs(`document.querySelectorAll('.message').length`)) === messagesBefore &&
         (await evalJs(`document.getElementById('input').value`)) === '',
     );
@@ -469,18 +470,85 @@ try {
       )) === true,
     );
 
-    // It floats above the composer and never over it.
+    // It belongs to the top of the window: under the topbar, above everything
+    // in the conversation, and in the same place no matter what is below it.
+    // Everything here is about where the bar *rests*, so let its entrance
+    // finish first — mid-transition it is still travelling down, and a fast
+    // run would measure it a few pixels high and call that a move.
+    await waitFor(
+      `getComputedStyle(document.querySelector('.speaker')).transform === 'none'`,
+      2000,
+    );
     const layout = JSON.parse(
       await evalJs(`JSON.stringify((() => {
         const card = document.querySelector('.speaker').getBoundingClientRect();
+        const bar = document.querySelector('.topbar').getBoundingClientRect();
         const box = document.querySelector('.composer-box').getBoundingClientRect();
-        return { cardBottom: card.bottom, boxTop: box.top };
+        return { cardTop: card.top, cardBottom: card.bottom, barBottom: bar.bottom, boxTop: box.top };
       })())`),
     );
     report(
-      'the card sits above the composer, never over the input',
-      layout.cardBottom <= layout.boxTop + 1,
-      `card bottom ${Math.round(layout.cardBottom)} vs composer top ${Math.round(layout.boxTop)}`,
+      "it is pinned just under the topbar, out of the conversation's way",
+      layout.cardTop >= Math.floor(layout.barBottom) - 1 &&
+        layout.cardTop - layout.barBottom <= 40 &&
+        layout.cardBottom <= layout.boxTop,
+      `card ${Math.round(layout.cardTop)}–${Math.round(layout.cardBottom)}, topbar bottom ` +
+        `${Math.round(layout.barBottom)}, composer top ${Math.round(layout.boxTop)}`,
+    );
+
+    // "Always above" also means it does not ride the composer: growing the
+    // input's box must leave the bar exactly where it was.
+    const before = JSON.parse(
+      await evalJs(
+        `(() => { const r = document.querySelector('.speaker').getBoundingClientRect();
+           return JSON.stringify({ top: r.top, bottom: r.bottom }); })()`,
+      ),
+    );
+    await evalJs(`(() => {
+      const input = document.getElementById('input');
+      input.value = Array.from({ length: 8 }, (_, i) => 'line ' + i).join('\\n');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await sleep(300);
+    const after = JSON.parse(
+      await evalJs(
+        `(() => { const r = document.querySelector('.speaker').getBoundingClientRect();
+           return JSON.stringify({ top: r.top, bottom: r.bottom }); })()`,
+      ),
+    );
+    report(
+      'and the composer growing under it does not move it at all',
+      Math.abs(after.top - before.top) < 0.5 && Math.abs(after.bottom - before.bottom) < 0.5,
+      `moved from ${Math.round(before.top)} to ${Math.round(after.top)}`,
+    );
+    // Put the box back the way the test found it.
+    await evalJs(`(() => {
+      const input = document.getElementById('input');
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+
+    // And "on top" is literal: with a message scrolled underneath it, the
+    // point still hit-tests to the card, not to the message.
+    const covering = JSON.parse(
+      await evalJs(`JSON.stringify((() => {
+        document.querySelector('.messages').scrollTop = 0;
+        const card = document.querySelector('.speaker');
+        const c = card.getBoundingClientRect();
+        const msg = [...document.querySelectorAll('.message')]
+          .map((m) => m.getBoundingClientRect())
+          .find((r) => r.bottom > c.top + 4 && r.top < c.bottom - 4);
+        if (!msg) return { overlap: false };
+        const x = Math.round(Math.max(c.left, msg.left) + 10);
+        const y = Math.round(Math.max(c.top, msg.top) + 6);
+        const hit = document.elementFromPoint(x, y);
+        return { overlap: true, inside: !!hit && card.contains(hit), hit: hit ? String(hit.className) : null };
+      })())`),
+    );
+    report(
+      'nothing in the conversation is painted over it',
+      covering.overlap === true && covering.inside === true,
+      covering.overlap ? `the hit at that point was ${covering.hit}` : 'nothing overlapped it to test',
     );
 
     // The end of the clip is what takes it down, and it leaves by animating.
