@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hubCacheDir, listDownloads, modelsDir } from './huggingface.js';
 import { attachChild, finishProcess, registerProcess, setProcessDevice } from './processes.js';
+import { isTransformersTts } from './runnable.js';
 import { venvPython, type Device } from './runtimes.js';
 import { WHISPER_REPO, parseWhisperJson, resolveWhisperModel, transcribeWithWhisperCpp } from './whispercpp.js';
 
@@ -24,9 +25,10 @@ const scriptsDir = path.resolve(here, '..', 'scripts', 'py');
 const outputsDir = () => path.resolve(process.env.RUNTIME_OUT_DIR ?? './.runtimes/out');
 
 /**
- * Which venv a task runs in. The shared venv covers speech-to-text and image
- * generation; Kokoro cannot import on the machine's interpreter, so its own
- * environment answers text-to-speech.
+ * Which venv a task runs in by default. The shared venv covers speech-to-text,
+ * image generation, and the transformers speech pipeline; Kokoro cannot import
+ * on the machine's interpreter, so its own environment answers for it — and
+ * speak() overrides this per model, because "speech" is two runners.
  */
 const VENV_FOR_KIND = { stt: 'venv', image: 'venv', tts: 'venv-kokoro' } as const;
 
@@ -93,9 +95,16 @@ async function run(
     kind?: 'stt' | 'tts' | 'image';
     repo?: string;
     device?: string;
+    /**
+     * Which Python environment to run in, when the kind's default is wrong for
+     * this model. A kind is a capability, and a capability can have more than
+     * one implementation: speech has Kokoro in an environment of its own and the
+     * transformers pipeline in the shared one.
+     */
+    venv?: string;
   },
 ): Promise<RunResult> {
-  const py = venvPython(VENV_FOR_KIND[opts.kind ?? 'image']);
+  const py = venvPython(opts.venv ?? VENV_FOR_KIND[opts.kind ?? 'image']);
   return new Promise((resolve, reject) => {
     const child = spawn(py, [path.join(scriptsDir, script), ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -330,14 +339,33 @@ export async function speak(opts: {
   const dir = path.dirname(modelDir);
   await mkdirSafe(outputsDir());
   const outPath = path.join(outputsDir(), `tts-${Date.now()}.wav`);
-  const result = await run('speak.py', [dir, opts.voice, outPath, opts.device, String(opts.speed), opts.repo], {
-    stdin: opts.text,
-    timeoutMs: 10 * 60_000,
-    onLog: opts.onLog,
-    kind: 'tts',
-    repo: opts.repo,
-    device: opts.device,
-  });
+
+  // Two runners, chosen by the weights rather than by the caller.
+  //
+  // Kokoro is a styletts2 checkpoint that only the `kokoro` package loads, from
+  // a .pth beside its voices/; every other speech model this app offers is a
+  // transformers text-to-speech pipeline. They also live in different Python
+  // environments, so this choice decides which interpreter runs: Kokoro has one
+  // of its own, the pipeline uses the shared runtime that already holds torch
+  // and transformers.
+  //
+  // Chosen here and not by the caller because the caller cannot know: the Studio
+  // sends the same request for both, which is the point of having one endpoint.
+  const generic = await isTransformersTts(dir);
+  const script = generic ? 'speak_hf.py' : 'speak.py';
+  const result = await run(
+    script,
+    [dir, opts.voice, outPath, opts.device, String(opts.speed), opts.repo],
+    {
+      stdin: opts.text,
+      timeoutMs: 10 * 60_000,
+      onLog: opts.onLog,
+      kind: 'tts',
+      repo: opts.repo,
+      device: opts.device,
+      venv: generic ? 'venv' : 'venv-kokoro',
+    },
+  );
   return { result, outPath };
 }
 

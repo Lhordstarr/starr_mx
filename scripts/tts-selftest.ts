@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
 import { RUNTIME_GROUPS, installRuntimes, runtimeStatus, venvPython } from '../src/runtimes.ts';
+import { speak as speakWith } from '../src/infer.ts';
 
 let passed = 0;
 const failures: string[] = [];
@@ -232,6 +233,190 @@ console.log('\nAn environment whose PyTorch is a CPU-only build must be repairab
     else process.env.RUNTIMES_DIR = saved.dir;
     if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
     else process.env.RUNTIMES_PYTHON = saved.py;
+  }
+}
+
+console.log('\nSpeech is two runners now, and the weights must choose between them');
+{
+  // Kokoro is a styletts2 checkpoint that only the `kokoro` package loads;
+  // every other speech model the app offers is a transformers pipeline. The two
+  // live in different Python environments, so choosing wrong is not a worse
+  // answer, it is "No module named 'kokoro'" or "no pipeline for this model" —
+  // and before the generic runner existed the second case could not run at all.
+  //
+  // Driven against the real speak() and the real venv resolution, with stand-in
+  // interpreters that record which one ran and what it was asked to run.
+  const home = mkdtempSync(path.join(tmpdir(), 'starr-tts-dispatch-'));
+  const models = path.join(home, 'models');
+  const runtimes = path.join(home, 'runtimes');
+  const out = path.join(home, 'out');
+  const log = path.join(home, 'interp.log');
+
+  const seedModel = (repo: string, files: Record<string, string>): void => {
+    for (const [name, body] of Object.entries(files)) {
+      const full = path.join(models, repo.replace('/', '--'), name);
+      mkdirSync(path.dirname(full), { recursive: true });
+      writeFileSync(full, body);
+    }
+  };
+  // A VITS model: the shape every MMS-TTS checkpoint has.
+  seedModel('Acme/vits-tts', {
+    'model.safetensors': 'x',
+    'config.json': JSON.stringify({ model_type: 'vits', architectures: ['VitsModel'] }),
+  });
+  // Kokoro: a .pth checkpoint beside its voices/, and a config that names no
+  // transformers architecture at all.
+  seedModel('Acme/kokoro-82m', {
+    'kokoro-v1_0.pth': 'x',
+    'config.json': JSON.stringify({ istftnet: {}, vocab: {} }),
+    'voices/af_heart.pt': 'x',
+  });
+
+  const interpreter = (venv: string): void => {
+    const py = path.join(runtimes, venv, 'bin', 'python');
+    mkdirSync(path.dirname(py), { recursive: true });
+    writeFileSync(
+      py,
+      [
+        '#!/bin/bash',
+        `echo "$0 $*" >> ${JSON.stringify(log)}`,
+        `echo '{"path": ${JSON.stringify(path.join(out, 'said.wav'))}, "samples": 10, "seconds": 0.5, "device": "cpu"}'`,
+        '',
+      ].join('\n'),
+    );
+    chmodSync(py, 0o755);
+  };
+  interpreter('venv');
+  interpreter('venv-kokoro');
+
+  const saved = {
+    models: process.env.HF_MODELS_DIR,
+    dir: process.env.RUNTIMES_DIR,
+    py: process.env.RUNTIMES_PYTHON,
+    out: process.env.RUNTIME_OUT_DIR,
+  };
+  process.env.HF_MODELS_DIR = models;
+  process.env.RUNTIMES_DIR = runtimes;
+  process.env.RUNTIMES_PYTHON = '';
+  process.env.RUNTIME_OUT_DIR = out;
+
+  const calls = (): string[] => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : []);
+
+  try {
+    await speakWith({
+      repo: 'Acme/vits-tts',
+      file: 'model.safetensors',
+      voice: 'af_heart',
+      speed: 1,
+      device: 'cpu',
+      text: 'Hello there.',
+    });
+    await speakWith({
+      repo: 'Acme/kokoro-82m',
+      file: 'kokoro-v1_0.pth',
+      voice: 'af_heart',
+      speed: 1,
+      device: 'cpu',
+      text: 'Hello there.',
+    });
+
+    const seen = calls();
+    const vits = seen.find((l) => l.includes('Acme--vits-tts')) ?? '';
+    const kokoro = seen.find((l) => l.includes('Acme--kokoro-82m')) ?? '';
+
+    report('a VITS model is spoken by the generic runner', /speak_hf\.py/.test(vits), vits || '(nothing ran)');
+    report(
+      'and in the shared environment, where transformers is',
+      vits.includes(path.join(runtimes, 'venv', 'bin', 'python')) && !vits.includes('venv-kokoro'),
+      vits || '(nothing ran)',
+    );
+    report(
+      'Kokoro still runs its own script in its own environment',
+      kokoro.includes(path.join(runtimes, 'venv-kokoro', 'bin', 'python')) && /speak\.py/.test(kokoro),
+      kokoro || '(nothing ran)',
+    );
+    report(
+      'the generic runner is not asked to load a Kokoro checkpoint',
+      !/speak_hf\.py/.test(kokoro) && !/speak\.py/.test(vits.replace('speak_hf.py', '')),
+      `${vits} | ${kokoro}`,
+    );
+  } finally {
+    if (saved.models === undefined) delete process.env.HF_MODELS_DIR;
+    else process.env.HF_MODELS_DIR = saved.models;
+    if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+    else process.env.RUNTIMES_DIR = saved.dir;
+    if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+    else process.env.RUNTIMES_PYTHON = saved.py;
+    if (saved.out === undefined) delete process.env.RUNTIME_OUT_DIR;
+    else process.env.RUNTIME_OUT_DIR = saved.out;
+  }
+}
+
+console.log('\nThe generic runner must survive text longer than an utterance');
+{
+  const generic = readFileSync(path.resolve('scripts/py/speak_hf.py'), 'utf8');
+  report(
+    'long text is split into utterance-sized pieces',
+    /def split_text\(/.test(generic) && /split_text\(text\)/.test(generic),
+    'VITS predicts a duration for the whole input; 20k characters is outside it',
+  );
+  report(
+    'the device reported is read off the model, not off the request',
+    /landed\s*=\s*next\(pipe\.model\.parameters\(\)\)\.device\.type/.test(generic) &&
+      /json\.dumps\(\{\s*"device":\s*landed\s*\}\)/.test(generic),
+    'reporting the request is how a CPU run gets labelled GPU',
+  );
+  report(
+    'the voice and speed it cannot honour are said out loud, on stderr',
+    /do not apply/.test(generic) && /file=sys\.stderr/.test(generic),
+    'a setting that does nothing and says nothing reads as a broken feature',
+  );
+  report(
+    'the wav is written with the standard library, not a new dependency',
+    !/import soundfile/.test(generic) && /import wave/.test(generic),
+  );
+
+  // And it must actually speak, through the real interpreter and real weights.
+  const py = path.resolve('.runtimes/venv/bin/python');
+  const modelDir = path.resolve('models/facebook--mms-tts-eng');
+  const wav = path.resolve('.runtimes/out/mms-tts-selftest.wav');
+  if (!existsSync(py) || !existsSync(path.join(modelDir, 'model.safetensors'))) {
+    console.log('  SKIP  no shared venv or MMS-TTS weights on this machine');
+  } else {
+    const run = spawnSync(
+      py,
+      [path.resolve('scripts/py/speak_hf.py'), modelDir, 'af_heart', wav, 'cpu', '1', 'facebook/mms-tts-eng'],
+      {
+        // Two sentences: one piece each, so the split is exercised rather than
+        // assumed, and the answer says how many pieces it made.
+        input: 'The quick brown fox jumps over the lazy dog. This second sentence proves the text is split.',
+        encoding: 'utf8',
+      },
+    );
+    const lines = String(run.stdout ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    let chunks = 0;
+    let answer: { seconds?: unknown; error?: unknown } | null = null;
+    for (const line of lines) {
+      if (!line.startsWith('{')) continue;
+      try {
+        const doc = JSON.parse(line) as { chunks?: unknown; seconds?: unknown; error?: unknown };
+        if (typeof doc.chunks === 'number') chunks = doc.chunks;
+        if ('seconds' in doc || 'error' in doc) answer = doc;
+      } catch {
+        /* progress chatter */
+      }
+    }
+    report('it exits cleanly', run.status === 0, `exit ${run.status}`);
+    report(
+      'it returns audio rather than an error',
+      answer !== null && typeof answer.seconds === 'number' && !('error' in answer!),
+      JSON.stringify(answer) || lines.slice(-2).join(' '),
+    );
+    report('it produced a file', existsSync(wav));
+    report('two sentences became two pieces', chunks === 2, `reported ${chunks}`);
   }
 }
 

@@ -159,6 +159,34 @@ function isAsrArchitecture(name: string): boolean {
 }
 
 /**
+ * Does this transformers architecture load into the text-to-speech pipeline?
+ *
+ * VITS is the family behind every MMS-TTS checkpoint; SpeechT5, Bark and
+ * FastSpeech2 are the other three the pipeline implements.
+ */
+function isTtsArchitecture(name: string): boolean {
+  return /VitsModel|SpeechT5ForTextToSpeech|BarkModel|FastSpeech2Conformer/i.test(name);
+}
+
+/** `model_type` values that mean the same, for repos that declare no architectures. */
+const TTS_MODEL_TYPES = new Set(['vits', 'speecht5', 'bark', 'fastspeech2_conformer']);
+
+/**
+ * Is this directory a transformers text-to-speech model?
+ *
+ * Read from the config, and asked by the runner as well as by discovery, because
+ * the app's two speech runners are not interchangeable: `speak.py` is Kokoro —
+ * a styletts2 checkpoint the `kokoro` package loads from a .pth beside its
+ * `voices/` — and `speak_hf.py` is the transformers pipeline. Kokoro's config
+ * declares no `architectures` at all, so a config naming one of the above is the
+ * transformers path, and a config naming nothing is the Kokoro one.
+ */
+export async function isTransformersTts(dir: string): Promise<boolean> {
+  if ((await architecturesOf(dir)).some(isTtsArchitecture)) return true;
+  return TTS_MODEL_TYPES.has(await modelTypeOf(dir));
+}
+
+/**
  * What a downloaded repo is, when its files alone can say so.
  *
  * Every branch mirrors the runner that would execute the model, so the claim
@@ -252,8 +280,29 @@ async function detectLayout(
       requires: ['torch', 'diffusers'],
     };
   }
-  // Text-to-speech has exactly one runner and it is Kokoro-specific; other TTS
-  // architectures have nothing here that loads them, so nothing is claimed.
+  if (task === 'tts') {
+    /* Kokoro was the only speech this app could make, so every other TTS repo
+     * was refused here with "nothing loads it". That was true of the app and
+     * false of the machine: the shared Python runtime has transformers, and its
+     * text-to-speech pipeline loads VITS — which is what every MMS-TTS
+     * checkpoint is — plus SpeechT5, Bark and FastSpeech2. Those repos declared
+     * their architecture in config.json all along, so this is read rather than
+     * guessed, and `speak_hf.py` is the runner that answers for it. */
+    const weight = files.has('model.safetensors')
+      ? 'model.safetensors'
+      : files.has('pytorch_model.bin')
+        ? 'pytorch_model.bin'
+        : null;
+    if (weight && files.has('config.json') && (await isTransformersTts(dir))) {
+      return {
+        format: 'transformers',
+        needs: [weight, 'config.json'],
+        requires: ['torch', 'transformers'],
+      };
+    }
+  }
+  // Kokoro is not claimed by a layout: it arrives through the catalog, which
+  // knows which `.pth` and which `voices/` its entry needs.
   return null;
 }
 

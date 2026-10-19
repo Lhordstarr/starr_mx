@@ -115,6 +115,27 @@ seed(root, 'Acme/ctc-lookalike', {
     architectures: ['Wav2Vec2Model'],
   }),
 });
+// A VITS model — the family every MMS-TTS checkpoint belongs to, and one the
+// transformers text-to-speech pipeline loads.
+seed(root, 'Acme/vits-tts', {
+  'model.safetensors': 'x',
+  'config.json': JSON.stringify({
+    model_type: 'vits',
+    architectures: ['VitsModel'],
+  }),
+  'vocab.json': '{}',
+});
+// The same family, declared only by model_type — several VITS repos ship no
+// `architectures`, and the config is still unambiguous about the runner.
+seed(root, 'Acme/vits-no-arch', {
+  'model.safetensors': 'x',
+  'config.json': JSON.stringify({ model_type: 'vits' }),
+});
+// An encoder that is not a speech model at all: nothing may claim it.
+seed(root, 'Acme/bert-embed', {
+  'model.safetensors': 'x',
+  'config.json': JSON.stringify({ model_type: 'bert', architectures: ['BertModel'] }),
+});
 // Weights with no config at all: nothing can be verified, nothing is claimed.
 seed(root, 'Acme/bare-weights', { 'model.safetensors': 'x' });
 // A diffusers pipeline tree.
@@ -140,6 +161,9 @@ const repos = [
   'Acme/tf-llm',
   'Acme/ctc-asr',
   'Acme/ctc-lookalike',
+  'Acme/vits-tts',
+  'Acme/vits-no-arch',
+  'Acme/bert-embed',
   'Acme/bare-weights',
   'Acme/diff-pipe',
   'Acme/clip-thing',
@@ -318,9 +342,32 @@ await check('an unrecognised repo is not claimed by any task', async () => {
   }
 });
 
-await check('tts stays catalog-only: no layout claims exist for it', async () => {
-  const tts = await runnableModels('tts', deps(ALL));
-  assert.equal(tts.some((m) => m.repo.startsWith('Acme/')), false);
+// --- text-to-speech -----------------------------------------------------------
+console.log('\n=== text-to-speech, beyond Kokoro ===');
+
+await check('a VITS text-to-speech model is discovered for tts', async () => {
+  const tts = byRepo(await runnableModels('tts', deps(ALL)));
+  const m = tts.get('Acme/vits-tts');
+  assert.ok(m, 'MMS-TTS-shaped repo listed');
+  assert.equal(m.ready, true);
+  assert.equal(m.file, 'model.safetensors');
+  assert.equal(m.driver, 'transformers');
+  assert.deepEqual(m.requiredFiles, ['model.safetensors', 'config.json']);
+});
+
+await check('a speech model that declares only model_type is still discovered', async () => {
+  const tts = byRepo(await runnableModels('tts', deps(ALL)));
+  assert.ok(tts.get('Acme/vits-no-arch'), 'listed from model_type alone');
+});
+
+await check('an encoder with no speech head is not offered as text-to-speech', async () => {
+  const tts = byRepo(await runnableModels('tts', deps(ALL)));
+  assert.equal(tts.has('Acme/bert-embed'), false);
+});
+
+await check('a speech model is not offered as speech-to-text just for being speech', async () => {
+  const stt = byRepo(await runnableModels('stt', deps(ALL)));
+  assert.equal(stt.has('Acme/vits-tts'), false, 'a VITS model is not transcribable');
 });
 
 // --- runtime reasons ----------------------------------------------------------
