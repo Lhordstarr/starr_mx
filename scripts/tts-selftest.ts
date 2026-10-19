@@ -340,6 +340,55 @@ console.log('\nSpeech is two runners now, and the weights must choose between th
       !/speak_hf\.py/.test(kokoro) && !/speak\.py/.test(vits.replace('speak_hf.py', '')),
       `${vits} | ${kokoro}`,
     );
+
+    // A runner that dies without ever reading its input must not take the
+    // process with it. The text is written to the child's stdin, and when the
+    // child is already gone that write fails with EPIPE — an 'error' event on a
+    // stream nobody is listening to, which in Node is an unhandled exception.
+    // The whole server exits, and the runner's stderr, the only place that says
+    // why it died, is never read. A payload larger than the pipe buffer makes
+    // the race deterministic instead of occasional: the write cannot finish
+    // into the buffer, so it is still pending when the child is gone.
+    const dead = path.join(runtimes, 'venv', 'bin', 'python');
+    writeFileSync(
+      dead,
+      [
+        '#!/bin/bash',
+        '# Never reads its stdin: it reports why it is dying and is gone.',
+        `echo '{"error": "the runner died before it read its input"}'`,
+        'exit 3',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(dead, 0o755);
+    let died: { ok: boolean; log: string } | null = null;
+    try {
+      const gone = await speakWith({
+        repo: 'Acme/vits-tts',
+        file: 'model.safetensors',
+        voice: 'af_heart',
+        speed: 1,
+        device: 'cpu',
+        text: 'x'.repeat(1_000_000),
+      });
+      died = { ok: gone.result.ok, log: String(gone.result.log ?? '') };
+    } catch (e) {
+      report(
+        'a runner that dies without reading its input fails, and does not crash the process',
+        false,
+        (e as Error).message,
+      );
+    }
+    if (died) {
+      report(
+        'a runner that dies without reading its input fails, and does not crash the process',
+        died.ok === false,
+        died.ok
+          ? 'it reported success with nothing spoken'
+          : `ok=false, log: ${died.log.trim().split('\n')[0] || '(nothing on stderr)'}`,
+      );
+    }
+    interpreter('venv');
   } finally {
     if (saved.models === undefined) delete process.env.HF_MODELS_DIR;
     else process.env.HF_MODELS_DIR = saved.models;

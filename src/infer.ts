@@ -211,6 +211,15 @@ async function run(
       resolve({ ok: true, data, log: err });
     });
 
+    // A runner can be gone before it ever reads its input: a stand-in
+    // interpreter, a Python missing its imports, a model the script rejected
+    // straight away. The write then lands on a closed pipe, and an unheard EPIPE
+    // on a stream is an unhandled 'error' event — it takes the whole server down
+    // and the runner's stderr, which is where the real reason is, never gets
+    // read. The answer is not to avoid the write but to not crash on it.
+    child.stdin.on('error', () => {
+      /* the runner exited before reading its input — its stderr explains why */
+    });
     if (opts.stdin !== undefined) child.stdin.end(opts.stdin);
     else child.stdin.end();
   });
