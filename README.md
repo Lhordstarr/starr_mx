@@ -181,6 +181,31 @@ Upstream publishes no GPU build for Linux, so this one runs on the CPU. The
 Windows archive does have CUDA variants, and the installer picks them up if a
 future build publishes one for Linux.
 
+### Speech, and the two runners behind it
+
+Kokoro is not the only text-to-speech model this app can run. The second runner
+is the transformers `text-to-speech` pipeline — **VITS** (which is what every
+MMS-TTS checkpoint is, `facebook/mms-tts-eng` among them), SpeechT5, Bark and
+FastSpeech2 — and it uses the shared Python environment, so **nothing extra is
+installed to use it**: if speech-to-text or image generation already works, so
+does this.
+
+Which runner answers is decided by the weights, not by the caller:
+
+  - A config naming one of those architectures is the transformers pipeline.
+  - Anything else is Kokoro, which the `kokoro` package loads from a `.pth`
+    beside its `voices/`, in an environment of its own.
+
+Two things these models do not have, said out loud in the run log rather than
+silently ignored: **one voice per checkpoint** (the voice picker does not apply)
+and **no speed control**. Long replies are split on sentence ends before they
+reach the model, because VITS predicts a duration for its whole input at once
+and was trained on single utterances.
+
+The same rule as everywhere else applies to the device: it is read off the
+loaded model, never off the request, so a run that did not move cannot be
+reported as one that did.
+
 ## Attachments
 
 The paperclip in the composer takes **images** (PNG, JPEG, WebP, GIF) by picker,
@@ -328,13 +353,14 @@ public/                   chat UI (no build step, no framework)
   endpoint (`/api/runnable`) that combines the catalog with what is on disk
   and installed, each model that cannot run carrying the exact reason. A
   download no catalog entry covers is discovered by its own layout — a
-  CTranslate2 Whisper (`model.bin` + `config.json`), a transformers Whisper
-  (`config.json` whose `model_type` is `whisper`), a diffusers pipeline
+  CTranslate2 Whisper (`model.bin` + `config.json`), a transformers speech
+  model (its `architectures`: the CTC heads behind wav2vec2, HuBERT, WavLM and
+  MMS, plus Whisper, Speech2Text and Moonshine for transcription, and VITS,
+  SpeechT5, Bark and FastSpeech2 for synthesis), a diffusers pipeline
   (`model_index.json`) — and becomes selectable as soon as the runtime it
   needs is installed. Detection mirrors the runner that would load the model,
-  so a shape nothing can execute — GGUF diffusion weights, non-Kokoro TTS
-  checkpoints — is left unoffered rather than promised, and speech synthesis
-  remains Kokoro-only because that is the one TTS runner there is.
+  so a shape nothing can execute — GGUF diffusion weights, `.onnx` files, an
+  encoder with no speech head — is left unoffered rather than promised.
 - Stop button — aborts the request upstream, keeps partial output
 - **A resource manager**, opened from the Resources box on the chat page. It
   lists everything this machine is actually doing for you and lets you stop it.
