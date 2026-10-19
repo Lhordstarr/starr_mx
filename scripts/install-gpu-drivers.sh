@@ -190,14 +190,42 @@ install_amd() {
 
 # ---------------------------------------------------------------- nvidia
 
+# Which kernel module actually got installed?
+#
+# Ubuntu's `nvidia-driver` is a metapackage of a few kilobytes that pulls in
+# everything else, and which variant it resolves to depends on what the vendor
+# repo currently publishes — on Ubuntu 24.04 with the CUDA repo it is the *open*
+# GPU kernel module, not the proprietary one. This banner used to call it the
+# proprietary driver, which was a claim about a choice this script never made:
+# it asked for a metapackage and apt picked the rest. So ask dpkg afterwards
+# rather than assert before.
+nvidia_module_variant() {
+  if dpkg-query -W -f='${Status}' nvidia-dkms-open 2>/dev/null | grep -q "ok installed"; then
+    printf 'open GPU kernel module (nvidia-dkms-open)'
+  elif dpkg-query -W -f='${Status}' nvidia-dkms 2>/dev/null | grep -q "ok installed"; then
+    printf 'proprietary kernel module (nvidia-dkms)'
+  else
+    printf 'kernel module variant this script does not recognise'
+  fi
+}
+
 install_nvidia() {
-  bold "NVIDIA: installing the proprietary driver"
+  bold "NVIDIA: installing the driver"
   case "$DISTRO_FAMILY" in
     debian)
       as_root apt-get update
       # The distro driver tracks the kernel; prefer it over the CUDA repo,
       # which needs a GPG key and a static version.
       as_root apt-get install -y nvidia-driver
+      # Only now is the variant knowable, and only if something was actually
+      # installed — in a dry run this would describe the machine's current
+      # driver as though the line above had just put it there. Worth saying
+      # plainly when it is real, because the two are not interchangeable:
+      # NVIDIA's open module covers Turing and newer (RTX 20xx, T4 and up) and
+      # does not drive Maxwell, Pascal or Volta.
+      if [ "$ASSUME_YES" -eq 1 ]; then
+        printf '  installed: %s\n' "$(nvidia_module_variant)"
+      fi
       ;;
     fedora)
       as_root dnf install -y xorg-x11-drv-nvidia-cuda kernel-devel

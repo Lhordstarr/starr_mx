@@ -17,7 +17,7 @@
  * always run.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -729,6 +729,72 @@ section('Ollama installer per OS');
       sudoed.args.join(' ') === ['-S', '-p', '', ...linux!.argv].join(' '),
     `${sudoed.cmd} ${sudoed.args.join(' ')}`,
   );
+
+  /* ---- which NVIDIA kernel module actually landed ----
+   *
+   * `nvidia-driver` is a 12 kB metapackage; apt picks the rest, and on current
+   * Ubuntu that is the *open* GPU kernel module, not the proprietary one. The
+   * script used to announce "installing the proprietary driver" either way,
+   * which is a claim about a choice it never made — and on Maxwell, Pascal or
+   * Volta the open module does not drive the card at all, so the mislabel hides
+   * the one case where it matters.
+   *
+   * The function is lifted out of the script and run against a stubbed
+   * dpkg-query, so this checks the logic that ships rather than a copy of it.
+   */
+  const driverScript = readFileSync(join(process.cwd(), 'scripts/install-gpu-drivers.sh'), 'utf8');
+  const variantFn = driverScript.match(/^nvidia_module_variant\(\) \{[\s\S]*?^\}/m)?.[0];
+  report('the driver script can name the module it installed', Boolean(variantFn), variantFn ? '' : 'function not found');
+  report(
+    'and no longer claims "proprietary" before it knows',
+    !/installing the proprietary driver/.test(driverScript),
+    'banner still asserts a variant',
+  );
+  report(
+    'a dry run does not report a variant for an install it did not do',
+    /if \[ "\$ASSUME_YES" -eq 1 \]; then\s*\n\s*printf '  installed: %s/.test(driverScript),
+    'the variant line is not guarded by --yes',
+  );
+  if (variantFn) {
+    const probeVariant = (installed: string): string => {
+      const dir = mkdtempSync(join(tmpdir(), 'starr-dpkg-'));
+      try {
+        const stub = join(dir, 'dpkg-query');
+        // Answers for whichever package the function asks about; `installed` is
+        // the one that reports "ok installed".
+        writeFileSync(
+          stub,
+          `#!/bin/sh\nfor a in "$@"; do\n  case "$a" in\n` +
+            `    *nvidia-dkms-open) if [ "${installed}" = "nvidia-dkms-open" ]; then echo "install ok installed"; else echo "install ok not-installed"; fi ;;\n` +
+            `    *nvidia-dkms) if [ "${installed}" = "nvidia-dkms" ]; then echo "install ok installed"; else echo "install ok not-installed"; fi ;;\n` +
+            `  esac\ndone\n`,
+        );
+        chmodSync(stub, 0o755);
+        const out = spawnSync('bash', ['-c', `set -euo pipefail\n${variantFn}\nnvidia_module_variant`], {
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ''}` },
+          encoding: 'utf8',
+        });
+        return (out.stdout ?? '').trim() || `(${out.stderr ?? ''}).trim()`.slice(0, 80);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const asOpen = probeVariant('nvidia-dkms-open');
+    const asProprietary = probeVariant('nvidia-dkms');
+    const asNeither = probeVariant('');
+    report('the open module is named as open', /open GPU kernel module/.test(asOpen), asOpen);
+    report('the proprietary module is named as proprietary', /^proprietary/.test(asProprietary), asProprietary);
+    report(
+      'and it admits when it cannot tell, rather than guessing',
+      /does not recognise/.test(asNeither),
+      asNeither,
+    );
+    report(
+      'neither name is reported for the other package',
+      !/open/.test(asProprietary) && !/proprietary/.test(asOpen),
+      `${asOpen} / ${asProprietary}`,
+    );
+  }
 
   /* And it actually runs. A fake `curl` earlier on PATH answers the real
      command line without touching the network, which is the only way to catch
