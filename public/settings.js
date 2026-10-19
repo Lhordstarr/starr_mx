@@ -5217,6 +5217,41 @@ function renderLocalDownload(d, resolved) {
     note.textContent = 'no local runtime can run this format';
     meta.append(note);
   }
+
+  // Will this model fit? The file size is only the floor: llama.cpp also
+  // allocates the KV cache, which grows with the context it is given. The
+  // server computes the estimate from the GGUF's own header at the context
+  // llama-server actually runs with, so the figure on the row is the figure
+  // that will be spent — not the model's trained maximum.
+  if (d.llama?.vram) {
+    const v = d.llama.vram;
+    const ctxLabel = v.ctx >= 1024 ? `${Math.round(v.ctx / 1024)}K` : String(v.ctx);
+    const need = fmtSize(v.totalBytes);
+    const est = document.createElement('span');
+    est.className = 'local-meta__state local-meta__vram';
+    let text;
+    if (v.fit === 'over') {
+      est.classList.add('is-bad');
+      text = `needs ≈ ${need} VRAM · ${fmtSize(v.gpuTotalBytes)} available`;
+    } else if (v.fit === 'tight') {
+      est.classList.add('is-warn');
+      text = `≈ ${need} VRAM · tight on ${fmtSize(v.gpuTotalBytes)}`;
+    } else if (v.fit === 'fits') {
+      text = `≈ ${need} VRAM · fits`;
+    } else {
+      text = `≈ ${need} VRAM at ${ctxLabel}`;
+    }
+    est.textContent = text;
+    const split = v.metaKnown
+      ? `${fmtSize(v.weightsBytes)} weights + ${fmtSize(v.kvBytes)} KV cache at ${ctxLabel} + ${fmtSize(v.overheadBytes)} runtime overhead`
+      : `${fmtSize(v.weightsBytes)} weights + ${fmtSize(v.overheadBytes)} runtime overhead; the header could not be read, so no KV cache is counted`;
+    est.title =
+      `Estimated VRAM: ${need} (${split}).` +
+      (v.gpuTotalBytes
+        ? ` The GPU reports ${fmtSize(v.gpuTotalBytes)} of VRAM.`
+        : ' No GPU memory figure is available on this machine, so this is a requirement, not a verdict.');
+    meta.append(est);
+  }
   row.append(meta);
 
   // A downloaded GGUF chat model is one click from being used: the chat page's

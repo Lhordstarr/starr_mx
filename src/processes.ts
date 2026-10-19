@@ -15,8 +15,8 @@
  * id minted here, so a caller can only ever stop something this app started.
  */
 
-import type { ChildProcess } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { execFile, type ChildProcess } from 'node:child_process';
+import { readdir, readFile, readlink } from 'node:fs/promises';
 
 export type ProcessKind = 'stt' | 'tts' | 'image' | 'llm';
 export type ProcessState = 'running' | 'stopping' | 'exited';
@@ -172,6 +172,200 @@ export async function processMemoryBytes(pid: number): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+/** One line of `/proc/<pid>/fdinfo/<fd>`: `drm-resident-local0: 5396348 KiB`. */
+const DRM_RESIDENT = 'drm-resident-';
+const DRM_TOTAL = 'drm-total-';
+
+/**
+ * Bytes from one DRM usage value: `123 KiB`, `8589934592 B`, or bare bytes.
+ *
+ * Anything with an unknown unit is rejected rather than read as bytes — a
+ * driver inventing `2 Pages` would otherwise be reported as two bytes.
+ */
+function drmBytes(raw: string): number | null {
+  const fields = raw.trim().split(/\s+/);
+  if (!fields.length || fields.length > 2) return null;
+  const n = Number(fields[0]);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (fields.length === 1) return n;
+  switch ((fields[1] ?? '').toLowerCase()) {
+    case 'b':
+      return n;
+    case 'kib':
+      return n * 1024;
+    case 'mib':
+      return n * 1024 * 1024;
+    case 'gib':
+      return n * 1024 * 1024 * 1024;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The VRAM a single DRM fd is holding, out of its fdinfo blob.
+ *
+ * The kernel's standardised usage keys (Documentation/gpu/drm-usage-stats.rst,
+ * Linux ≥ 5.19) name regions per driver: i915 says `local0`, amdgpu and xe say
+ * `vram0`. Only those count as device memory — `system0`, `gtt0` and
+ * `stolen-local0` are host-RAM mirrors or reserved carve-outs, and adding them
+ * would turn a 512 MB allocation into several gigabytes.
+ *
+ * `drm-resident-` is preferred: it is what the card is actually holding now.
+ * `drm-total-` includes bindings that may have been evicted, so it is only a
+ * fallback for a driver that reports no resident keys. `reported` separates
+ * "this process holds nothing" from "this kernel does not account at all":
+ * a driver with no usage keys cannot answer, and zero would be a
+ * plausible-looking lie.
+ */
+export function parseDrmUsage(text: string): { bytes: number; reported: boolean } {
+  let resident = 0;
+  let total = 0;
+  let sawResident = false;
+  let sawTotal = false;
+  for (const line of text.split('\n')) {
+    const kind = line.startsWith(DRM_RESIDENT)
+      ? DRM_RESIDENT
+      : line.startsWith(DRM_TOTAL)
+        ? DRM_TOTAL
+        : null;
+    if (!kind) continue;
+    const colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const region = line.slice(kind.length, colon);
+    if (!region.startsWith('local') && !region.startsWith('vram')) continue;
+    const n = drmBytes(line.slice(colon + 1));
+    if (n === null) continue;
+    if (kind === DRM_RESIDENT) {
+      sawResident = true;
+      resident += n;
+    } else {
+      sawTotal = true;
+      total += n;
+    }
+  }
+  if (sawResident) return { bytes: resident, reported: true };
+  return { bytes: total, reported: sawTotal };
+}
+
+/**
+ * Parse `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits`.
+ *
+ * Values are MiB. A `[N/A]` row (MIG instances and some virtualised drivers)
+ * is skipped, not read as zero: an unreadable allocation is not an empty one.
+ */
+export function parseNvidiaComputeApps(text: string): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const line of text.split('\n')) {
+    const [pidRaw, memRaw] = line.split(',').map((s) => s.trim());
+    const pid = Number(pidRaw);
+    const mib = Number(memRaw);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    if (!Number.isFinite(mib) || mib < 0) continue;
+    out.set(pid, mib * 1024 * 1024);
+  }
+  return out;
+}
+
+/**
+ * Video memory a process is holding, or null when it cannot be told.
+ *
+ * Two readers, because one is not enough on the GPU people actually use:
+ *
+ * - DRM fdinfo, which works for amdgpu, i915, xe and nouveau on Linux ≥ 5.19
+ *   and costs a handful of /proc reads.
+ * - `nvidia-smi --query-compute-apps`, for the proprietary NVIDIA driver. It
+ *   does not implement DRM usage accounting — a CUDA process holds
+ *   /dev/nvidia* nodes, not a render node — so without this the T4-shaped
+ *   machine would report nothing at all for the job using the GPU.
+ *
+ * The NVIDIA query is shared by a short cache because the process manager polls
+ * every second and a spawn per job per poll would cost more than the reading.
+ *
+ * Zero is a real answer (the process holds no device memory). Null means the
+ * process is gone, /proc is unavailable, or neither reader can answer — in
+ * which case the caller leaves the figure out rather than claiming none.
+ */
+export async function processVramBytes(pid: number): Promise<number | null> {
+  if (process.platform !== 'linux' || !Number.isFinite(pid) || pid <= 0) return null;
+  let fds: string[];
+  try {
+    fds = await readdir(`/proc/${pid}/fd`);
+  } catch {
+    return null;
+  }
+  let render = false;
+  let nvidia = false;
+  let reported = false;
+  let bytes = 0;
+  for (const fd of fds) {
+    let target: string;
+    try {
+      target = await readlink(`/proc/${pid}/fd/${fd}`);
+    } catch {
+      continue; // the process closed the fd between listing and reading
+    }
+    if (target.startsWith('/dev/nvidia')) {
+      // The proprietary driver's allocations are invisible to DRM accounting;
+      // nvidia-smi is the only reader that can see them.
+      nvidia = true;
+      continue;
+    }
+    if (!target.startsWith('/dev/dri/render')) continue;
+    render = true;
+    try {
+      const usage = parseDrmUsage(await readFile(`/proc/${pid}/fdinfo/${fd}`, 'utf8'));
+      if (usage.reported) {
+        reported = true;
+        bytes += usage.bytes;
+      }
+    } catch {
+      /* fd closed mid-walk */
+    }
+  }
+  if (!nvidia) {
+    if (!render) return 0;
+    return reported ? bytes : null;
+  }
+  const apps = await nvidiaComputeApps();
+  if (!apps) return null;
+  return apps.get(pid) ?? 0;
+}
+
+const NVIDIA_CACHE_MS = 900;
+let nvidiaCache: { at: number; apps: Map<number, number> | null } | null = null;
+
+async function nvidiaComputeApps(): Promise<Map<number, number> | null> {
+  if (nvidiaCache && Date.now() - nvidiaCache.at < NVIDIA_CACHE_MS) return nvidiaCache.apps;
+  const query = async (field: string) => {
+    const stdout = await new Promise<string>((resolve, reject) => {
+      execFile(
+        'nvidia-smi',
+        [`--query-compute-apps=pid,${field}`, '--format=csv,noheader,nounits'],
+        { timeout: 3000, maxBuffer: 512 * 1024 },
+        (err, out) => (err ? reject(err) : resolve(out)),
+      );
+    });
+    return parseNvidiaComputeApps(stdout);
+  };
+  let apps: Map<number, number> | null = null;
+  try {
+    apps = await query('used_memory');
+  } catch (err) {
+    // Older drivers name the column differently; a missing binary is not
+    // worth a second spawn.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      try {
+        apps = await query('used_gpu_memory');
+      } catch {
+        apps = null;
+      }
+    }
+  }
+  nvidiaCache = { at: Date.now(), apps };
+  return apps;
 }
 
 /**

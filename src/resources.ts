@@ -586,3 +586,20 @@ export async function resourceReport(): Promise<ResourceReport> {
     at: Date.now(),
   };
 }
+
+/**
+ * Total VRAM across the machine's GPUs, in bytes, or null when there is no
+ * readable GPU.
+ *
+ * Shares the meters' sample and 900 ms cache, so asking from the models page
+ * cannot spawn a second reader or turn a page load into a stall. Null is the
+ * same answer the meters give when a card is present but unreachable: the
+ * estimate is still shown, just without a fit verdict it cannot support.
+ */
+export async function gpuVramTotalBytes(): Promise<number | null> {
+  const gpu = await gpuSample();
+  if (!gpu.available || typeof gpu.memTotalMB !== 'number' || gpu.memTotalMB <= 0) {
+    return null;
+  }
+  return Math.round(gpu.memTotalMB * 1048576);
+}

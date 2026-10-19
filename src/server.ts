@@ -25,7 +25,7 @@ import {
   validateModelName,
 } from './ollama-models.js';
 import { ensureOllamaRunning, hookOllamaExit, ollamaReachable } from './ollama-server.js';
-import { listProcesses, processMemoryBytes, stopAllProcesses, stopProcess } from './processes.js';
+import { listProcesses, processMemoryBytes, processVramBytes, stopAllProcesses, stopProcess } from './processes.js';
 import {
   acquireDownload,
   avatarEtag,
@@ -46,9 +46,10 @@ import {
 } from './huggingface.js';
 import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGen, releaseImageGen, IMAGE_FIELD_LABELS, MAX_PROMPT_LENGTH } from './imagegen.js';
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
-import { ggufModels, llamaServerState, stopLlamaServer } from './llamacpp.js';
+import { ggufModels, llamaContextSize, llamaServerState, stopLlamaServer } from './llamacpp.js';
 import { llamaCppUpgradeKind } from './runtimes.js';
 import { stopTransformersServer, transformersChatModels } from './transformers-chat.js';
+import { fileVramEstimate, vramFit } from './vram.js';
 import { allProviders, providerOrder } from './providers/index.js';
 import { discoverLocalServers, discoveredProvider, type DiscoveredServer } from './discovery.js';
 import { backendReports } from './backends.js';
@@ -69,7 +70,7 @@ import {
   transferId,
   updateTransfer,
 } from './transfers.js';
-import { resourceReport } from './resources.js';
+import { gpuVramTotalBytes, resourceReport } from './resources.js';
 import {
   RUNTIME_GROUPS,
   detectGpu,
@@ -1305,7 +1306,14 @@ app.get('/api/processes', async (_req, res) => {
   const { active, recent } = listProcesses();
   res.json({
     active: await Promise.all(
-      active.map(async (p) => ({ ...p, memoryBytes: await processMemoryBytes(p.pid) })),
+      active.map(async (p) => ({
+        ...p,
+        memoryBytes: await processMemoryBytes(p.pid),
+        // Host RSS and device memory are different answers for a GPU job: the
+        // weights usually live in VRAM, so RSS alone made a loaded model look
+        // nearly free. Null when the kernel cannot account for it.
+        vramBytes: await processVramBytes(p.pid),
+      })),
     ),
     recent,
     ollama,
@@ -1593,14 +1601,61 @@ app.get('/api/hf/files', async (_req, res) => {
   // browser — the collision rule that qualifies two same-named files with their
   // repo has to have exactly one implementation, or a "Chat" button leads to a
   // model the server cannot resolve.
-  const gguf = new Map((await ggufModels().catch(() => [])).map((m) => [`${m.repo}\n${m.file}`, m]));
+  const ggufList = await ggufModels().catch(() => []);
+  const gguf = new Map(ggufList.map((m) => [`${m.repo}\n${m.file}`, m]));
+  // The estimate is for the context llama-server will actually be given, not
+  // the model's trained maximum: a 128k-capable file run at 16k does not need
+  // a 128k cache, and quoting the larger number would make every model look
+  // like it cannot fit.
+  const ctx = llamaContextSize();
+  // Only pay for a GPU probe when there is something to put a verdict on.
+  const vramTotal = ggufList.some((m) => m.chat)
+    ? await gpuVramTotalBytes().catch(() => null)
+    : null;
+  const vramByPath = new Map<
+    string,
+    {
+      ctx: number;
+      weightsBytes: number;
+      kvBytes: number;
+      overheadBytes: number;
+      totalBytes: number;
+      gpuTotalBytes: number | null;
+      fit: 'fits' | 'tight' | 'over' | null;
+      /** False when the GGUF header was unreadable and no cache is counted. */
+      metaKnown: boolean;
+    }
+  >();
+  await Promise.all(
+    ggufList
+      .filter((m) => m.chat)
+      .map(async (m) => {
+        const est = await fileVramEstimate(m.path, ctx).catch(() => null);
+        if (!est) return;
+        vramByPath.set(m.path, {
+          ctx: est.ctx,
+          weightsBytes: est.weightsBytes,
+          kvBytes: est.kvBytes,
+          overheadBytes: est.overheadBytes,
+          totalBytes: est.totalBytes,
+          gpuTotalBytes: vramTotal,
+          fit: vramFit(est, vramTotal),
+          metaKnown: est.meta !== null,
+        });
+      }),
+  );
   const tf = (await transformersChatModels().catch(() => [])).filter((m) => m.chat);
   const tfRoots = new Set(tf.map((m) => m.root));
   const tfByRepo = new Map(tf.map((m) => [m.repo, m]));
   res.json({
     files: files.map((f) => {
       const g = gguf.get(`${f.repo}\n${f.file}`);
-      if (g?.chat) return { ...f, llama: { provider: 'llamacpp', model: g.id } };
+      if (g?.chat) {
+        return {
+          ...f,
+          llama: { provider: 'llamacpp', model: g.id, vram: vramByPath.get(g.path) ?? null },
+        };
+      }
       if (tfRoots.has(f.root) && tfByRepo.has(f.repo)) {
         return { ...f, transformers: { provider: 'transformers-chat', model: f.repo } };
       }

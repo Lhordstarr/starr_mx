@@ -20,6 +20,7 @@
     "test:ollama-models": "tsx scripts/ollama-models-selftest.ts",
     "test:processes": "tsx scripts/processes-selftest.ts",
     "test:process-poll": "node scripts/process-poll-selftest.mjs",
+    "test:vram": "tsx scripts/vram-selftest.ts",
     "test:hf": "tsx scripts/hf-selftest.ts",
     "test:providers": "tsx scripts/providers-selftest.ts",
     "test:speaker-ui": "node scripts/speaker-ui-selftest.mjs",

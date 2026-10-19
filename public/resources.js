@@ -608,6 +608,13 @@ export function mountResources() {
         if (typeof j.memoryBytes === 'number' && j.memoryBytes > 0) {
           parts.push({ strong: fmtBytesFor(j.memoryBytes), rest: 'in memory' });
         }
+        // Device memory, from the kernel's per-fd DRM accounting. A GPU job's
+        // weights are often entirely here, so the RSS figure above is not the
+        // whole cost. Left out when the kernel cannot report it (null), and
+        // when there is no render node to report (0).
+        if (typeof j.vramBytes === 'number' && j.vramBytes > 0) {
+          parts.push({ strong: fmtBytesFor(j.vramBytes), rest: 'in VRAM' });
+        }
         // The runner's own answer where it has one: the request ("auto") is
         // not the truth on a machine that cannot run on a GPU at all.
         const device = j.resolvedDevice ?? j.device;
@@ -620,9 +627,9 @@ export function mountResources() {
           // three gigabytes of weights should not be the one row in the list
           // whose cost is a four-pixel sliver — this is the same question, so
           // it gets the same answer. The split is against total machine RAM
-          // because that is all a local job reports; a job on the GPU has its
-          // weights in VRAM, which this payload has no figure for and so does
-          // not claim to break out.
+          // because that is what this bar is about; device memory is a
+          // different pool, and when the kernel accounts for it the line above
+          // carries it as its own figure instead of folding it in here.
           makeExtra: () =>
             splitBar(
               (x) => ({ used: x.memoryBytes, total: ramTotal }),

@@ -79,6 +79,9 @@ for (const f of files) {
   if (!byRepo.has(f.repo)) byRepo.set(f.repo, []);
   byRepo.get(f.repo).push(f);
 }
+// Chat GGUFs carry a VRAM estimate from the server; the same page renders
+// both kinds of row, so one visit can check both claims.
+const estimated = files.filter((f) => f.llama?.vram);
 const jobless = [...byRepo.entries()]
   .filter(([repo, fs]) => {
     if (runnable.has(repo)) return false;
@@ -88,8 +91,8 @@ const jobless = [...byRepo.entries()]
   .map(([repo]) => repo)
   .sort();
 
-if (jobless.length === 0) {
-  console.log('SKIP — this machine has no downloaded weights that no job claims');
+if (jobless.length === 0 && estimated.length === 0) {
+  console.log('SKIP — this machine has no downloaded weights to look at');
   process.exit(0);
 }
 
@@ -196,14 +199,15 @@ try {
   await cdp('Page.enable');
   await cdp('Page.navigate', { url: new URL('/settings', APP_URL).href });
   await waitFor(`document.readyState === 'complete'`);
-  const target = JSON.stringify(jobless[jobless.length - 1]);
-  const shown = await waitFor(
-    `[...document.querySelectorAll('.local-download-row .local-meta__repo')]
-       .some(el => el.textContent === ${target})`,
-  );
-  report('the jobless model is listed on the models page', shown, `waiting for ${jobless.join(', ')}`);
+  if (jobless.length) {
+    const target = JSON.stringify(jobless[jobless.length - 1]);
+    const shown = await waitFor(
+      `[...document.querySelectorAll('.local-download-row .local-meta__repo')]
+         .some(el => el.textContent === ${target})`,
+    );
+    report('the jobless model is listed on the models page', shown, `waiting for ${jobless.join(', ')}`);
 
-  if (shown) {
+    if (shown) {
     // Every row for every jobless repo, since a repo can be rendered more than
     // once (one row per bundle member) and the rule has to hold on all of them.
     const rows = JSON.parse(
@@ -236,6 +240,44 @@ try {
       wanted.every((r) => !/Transformer/i.test(r.meta) || !/no job uses this/i.test(r.meta)),
       wanted.map((r) => `${r.repo}: "${r.meta}"`).join('; '),
     );
+    }
+  }
+
+  if (estimated.length) {
+    const pick = estimated[0];
+    const target = JSON.stringify(pick.repo);
+    const shown = await waitFor(
+      `[...document.querySelectorAll('.local-download-row .local-meta__repo')]
+         .some(el => el.textContent === ${target})`,
+    );
+    report(
+      'a GGUF chat model is listed on the models page',
+      shown,
+      `waiting for ${pick.repo}`,
+    );
+    if (shown) {
+      const tags = JSON.parse(
+        (await evalJs(`JSON.stringify([...document.querySelectorAll('.local-download-row')]
+          .filter(r => r.querySelector('.local-meta__repo')?.textContent === ${target})
+          .map(r => ({
+            text: r.querySelector('.local-meta__vram')?.textContent ?? '',
+            title: r.querySelector('.local-meta__vram')?.title ?? '',
+          })))`)) ?? '[]',
+      );
+      report(
+        'the row states its VRAM estimate and the arithmetic behind it',
+        tags.length > 0 && tags.every((t) => /VRAM/.test(t.text) && /Estimated VRAM/.test(t.title)),
+        tags.map((t) => `"${t.text}" / "${t.title}"`).join('; ') || '(no tag)',
+      );
+      const v = pick.llama.vram;
+      const suffix =
+        v.fit === 'fits' ? 'fits' : v.fit === 'tight' ? 'tight' : v.fit === 'over' ? 'available' : 'at ';
+      report(
+        'the row carries the fit verdict the API computed',
+        tags.every((t) => t.text.includes(suffix)),
+        `fit=${v.fit}, texts: ${tags.map((t) => t.text).join(' | ')}`,
+      );
+    }
   }
 } finally {
   await cleanup();

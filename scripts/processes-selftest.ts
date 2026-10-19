@@ -19,7 +19,10 @@ import {
   attachChild,
   finishProcess,
   listProcesses,
+  parseDrmUsage,
+  parseNvidiaComputeApps,
   processMemoryBytes,
+  processVramBytes,
   registerProcess,
   setProcessDevice,
   stopAllProcesses,
@@ -301,6 +304,98 @@ process.env.OLLAMA_BASE_URL = `http://127.0.0.1:${OLLAMA_PORT}`;
     await srv.stopOllama('user');
     await sleep(400);
     assert.equal(existsSync(pidFile), false, 'and it stops again afterwards');
+  });
+}
+
+console.log('\n=== per-process VRAM (DRM fdinfo) ===');
+
+await test('i915 local memory counts; system and stolen-local do not', () => {
+  // Captured fdinfo from a llama.cpp process on an i915 card. The kernel
+  // reports system0 (host RAM mirror) and stolen-local0 (reserved carve-out)
+  // beside the real local0 allocation; only local0 is device memory.
+  const blob = [
+    'pos:\t0',
+    'flags:\t02100002',
+    'mnt_id:\t28',
+    'ino:\t1234',
+    'drm-driver:\ti915',
+    'drm-pdev:\t0000:00:02.0',
+    'drm-total-system0:\t312 KiB',
+    'drm-resident-system0:\t312 KiB',
+    'drm-total-local0:\t5396348 KiB',
+    'drm-resident-local0:\t5396348 KiB',
+    'drm-total-stolen-local0:\t0',
+    'drm-resident-stolen-local0:\t0',
+  ].join('\n');
+  const usage = parseDrmUsage(blob);
+  assert.equal(usage.reported, true);
+  assert.equal(usage.bytes, 5396348 * 1024);
+});
+
+await test('amdgpu vram bytes count; gtt does not', () => {
+  // Captured shape from an amdgpu render node: values may be bare bytes.
+  const blob = [
+    'drm-driver:\tamdgpu',
+    'drm-total-vram0:\t8589934592 B',
+    'drm-resident-vram0:\t8589934592 B',
+    'drm-total-gtt0:\t1048576 B',
+    'drm-resident-gtt0:\t1048576 B',
+  ].join('\n');
+  const usage = parseDrmUsage(blob);
+  assert.equal(usage.reported, true);
+  assert.equal(usage.bytes, 8589934592);
+});
+
+await test('a driver with no usage keys is unknown, not empty', () => {
+  const usage = parseDrmUsage('pos:\t0\nflags:\t02100002\ndrm-driver:\tnouveau\n');
+  assert.equal(usage.reported, false);
+  assert.equal(usage.bytes, 0);
+});
+
+await test('resident bytes win over bound-but-not-resident totals', () => {
+  const blob = [
+    'drm-total-local0:\t8000 MiB',
+    'drm-resident-local0:\t5000 MiB',
+  ].join('\n');
+  const usage = parseDrmUsage(blob);
+  assert.equal(usage.reported, true);
+  assert.equal(usage.bytes, 5000 * 1024 * 1024);
+});
+
+await test('nvidia compute-apps rows parse, [N/A] is not zero', () => {
+  // Shape of `nvidia-smi --query-compute-apps=pid,used_memory
+  // --format=csv,noheader,nounits` on a T4: one listed process, one MIG-style
+  // unreadable row, and one process that is not a number.
+  const apps = parseNvidiaComputeApps(
+    ['4242, 512', '777, [N/A]', 'n/a, 128', '', '9001, 2048'].join('\n'),
+  );
+  assert.equal(apps.get(4242), 512 * 1024 * 1024);
+  assert.equal(apps.get(9001), 2048 * 1024 * 1024);
+  assert.equal(apps.has(777), false);
+  assert.equal(apps.size, 2);
+});
+
+if (process.platform === 'linux') {
+  await test('a process with no render node holds no VRAM', async () => {
+    assert.equal(await processVramBytes(process.pid), 0);
+  });
+
+  await test('a live sleeper is zero, not unknown', async () => {
+    const child = sleeper(5);
+    await until(() => child.pid !== undefined);
+    try {
+      assert.equal(await processVramBytes(child.pid as number), 0);
+    } finally {
+      child.kill('SIGKILL');
+      await new Promise((r) => child.once('exit', r));
+    }
+  });
+
+  await test('a dead pid is unknown, not zero', async () => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const pid = child.pid as number;
+    await new Promise((r) => child.once('exit', r));
+    assert.equal(await processVramBytes(pid), null);
   });
 }
 

@@ -2771,6 +2771,12 @@ summary.hub-title {
   color: var(--text-dim);
 }
 
+/* The estimate is honest about its own uncertainty: "tight" means the figure
+   is inside 15% of the card's total, where a driver allocation can decide it. */
+.local-meta__state.is-warn {
+  color: var(--warning);
+}
+
 /* The "incomplete" tag is a button: it copies the missing files' download
    links. Looks like the tag, behaves like an action on hover/focus. */
 .local-meta__state.is-action {

@@ -63,7 +63,7 @@ function libPathFor(bin: string): string {
  * that is usually CPU-only here. 16k is more conversation than the chat
  * transcript ever accumulates, and it keeps the memory footprint predictable.
  */
-const ctxSize = () => Number(process.env.LLAMACPP_CTX ?? 16384);
+export const llamaContextSize = () => Number(process.env.LLAMACPP_CTX ?? 16384);
 
 /** How long the server may sit unused before it is shut down. */
 const idleMs = () => Number(process.env.LLAMACPP_IDLE_MS ?? 10 * 60_000);
@@ -395,7 +395,7 @@ async function start(bin: string, model: GgufModel, onProgress: (line: string) =
     '--port',
     String(port()),
     '--ctx-size',
-    String(ctxSize()),
+    String(llamaContextSize()),
     // One slot: the chat allows at most two generations at once, and a second
     // slot would double the KV cache for a queue that never needs it.
     '--parallel',
