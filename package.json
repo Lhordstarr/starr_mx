@@ -24,7 +24,8 @@
     "test:whisper": "tsx scripts/whisper-selftest.ts",
     "test:tts": "tsx scripts/tts-selftest.ts",
     "test:llamacpp": "tsx scripts/llamacpp-selftest.ts",
-    "test:llamacpp-ui": "node scripts/llamacpp-ui-selftest.mjs"
+    "test:llamacpp-ui": "node scripts/llamacpp-ui-selftest.mjs",
+    "test:models-ui": "node scripts/models-row-ui-selftest.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.2.18",
