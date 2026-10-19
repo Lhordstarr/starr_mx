@@ -11,12 +11,13 @@
  * downloader actually wrote.
  */
 import { spawn } from 'node:child_process';
-import { access, stat } from 'node:fs/promises';
+import { access, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hubCacheDir, listDownloads, modelsDir } from './huggingface.js';
 import { attachChild, finishProcess, registerProcess, setProcessDevice } from './processes.js';
 import { venvPython, type Device } from './runtimes.js';
+import { WHISPER_REPO, parseWhisperJson, resolveWhisperModel, transcribeWithWhisperCpp } from './whispercpp.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const scriptsDir = path.resolve(here, '..', 'scripts', 'py');
@@ -242,8 +243,18 @@ export async function transcribe(opts: {
 }): Promise<RunResult> {
   const modelPath = await resolveDownloaded(opts.repo, opts.file);
   const audioPath = await resolveDownloaded(opts.repo, opts.audio);
-  // Both Whisper builds want the directory that holds the weights, not the
-  // single file, because each loads its neighbours (config, tokenizer,
+
+  // whisper.cpp first, and by identity rather than by shape: it is the only
+  // runner that wants the single weights file, where the two Python ones want
+  // the directory holding them. Probing the extension alone would put a GGUF
+  // Whisper — a transcribe.cpp model whisper.cpp cannot open — on this path,
+  // which is the mistake that put two unloadable entries in the catalog.
+  if (opts.repo === WHISPER_REPO) {
+    return transcribeViaWhisperCpp(opts.repo, opts.file, modelPath, audioPath, opts.onLog);
+  }
+
+  // Both Python Whisper builds want the directory that holds the weights, not
+  // the single file, because each loads its neighbours (config, tokenizer,
   // vocabulary) by relative name.
   const dir = path.dirname(modelPath);
 
@@ -263,6 +274,47 @@ export async function transcribe(opts: {
     repo: opts.repo,
     device: opts.device,
   });
+}
+
+/**
+ * Runs one clip through whisper.cpp and folds its JSON back into the shape the
+ * browser already reads.
+ *
+ * A separate path rather than a fourth argument to `run()`, because `run()`
+ * speaks Python: it resolves the shared venv's interpreter and expects a script
+ * that prints one JSON object on stdout. whisper-cli is a native binary that
+ * writes its own file, and the failure of trying to force it through the Python
+ * helper would be an interpreter that does not exist — on a machine that
+ * installed whisper.cpp precisely because it has no usable Python.
+ */
+async function transcribeViaWhisperCpp(
+  repo: string,
+  file: string,
+  modelPath: string,
+  audioPath: string,
+  onLog?: (s: string) => void,
+): Promise<RunResult> {
+  const model = await resolveWhisperModel(file) ?? {
+    id: file.replace(/^ggml-/, '').replace(/\.bin$/i, ''),
+    repo,
+    file,
+    path: modelPath,
+    sizeBytes: 0,
+    location: 'models' as const,
+    usable: true,
+  };
+  try {
+    const { text: jsonPath } = await transcribeWithWhisperCpp({ model, audioPath, onLog });
+    const raw = await readFile(jsonPath, 'utf8');
+    const parsed = parseWhisperJson(raw);
+    return { ok: true, data: parsed as unknown as Record<string, unknown>, log: '' };
+  } catch (err) {
+    return {
+      ok: false,
+      data: { error: err instanceof Error ? err.message : String(err) },
+      log: '',
+    };
+  }
 }
 
 export async function speak(opts: {

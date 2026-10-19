@@ -2185,12 +2185,13 @@ const FORMAT_RUNTIME = [
     ext: /\.(gguf)$/i,
     label: 'llama.cpp',
     requires: [],
-    // A GGUF this app cannot chat with: whisper GGUFs belong to whisper.cpp and
-    // diffusion GGUFs to ComfyUI, and neither is a text model. The chat models
-    // sharing the same extension are pulled out of this path by
-    // `chatRuntimeFor` below, which is why the note here can be blunt.
+    // A GGUF this app cannot chat with. whisper.cpp's own models are GGML `.bin`
+    // files, not GGUF — its loader rejects GGUF outright — so nothing Whisper
+    // shaped comes through here any more; diffusion GGUFs belong to ComfyUI,
+    // and the chat models sharing the extension are pulled out by
+    // `chatRuntimeFor` below, which is why the note can be blunt.
     external: true,
-    blurb: 'A quantised GGUF, but not a chat model — whisper and diffusion GGUFs need their own program.',
+    blurb: 'A quantised GGUF, but not a chat model — diffusion GGUFs need their own program.',
   },
 ];
 
@@ -3575,7 +3576,7 @@ function openRunPanel(entry, file) {
         if (!picked) throw new Error('Choose an audio file first.');
         // The runner takes a path, and only accepts a file the downloader
         // wrote, so a browser file upload is staged next to it server-side.
-        const uploaded = await uploadAudio(picked);
+        const uploaded = await uploadAudio(picked, sttDriverFor(entry));
         result = await streamInference(
           '/api/infer/stt',
           // `file` names the model; `audio` is the freshly uploaded recording.
@@ -3690,11 +3691,21 @@ function renderRunResult(kind, result, out) {
  * audio/* payload (the same one dictation already uses), so wrapping it in
  * FormData arrives as an empty body.
  */
-async function uploadAudio(file) {
+/**
+ * Stages a chosen audio file for the STT runner.
+ *
+ * `driver` is the runner the server named for this model. whisper-cli reads
+ * wav/flac/mp3/ogg only, so an mp4 or webm picked here has to be decoded to
+ * 16 kHz WAV on the way up; the Python runners take the file as it is. A user
+ * picking an .m4a off a phone is exactly the case that would otherwise fail.
+ */
+async function uploadAudio(file, driver) {
+  const { audioForUpload } = await import('/audio.js');
+  const body = await audioForUpload(file, driver);
   const res = await fetch('/api/infer/upload', {
     method: 'POST',
-    headers: { 'content-type': file.type || 'application/octet-stream' },
-    body: file,
+    headers: { 'content-type': body.type || 'application/octet-stream' },
+    body,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
@@ -3702,6 +3713,23 @@ async function uploadAudio(file) {
 }
 
 runClose?.addEventListener('click', closeRunPanel);
+
+/**
+ * Which bundled runner handles a catalog entry, from the runtimes it declares.
+ *
+ * The same reading the server does for the runnable payload, applied to a
+ * catalog entry that already carries its `requires` locally. It is used to pick
+ * the upload's audio format, and guessing wrong either way is visible: whisper
+ * cli cannot open a browser recording, and the Python runners would be handed
+ * a re-encode they did not ask for.
+ */
+function sttDriverFor(entry) {
+  const req = entry?.run?.requires ?? [];
+  if (req.includes('whisper-cpp')) return 'whisper-cpp';
+  if (req.includes('faster-whisper')) return 'faster-whisper';
+  if (req.includes('transformers')) return 'transformers';
+  return undefined;
+}
 
 /** True when every runtime this entry needs is installed. */
 function runIsReady(entry, installed) {

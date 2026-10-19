@@ -25,6 +25,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { needsPrivilege } from './drivers.js';
+import { runtimesDir } from './paths.js';
 import {
   accessSync,
   constants,
@@ -37,6 +38,14 @@ import {
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
+import {
+  WHISPER_BUILD,
+  whisperAsset,
+  whisperCliPath,
+  whisperCppInstalled,
+  whisperDir,
+  whisperVersion,
+} from './whispercpp.js';
 
 export type Device = 'cpu' | 'nvidia' | 'amd' | 'auto';
 
@@ -166,7 +175,7 @@ export interface GpuHardware {
 }
 
 /** Where the venvs and their packages live. Gitignored alongside models/. */
-export const runtimesDir = () => path.resolve(process.env.RUNTIMES_DIR ?? './.runtimes');
+export { runtimesDir } from './paths.js';
 
 /**
  * Venv folder for a group. Most groups share the main `venv`; a group whose
@@ -238,7 +247,7 @@ const TORCH_INDEX: Record<Device, string> = {
 export interface RuntimeGroup {
   id: string;
   /** Group installed by a vendor installer or a pinned binary rather than pip. */
-  installer?: 'ollama' | 'llama-cpp';
+  installer?: 'ollama' | 'llama-cpp' | 'whisper-cpp';
   label: string;
   /** Why someone would want this, shown in the installer. */
   blurb: string;
@@ -370,6 +379,24 @@ approxMB: 17,
     pkgs: ['diffusers', 'safetensors', 'accelerate'],
     needsTorch: true,
     approxMB: 25,
+  },
+  {
+    id: 'whisper-cpp',
+    probe: 'whisper-cli',
+    label: 'whisper.cpp',
+    blurb:
+      'Whisper transcribing itself, as a pinned prebuilt binary in this app\u2019s ' +
+      'own folder \u2014 about 10 MB, no root, no Python, no PyTorch, and no ' +
+      'torch install to wait for. The models are the ones in Get models ' +
+      '(ggml-*.bin, 42 MB for tiny to 834 MB for large-v3-turbo). Worth having ' +
+      'alongside Faster Whisper: on this machine whisper.cpp is faster and ' +
+      'smaller, and it needs none of the Python stack. Upstream publishes no ' +
+      'GPU build for Linux, so this one runs on the CPU.',
+    unlocks: ['speech-to-text'],
+    pkgs: [],
+    needsTorch: false,
+    approxMB: 10,
+    installer: 'whisper-cpp',
   },
   {
     id: 'faster-whisper',
@@ -1473,6 +1500,10 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
       installed[g.id] = (await llamaCppInstalled()) ? 'installed' : null;
       continue;
     }
+    if (g.installer === 'whisper-cpp') {
+      installed[g.id] = (await whisperCppInstalled()) ? 'installed' : null;
+      continue;
+    }
     if (g.id === 'torch') {
       installed[g.id] = main?.torch?.version ?? null;
       continue;
@@ -2338,10 +2369,14 @@ async function aptInstall(
  */
 /** Does this group's install go through pip, and so need a Python environment? */
 function usesPython(group: RuntimeGroup): boolean {
-  // Ollama and llama.cpp ship their own installers. Neither imports a package,
-  // neither reads an interpreter, and neither is blocked by a Python that
-  // cannot build a venv.
-  return group.installer !== 'ollama' && group.installer !== 'llama-cpp';
+  // Ollama, llama.cpp and whisper.cpp ship their own installers. None of them
+  // imports a package, none reads an interpreter, and none is blocked by a
+  // Python that cannot build a venv.
+  return (
+    group.installer !== 'ollama' &&
+    group.installer !== 'llama-cpp' &&
+    group.installer !== 'whisper-cpp'
+  );
 }
 
 export async function installRuntimes({
@@ -2444,7 +2479,7 @@ export async function installRuntimes({
     }
   }
 
-  /* The two that ship their own installers, outside the pip loop because they
+  /* The ones that ship their own installers, outside the pip loop because they
      carry no environment. Run after it so a selection of both does the Python
      work first and leaves a vendored binary to a second. */
   for (const g of groups) {
@@ -2454,6 +2489,10 @@ export async function installRuntimes({
     }
     if (g.installer === 'llama-cpp') {
       await installLlamaCpp(onProgress);
+      continue;
+    }
+    if (g.installer === 'whisper-cpp') {
+      await installWhisperCpp(onProgress);
     }
   }
 
@@ -2909,6 +2948,154 @@ async function installLlamaCpp(onProgress: (line: string) => void): Promise<void
   onProgress('llama.cpp installed. Its GGUF chat models can be run with llama-server.');
 }
 
+/* ---- whisper.cpp (pinned prebuilt binary, installed into the app) ---- */
+
+/**
+ * Downloads and unpacks the pinned whisper.cpp build.
+ *
+ * Same contract as `installLlamaCpp` and for the same reasons: it installs into
+ * the app's own runtime folder, needs no root and no Python, and can be removed
+ * the same way. Upstream ships a `.tar.gz` for Linux and a `.zip` for Windows,
+ * so the unpack step differs by archive rather than by platform assumption.
+ */
+async function installWhisperCpp(onProgress: (line: string) => void): Promise<void> {
+  if (await whisperCppInstalled()) {
+    onProgress('whisper.cpp is already installed.');
+    return;
+  }
+  const picked = whisperAsset();
+  if (!picked) {
+    throw new Error(
+      'The bundled whisper.cpp installer covers Linux and Windows x64. Upstream ' +
+        'publishes macOS as an xcframework, which is a different shape of ' +
+        'package; see the whisper.cpp releases for a manual install.',
+    );
+  }
+  const asset = picked.name;
+
+  // A half-finished attempt would otherwise be found by the discovery below and
+  // win over the fresh tree.
+  try {
+    for (const e of await readdir(runtimesDir(), { withFileTypes: true })) {
+      if (e.isDirectory() && /^whisper-bin-/.test(e.name)) {
+        await rm(path.join(runtimesDir(), e.name), { recursive: true, force: true });
+      }
+    }
+  } catch {
+    /* runtimes dir may not exist yet */
+  }
+
+  onProgress(`Fetching whisper.cpp ${WHISPER_BUILD} (${picked.kind.toUpperCase()} build)…`);
+  const url = `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_BUILD}/${asset}`;
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`Could not download ${asset} (HTTP ${res.status}).`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+
+  await mkdir(whisperDir(), { recursive: true });
+  const archive = path.join(whisperDir(), asset);
+  const { writeFile, chmod } = await import('node:fs/promises');
+  await writeFile(archive, bytes);
+  onProgress(`Unpacking ${(bytes.length / 1024 / 1024).toFixed(0)} MB…`);
+
+  // Linux ships a tarball, Windows a zip. The tarball path stays on the system
+  // `tar` as before. For the zip, PowerShell's own Expand-Archive is used rather
+  // than `unzip`: `unzip` is not present on a default Windows install, and
+  // shipping a zip reader for a single platform is a few hundred lines of code
+  // to get subtly wrong.
+  await unpackArchive(archive, asset.endsWith('.zip'));
+
+  // Find the directory that actually holds the CLI, however it nested it.
+  const found = await findUnpackedDir(whisperCliName());
+  if (!found) {
+    throw new Error(
+      'The build unpacked, but no whisper-cli binary was found. The archive ' +
+        'layout may have changed; fetch it by hand from the whisper.cpp releases.',
+    );
+  }
+  const cliDir = path.dirname(path.join(runtimesDir(), found, whisperCliName()));
+  await chmod(path.join(cliDir, whisperCliName()), 0o755);
+  // The shared libraries live beside it and are needed at load time, so the
+  // marker records this directory rather than the archive root.
+  await writeFile(path.join(whisperDir(), 'build.txt'), path.relative(runtimesDir(), cliDir));
+  await rm(archive, { force: true });
+
+  const version = whisperVersion();
+  onProgress(
+    version
+      ? `whisper.cpp installed (${version.replace(/^whisper\.cpp version:\s*/, '')}).` +
+        ' Its ggml-*.bin models in Get models can transcribe here.'
+      : 'whisper.cpp installed. Its ggml-*.bin models in Get models can transcribe here.',
+  );
+}
+
+/** The file name the CLI has on this platform, exported for the status probe. */
+const whisperCliName = (): string => (process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli');
+
+/** Depth-first search for one exact file name under the unpacked trees. */
+async function findUnpackedDir(name: string, prefix = /^whisper-bin-/): Promise<string | null> {
+  let dirs: string[];
+  try {
+    dirs = (await readdir(runtimesDir(), { withFileTypes: true }))
+      .filter((e) => e.isDirectory() && prefix.test(e.name))
+      .map((e) => e.name);
+  } catch {
+    return null;
+  }
+  for (const dirName of dirs) {
+    const stack = [path.join(runtimesDir(), dirName)];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      let entries: Array<{ name: string; isFile(): boolean; isDirectory(): boolean }>;
+      try {
+        entries = (await readdir(dir, { withFileTypes: true })) as unknown as Array<{
+          name: string;
+          isFile(): boolean;
+          isDirectory(): boolean;
+        }>;
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isFile() && e.name === name) return path.relative(runtimesDir(), path.dirname(full));
+        if (e.isDirectory()) stack.push(full);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts a downloaded archive.
+ *
+ * A zip reader is not reimplemented here on purpose: PowerShell's
+ * Expand-Archive ships with every supported Windows, so the zip branch needs no
+ * dependency and no new code to go wrong. The tarball path, which is what Linux
+ * actually takes, stays on the system `tar`.
+ */
+async function unpackArchive(archive: string, zip: boolean): Promise<void> {
+  const bin = zip ? 'powershell' : 'tar';
+  const args = zip
+    ? [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `Expand-Archive -LiteralPath ${JSON.stringify(archive)} -DestinationPath ${JSON.stringify(runtimesDir())} -Force`,
+      ]
+    : ['-xzf', archive, '-C', runtimesDir()];
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (b) => (err += String(b)));
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`${bin} exited ${code}${err.trim() ? ` — ${err.trim()}` : ''}`)),
+    );
+  });
+}
+
 /** Removes the whole environment. Everything in it goes; there is no partial
  *  uninstall, because pip cannot reliably drop torch's shared CUDA libraries. */
 export async function removeRuntimes(): Promise<void> {
@@ -2956,6 +3143,18 @@ export async function removeRuntimeGroup(
     if (server) await rm(path.dirname(server), { recursive: true, force: true });
     await rm(llamaDir(), { recursive: true, force: true });
     onProgress('llama.cpp removed.');
+    return { removed: id, label: group.label, reason: null };
+  }
+
+  if (group.installer === 'whisper-cpp') {
+    onProgress('Removing whisper.cpp…');
+    // Same shape as llama.cpp: the marker points at the unpacked tree, and the
+    // shared libraries are the bulk of it, so removing only the marker would
+    // leave ~10 MB behind and the row would claim it was gone.
+    const cli = whisperCliPath();
+    if (cli) await rm(path.dirname(cli), { recursive: true, force: true });
+    await rm(whisperDir(), { recursive: true, force: true });
+    onProgress('whisper.cpp removed. Its models are left in place for other runtimes.');
     return { removed: id, label: group.label, reason: null };
   }
   if (!group.pkgs.length) {

@@ -85,7 +85,12 @@ put('ggml-org--gemma-3-4b-it-GGUF', 'mmproj-model-f16.gguf');
 // Named so the file itself says nothing about transcription: only the catalog's
 // task for the repo can classify it, which is the rule that exists for exactly
 // this case (a quant whose name drifted from its purpose).
-put('handy-computer--whisper-small-gguf', 'encore-Q4_K_M.gguf');
+//
+// Systran/faster-whisper-tiny, not a GGUF Whisper repo: those were removed from
+// the catalog because whisper.cpp cannot load a GGUF at all, so there is no
+// longer a speech-to-text GGUF repo to stand in for one. The classification
+// rule under test — the repo's catalog task, not the file name — is unchanged.
+put('Systran--faster-whisper-tiny', 'encore-Q4_K_M.gguf');
 put('city96--stable-diffusion-3.5-medium-gguf', 'turbo-Q4_K_M.gguf');
 // No catalog entry at all: the name is the only signal, and it says vocoder.
 put('someone--Speech-Tools', 'vocoder-f16.gguf');

@@ -69,12 +69,13 @@ export interface ManagedProcess {
  * runner uses it, and listing it would offer a "stop" for a process that can
  * never appear.
  */
-const SCRIPT_RUNTIMES: Record<string, string[]> = {
+export const SCRIPT_RUNTIMES: Record<string, string[]> = {
   'whisper_ct2.py': ['faster-whisper'],
   'transcribe.py': ['torch', 'transformers'],
   'speak.py': ['torch', 'kokoro'],
   'generate.py': ['torch', 'diffusers'],
   'llama-server': ['llama-cpp'],
+  'whisper-cli': ['whisper-cpp'],
   'chat_transformers.py': ['torch', 'transformers'],
 };
 

@@ -1287,11 +1287,21 @@ async function transcriptCopy(text, btn) {
 }
 
 /** Stages a Blob in _uploads and returns the path the runner expects. */
-async function stageAudio(blob) {
+/**
+ * Stages the audio for `/api/infer/stt`.
+ *
+ * `driver` is the server's word for which runner will handle the model, and it
+ * is passed to the uploader because whisper-cli cannot read a browser
+ * recording: it opens wav/flac/mp3/ogg and neither webm/opus nor m4a. Anything
+ * else goes up as it was recorded.
+ */
+async function stageAudio(blob, driver) {
+  const { audioForUpload } = await import('/audio.js');
+  const body = await audioForUpload(blob, driver);
   const res = await fetch('/api/infer/upload', {
     method: 'POST',
-    headers: { 'content-type': blob.type || 'application/octet-stream' },
-    body: blob,
+    headers: { 'content-type': body.type || 'application/octet-stream' },
+    body,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? 'Could not stage the audio.');
@@ -1318,7 +1328,7 @@ async function runTranscription(blob, label) {
     const model = models.find((x) => x.repo === repo);
     if (!model) throw new Error('That model is not in the catalog any more.');
 
-    const audio = await stageAudio(blob);
+    const audio = await stageAudio(blob, model.driver);
     const result = await studioInfer('/api/infer/stt', {
       repo: model.repo,
       file: model.file,

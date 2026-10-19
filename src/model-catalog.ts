@@ -167,23 +167,53 @@ export const CATALOG: CatalogSection[] = [
   {
     task: 'speech-to-text',
     title: 'Speech to text',
-    note: 'Ollama has no transcription models — pull returns 404. The CTranslate2 builds are the ones this app can run itself; the GGUF and safetensors entries need an external tool.',
+    note:
+      'Ollama has no transcription models — pull returns 404. The CTranslate2 ' +
+      'builds and the ggml-*.bin builds are the two this app can run itself.',
     entries: [
+      // One file per entry, and deliberately not a list of quantisations: the
+      // runnable check treats every file in an entry as required, so offering
+      // two quants here would make the model report "download the whole set"
+      // until both were fetched. The repository carries q5_0 and the f16
+      // originals too, and the URL is in the note below.
       {
-        repo: 'handy-computer/whisper-large-v3-turbo-gguf',
-        label: 'Whisper large-v3-turbo (GGUF)',
+        repo: 'ggerganov/whisper.cpp',
+        label: 'Whisper large-v3-turbo (whisper.cpp)',
         task: 'speech-to-text',
-        blurb: 'Best accuracy per megabyte of the Whisper family. The practical local choice.',
+        blurb:
+          'Best accuracy per megabyte of the Whisper family. Runs on whisper.cpp, ' +
+          'so it needs no PyTorch and no Python at all. The repository also has ' +
+          'q5_0 (547 MB) and the f16 original if you want a different trade.',
         runtime: 'whisper.cpp',
-        files: [{ name: 'whisper-large-v3-turbo-Q4_K_M.gguf', label: 'Q4_K_M', bytes: 511 * MB }],
+        files: [{ name: 'ggml-large-v3-turbo-q8_0.bin', label: 'q8_0', bytes: 834 * MB }],
+        run: { kind: 'stt', requires: ['whisper-cpp'] },
       },
       {
-        repo: 'handy-computer/whisper-small-gguf',
-        label: 'Whisper small (GGUF)',
+        repo: 'ggerganov/whisper.cpp',
+        label: 'Whisper small (whisper.cpp)',
         task: 'speech-to-text',
-        blurb: 'Roughly a tenth of the size; noticeably weaker on accents and noise.',
+        blurb: 'A quarter of the size of turbo; noticeably weaker on accents and noise.',
         runtime: 'whisper.cpp',
-        files: [{ name: 'whisper-small-Q4_K_M.gguf', label: 'Q4_K_M', bytes: 164 * MB }],
+        files: [{ name: 'ggml-small-q8_0.bin', label: 'q8_0', bytes: 252 * MB }],
+        run: { kind: 'stt', requires: ['whisper-cpp'] },
+      },
+      {
+        repo: 'ggerganov/whisper.cpp',
+        label: 'Whisper base (whisper.cpp)',
+        task: 'speech-to-text',
+        blurb: 'The sensible default. Steady on names and accents at 78 MB.',
+        runtime: 'whisper.cpp',
+        files: [{ name: 'ggml-base-q8_0.bin', label: 'q8_0', bytes: 78 * MB }],
+        run: { kind: 'stt', requires: ['whisper-cpp'] },
+      },
+      {
+        repo: 'ggerganov/whisper.cpp',
+        label: 'Whisper tiny (whisper.cpp)',
+        task: 'speech-to-text',
+        blurb: 'The smallest. Fast enough for live dictation on an old CPU.',
+        runtime: 'whisper.cpp',
+        files: [{ name: 'ggml-tiny-q8_0.bin', label: 'q8_0', bytes: 42 * MB }],
+        run: { kind: 'stt', requires: ['whisper-cpp'] },
       },
       {
         repo: 'Systran/faster-whisper-tiny',

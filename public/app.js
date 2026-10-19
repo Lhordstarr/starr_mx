@@ -930,6 +930,10 @@ async function refreshSttEngines() {
         repo: m.repo,
         label: m.label,
         file: m.file,
+        // Which bundled runner the server says will handle it. Carried through
+        // because it decides the upload's audio format — whisper-cli cannot read
+        // a browser recording, the two Python runners can.
+        driver: m.driver,
         ready: Boolean(m.ready),
         hint: m.ready ? 'downloaded and runnable here' : m.reason || 'not runnable',
       });
@@ -1144,10 +1148,18 @@ async function finishRecording(engine) {
     if (engine.kind === 'local') {
       // Local path: stage the recording, then run it through the same runner
       // the Settings page uses, with the chosen model named explicitly.
+      //
+      // `engine.driver` is which bundled runner the server says will handle
+      // this model. whisper-cli reads wav/flac/mp3/ogg and neither webm/opus
+      // nor m4a, which is what MediaRecorder actually produces, so that one
+      // runner needs the recording decoded to 16 kHz WAV on the way up. The
+      // two Python runners want the original bytes.
+      const { audioForUpload } = await import('/audio.js');
+      const upload = await audioForUpload(blob, engine.driver);
       const upRes = await fetch('/api/infer/upload', {
         method: 'POST',
-        headers: { 'content-type': blob.type || 'application/octet-stream' },
-        body: blob,
+        headers: { 'content-type': upload.type || 'application/octet-stream' },
+        body: upload,
       });
       const uploaded = await upRes.json().catch(() => ({}));
       if (!upRes.ok) throw new Error(uploaded.error ?? 'Could not stage the recording.');

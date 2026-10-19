@@ -151,10 +151,35 @@ A provider flagged for dictation that publishes no speech model is called out
 after a scan, since it cannot actually be used for dictation until it does.
 
 Local models join the same list. A Whisper downloaded from the Hub — a
-CTranslate2 build or a transformers checkout — appears as a dictation engine
-once its runtime is installed, and the model assigned under Settings → **What
-each job uses** is the one the mic uses; when that assignment cannot run, the
-mic says so and falls back to another ready engine instead of failing silently.
+CTranslate2 build, a transformers checkout, or a whisper.cpp one — appears as a
+dictation engine once its runtime is installed, and the model assigned under
+Settings → **What each job uses** is the one the mic uses; when that assignment
+cannot run, the mic says so and falls back to another ready engine instead of
+failing silently.
+
+### whisper.cpp
+
+A third local transcription backend, and the one worth reaching for when you
+have no Python: **about 10 MB, no root, no PyTorch, no venv**. Install it under
+Settings → **Runtimes** and download a `ggml-*.bin` model from **Get models**
+(tiny is 42 MB, large-v3-turbo is 834 MB). It needs none of the Python stack,
+and on a CPU-only machine it is quicker than the transformers path.
+
+Two things about it that are not obvious:
+
+  - **Its models are `.bin`, not `.gguf`.** whisper.cpp reads the GGML format
+    and rejects GGUF outright. There are good GGUF Whisper conversions on the
+    Hub, but they are built for *transcribe.cpp* and whisper.cpp cannot open
+    them, so the catalogue only lists the ones it can actually load.
+  - **A recording is decoded before it is uploaded.** `whisper-cli` opens wav,
+    flac, mp3 and ogg — and every browser recording is webm/opus or m4a. So for
+    a whisper.cpp model the audio is decoded to 16 kHz mono WAV in the browser
+    first. The two Python runners take the original bytes untouched. This costs
+    a re-encode and no extra install, which is the trade against ffmpeg.
+
+Upstream publishes no GPU build for Linux, so this one runs on the CPU. The
+Windows archive does have CUDA variants, and the installer picks them up if a
+future build publishes one for Linux.
 
 ## Attachments
 
@@ -329,9 +354,10 @@ public/                   chat UI (no build step, no framework)
     runner gets a moment to clean up its own partial output. The caller is told
     plainly that it was stopped, rather than being handed an empty success.
 
-  Each job reports the runtime it actually uses, read off the runner's imports
-  rather than guessed: `whisper_ct2.py` is CTranslate2 (`faster-whisper`) and
-  never loads torch, while the other three runners build on torch. ONNX Runtime
+  Each job reports the runtime it actually uses, read off the runner rather than
+  guessed: `whisper_ct2.py` is CTranslate2 (`faster-whisper`) and never loads
+  torch, `whisper-cli` is the native whisper.cpp build and involves no Python
+  at all, while the other three runners build on torch. ONNX Runtime
   never appears, because no bundled runner uses it — and offering a Stop for a
   process that cannot exist would be a lie. PyTorch and Kokoro are libraries
   inside a job, not jobs of their own, so they are reported as what a row uses

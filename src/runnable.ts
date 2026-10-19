@@ -43,6 +43,16 @@ export interface RunnableModel {
   /** Installed runtime group -> version. */
   runtimes: Record<string, string>;
   missing: string[];
+  /**
+   * Which bundled runner would handle this, so the browser can ask for audio in
+   * a form that runner accepts.
+   *
+   * Not something the client can work out: whisper-cli reads wav/flac/mp3/ogg
+   * and nothing else, so a browser recording has to be decoded to 16 kHz WAV
+   * before it is uploaded — but only for that runner. The two Python ones take
+   * the original bytes and their own audio libraries.
+   */
+  driver?: 'whisper-cpp' | 'faster-whisper' | 'transformers';
   /** False when a required runtime is blocked on this interpreter. */
   blocked: boolean;
   /** Why it cannot run, or '' when it can. */
@@ -130,6 +140,24 @@ async function detectLayout(
   files: Set<string>,
 ): Promise<DetectedLayout | null> {
   if (task === 'stt') {
+    // whisper.cpp's own models are single GGML files with a fixed naming
+    // convention, and the loader rejects anything else — so the name is the
+    // format here, exactly as the CTranslate2 pairing is.
+    //
+    // A GGUF Whisper is explicitly *not* claimed. Those exist and are good
+    // models, but they are built for transcribe.cpp and whisper.cpp refuses
+    // them with "bad magic", so offering one would be a promise the runner
+    // cannot keep. It was the reason two catalog entries sat here labelled
+    // "whisper.cpp" and pointed at files nothing here could load.
+    for (const f of files) {
+      const name = f.split('/').pop() ?? f;
+      if (!/^ggml-[a-z0-9.]+(-[a-z0-9_]+)*\.bin$/i.test(name)) continue;
+      return {
+        format: 'whisper.cpp',
+        needs: [f],
+        requires: ['whisper-cpp'],
+      };
+    }
     // CTranslate2 keeps no `model_type` for Whisper conversions — the pairing
     // of model.bin with config.json is the format, and is the same signal
     // transcribe() uses to choose the CTranslate2 runner. A conversion that
@@ -268,6 +296,20 @@ function needsSatisfied(files: Set<string>, entry: string): boolean {
   return false;
 }
 
+/**
+ * The runner implied by a set of required runtime groups.
+ *
+ * Read off `requires` rather than guessed from the layout, so a model can never
+ * be handed to a runner whose runtime it does not list. An unrecognised set
+ * returns undefined and the browser keeps the audio as-is.
+ */
+function driverFor(requires: string[]): RunnableModel['driver'] {
+  if (requires.includes('whisper-cpp')) return 'whisper-cpp';
+  if (requires.includes('faster-whisper')) return 'faster-whisper';
+  if (requires.includes('transformers')) return 'transformers';
+  return undefined;
+}
+
 /** Everything the live probe feeds in, overridable so tests need no venv. */
 export interface RunnableDeps {
   /** Files already on disk, replacing the walk of the models directory. */
@@ -323,6 +365,7 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
       presentFiles: present,
       runtimes,
       missing: missingRuntimes,
+      driver: driverFor(requires),
       blocked: false,
       reason,
       ready: !reason,
@@ -388,6 +431,7 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
       presentFiles: present,
       runtimes,
       missing: missingRuntimes,
+      driver: driverFor(layout.requires),
       blocked: false,
       reason,
       ready: !reason,
