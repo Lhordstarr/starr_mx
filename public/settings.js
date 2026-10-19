@@ -1005,12 +1005,34 @@ const rtDriverLog = document.getElementById('rt-driver-log');
  * still arriving. The 24px slack is the usual one: a reader a few pixels short
  * of the bottom still counts as watching, so a stray scroll wheel does not pin
  * them in place.
+ *
+ * The line is buffered rather than written straight in, because following the
+ * tail means reading `scrollHeight`, and reading it forces the browser to lay
+ * the log out again. Doing that once per line is quadratic — by the thousandth
+ * line you are re-laying-out a thousand lines — and it was enough to lock the
+ * tab for seconds on a chatty install. One read and one write per batch fixes
+ * it, and the read is taken before the batch lands so the decision is still
+ * about where the reader left the log.
  */
+const logBuffers = new WeakMap();
+
 function logAppend(el, text) {
   if (!el || !text) return;
-  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
-  el.textContent += text;
-  if (atBottom) el.scrollTop = el.scrollHeight;
+  let buf = logBuffers.get(el);
+  if (!buf) {
+    buf = { text: '', timer: 0 };
+    logBuffers.set(el, buf);
+  }
+  buf.text += text;
+  if (buf.timer) return;
+  buf.timer = setTimeout(() => {
+    buf.timer = 0;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+    const batch = buf.text;
+    buf.text = '';
+    el.textContent += batch;
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  }, 0);
 }
 
 /**
@@ -2587,6 +2609,10 @@ function renderDownloads() {
       status.textContent = total ? fmtSize(total) : 'done';
     }
     top.append(status);
+    // The status is the first thing to be cut on a narrow window, so the whole
+    // string has to stay reachable somewhere. Set every pass rather than only
+    // when it changes: the row is rebuilt from scratch on each poll.
+    status.title = status.textContent;
 
     // Pause is offered while the model is still coming down: it aborts the
     // transfer but keeps the partial file, so Resume can continue from it.

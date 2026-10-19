@@ -1693,7 +1693,7 @@ body.modal-open {
 .rt-log__state {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   /* The heading is set in small caps; the label is running text and loses the
      letterspacing, which at this size reads as a typo otherwise. */
@@ -1712,10 +1712,27 @@ body.modal-open {
 .rt-log__state .bar {
   --meter-h: 6px;
   width: 96px;
+  /* Last in the row and pinned to the panel's right edge, so the bar is in the
+     same place every time. */
   flex-shrink: 0;
 }
 
+/* A fixed track, so the label's length never resizes anything.
+ *
+ * The label is the installer talking and it changes on every line, so a label
+ * that grew and shrank with its text dragged the bar sideways with it — a bar
+ * that slides on every pip line cannot be read for progress, which is the one
+ * thing it is there for. Text that does not fit is cut instead. `ch` rather than
+ * `px` so it holds its size in both themes. */
 .rt-log__statelabel {
+  /* `width`, not `flex-basis`. A basis only sets where shrinking starts, so the
+     track still came out at the text's own width when the text was short — the
+     bar stayed put but the words jumped sideways underneath it. An explicit
+     width holds the track open at 30ch whatever is said in it, and the text
+     starts in the same place every line. */
+  flex: 0 1 auto;
+  width: 30ch;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2131,7 +2148,19 @@ summary.hub-title {
 }
 
 .dl-row__status {
-  flex-shrink: 0;
+  /* Allowed to shrink. It was `flex-shrink: 0`, and this string is built out of
+     file counts, two byte counts, a percentage and a rate — so on a narrow
+     window it was wider than the row and pushed straight through the right
+     edge. The name gives up its space first (it is `flex: 1 1 0`, so it only
+     ever holds what is left over); this truncates only when the name is already
+     gone. An error message can be arbitrarily long, which is how it usually
+     showed up. `nowrap` on purpose: the text changes every second, and wrapping
+     it would make the row jump in height while it is being read. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.74rem;
   font-weight: 700;
   color: var(--text-dim);

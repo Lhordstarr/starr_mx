@@ -2146,6 +2146,293 @@ if (browser && serverUp) {
   }
 }
 
+/* ---- the indicator holds still, and a download row fits its box ----
+ *
+ * Three defects, all of them "it looked fine until you watched it for a
+ * second":
+ *
+ *  - the progress bar sat beside a label whose width followed its text, so a
+ *    new pip line walked the bar sideways. A bar you cannot read progress off
+ *    because it keeps moving is worse than no bar;
+ *  - following the log's tail meant reading `scrollHeight` per line, and that
+ *    forces a layout — of a log growing to a thousand lines, a thousand times.
+ *    It locked the tab;
+ *  - a download row's status was `flex-shrink: 0`, and it is built out of a
+ *    file count, two byte counts, a percentage and a rate, so it pushed
+ *    straight through the right edge of its card.
+ */
+if (browser && serverUp) {
+  const PORT4 = PORT + 3;
+  const PROFILE4 = join(tmpdir(), `starr-anchor-${process.pid}`);
+  rmSync(PROFILE4, { recursive: true, force: true });
+  const GIB4 = 1024 ** 3;
+  const real4 = await (await fetch(`${APP_URL}/api/runtimes`, { signal: AbortSignal.timeout(60000) })).json();
+  const status4 = Buffer.from(
+    JSON.stringify({
+      ...real4,
+      runtimes: { ...real4.runtimes, installed: { ...real4.runtimes.installed, onnxruntime: null } },
+    }),
+  ).toString('base64');
+  const LINES4 = [
+    'Collecting',
+    'Using cached pip wheel for onnxruntime on this platform',
+    'Created wheel for onnxruntime: filename=onnxruntime-1.23.0-cp313-cp313-linux_x86_64.whl size=17123456',
+  ];
+  const install4 = Buffer.from(
+    Array.from({ length: 1500 }, (_, i) => `event: progress\ndata: ${JSON.stringify(LINES4[i % LINES4.length])}\n\n`).join(''),
+  ).toString('base64');
+  const transfers4 = Buffer.from(
+    JSON.stringify({
+      active: [
+        { id: 'a1', kind: 'pull', label: 'Qwen/Qwen2.5-Coder-32B-Instruct-GGUF', repo: 'Qwen/Qwen2.5-Coder-32B-Instruct-GGUF', state: 'running', received: 1.23 * GIB4, total: 20.3 * GIB4, startedAt: Date.now() - 60000 },
+        { id: 'a2', kind: 'pull', label: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-32B-GGUF', repo: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-32B-GGUF', state: 'error', error: 'the remote host closed the connection while reading the LFS pointer for safetensors (HTTP 502 from the CDN edge)' },
+      ],
+      recent: [],
+    }),
+  ).toString('base64');
+
+  const chrome4 = spawn(
+    browser,
+    [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--window-size=1000,1000',
+      `--remote-debugging-port=${PORT4}`,
+      `--user-data-dir=${PROFILE4}`,
+      'about:blank',
+    ],
+    { stdio: 'ignore' },
+  );
+  const sleep4 = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const done4 = () => {
+    try {
+      chrome4.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+    try {
+      rmSync(PROFILE4, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      /* leaving it behind */
+    }
+  };
+  try {
+    let ws4 = '';
+    for (let i = 0; i < 60 && !ws4; i += 1) {
+      try {
+        const l = (await (
+          await fetch(`http://127.0.0.1:${PORT4}/json/list`)
+        ).json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+        ws4 = l.find((t) => t.type === 'page')?.webSocketDebuggerUrl ?? '';
+      } catch {
+        await sleep4(250);
+      }
+    }
+    if (!ws4) throw new Error('chromium never came up');
+
+    const sock = new WebSocket(ws4);
+    await new Promise<void>((resolve, reject) => {
+      sock.addEventListener('open', () => resolve());
+      sock.addEventListener('error', () => reject(new Error('cdp socket failed')));
+    });
+    let cid = 0;
+    const cwait = new Map<number, (m: any) => void>();
+    sock.addEventListener('message', (ev) => {
+      const m = JSON.parse(String((ev as MessageEvent).data));
+      if (m.id && cwait.has(m.id)) {
+        cwait.get(m.id)!(m);
+        cwait.delete(m.id);
+      }
+      if (m.method === 'Fetch.requestPaused') {
+        const url = String(m.params?.request?.url ?? '');
+        const post = (method: string, params: Record<string, unknown>) => {
+          const n = ++cid;
+          cwait.delete(n);
+          sock.send(JSON.stringify({ id: n, method, params }));
+        };
+        const body = url.includes('/api/transfers')
+          ? transfers4
+          : url.includes('/api/runtimes/install')
+            ? install4
+            : url.includes('/api/runtimes')
+              ? status4
+              : null;
+        if (body === null) {
+          post('Fetch.continueRequest', { requestId: m.params.requestId });
+        } else {
+          post('Fetch.fulfillRequest', {
+            requestId: m.params.requestId,
+            responseCode: 200,
+            responseHeaders: [
+              { name: 'content-type', value: url.includes('install') ? 'text/event-stream' : 'application/json' },
+            ],
+            body,
+          });
+        }
+      }
+    });
+    const call = (method: string, params: Record<string, unknown> = {}) =>
+      new Promise<any>((resolve) => {
+        const n = ++cid;
+        cwait.set(n, resolve);
+        sock.send(JSON.stringify({ id: n, method, params }));
+      });
+    const run = async (expression: string) => {
+      const r = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (r.result?.exceptionDetails) {
+        throw new Error(String(r.result.exceptionDetails.exception?.description ?? 'eval failed'));
+      }
+      return r.result?.result?.value;
+    };
+    const until = async (expression: string, timeoutMs = 20000) => {
+      const end = Date.now() + timeoutMs;
+      for (;;) {
+        if (await run(`Boolean(${expression})`)) return true;
+        if (Date.now() > end) return false;
+        await sleep4(150);
+      }
+    };
+
+    await call('Page.enable');
+    await call('Runtime.enable');
+    await call('Fetch.enable', { patterns: [{ urlPattern: `${APP_URL}/api/*` }] });
+    await call('Emulation.setDeviceMetricsOverride', { width: 1000, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await call('Page.navigate', { url: 'about:blank' });
+    await sleep4(400);
+    await call('Page.navigate', { url: `${APP_URL}/settings#models/runtimes` });
+    if (!(await until(`document.querySelectorAll('.rt-row').length > 0`))) {
+      throw new Error('the runtime list did not render');
+    }
+    await run(`(() => {
+      const row = [...document.querySelectorAll('.rt-row')]
+        .find(r => r.querySelector('.rt-row__title')?.textContent === 'ONNX Runtime');
+      const box = row.querySelector('input');
+      box.checked = true; box.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep4(300);
+
+    // A timer, not requestAnimationFrame: headless throttles rAF so hard that a
+    // sampler built on it saw five frames in six seconds, and every check built
+    // on it passed for the wrong reason.
+    await run(`(() => {
+      window.__samples = [];
+      const tick = () => {
+        const state = document.getElementById('rt-log-state');
+        const bar = state.querySelector('.bar');
+        const vis = getComputedStyle(state).display !== 'none';
+        const head = document.querySelector('.rt-log__head');
+        window.__samples.push({
+          vis,
+          gap: vis ? Math.round(head.getBoundingClientRect().right - bar.getBoundingClientRect().right) : -1,
+        });
+        setTimeout(tick, 16);
+      };
+      tick();
+      return true;
+    })()`);
+    await run(`document.getElementById('rt-install').click(); true`);
+    await sleep4(6000);
+    const live = JSON.parse(
+      String(
+        await run(`JSON.stringify((() => {
+          const v = window.__samples.filter(s => s.vis);
+          return { visible: v.length, ticks: window.__samples.length,
+                   endsHidden: getComputedStyle(document.getElementById('rt-log-state')).display === 'none',
+                   gap: v.length ? Math.max(...v.map(s => Math.abs(s.gap))) : null };
+        })())`),
+      ),
+    );
+    report('the indicator comes up during an install and goes down after', live.visible > 0 && live.endsHidden, JSON.stringify(live));
+    // A log that re-lays itself out once per line locks the tab. Measured side
+    // by side: 3 ticks in 6s with the per-line layout read, 91 without. The
+    // threshold sits between the two with room on each side — this is here to
+    // catch the regression, not to benchmark headless timers.
+    report('the page is not blocked while a long install streams', live.ticks > 40, `${live.ticks} ticks in 6s`);
+    report('and the bar sits against the panel edge throughout', live.gap !== null && live.gap <= 1, JSON.stringify(live));
+
+    // Whether the bar moves is a layout question about the heading, not about
+    // the install — `logWorking` only sets the label's textContent — so it is
+    // measured directly instead of racing a stream that lands in one burst.
+    const runs = JSON.parse(
+      String(
+        await run(`JSON.stringify((() => {
+          const state = document.getElementById('rt-log-state');
+          const label = document.getElementById('rt-log-statelabel');
+          const bar = state.querySelector('.bar');
+          state.hidden = false;
+          const measure = (text) => {
+            label.textContent = text;
+            const b = bar.getBoundingClientRect();
+            const l = label.getBoundingClientRect();
+            return { left: Math.round(b.left), right: Math.round(b.right),
+                     labelW: Math.round(l.width), labelLeft: Math.round(l.left),
+                     cut: label.scrollWidth > label.clientWidth + 1 };
+          };
+          const out = [
+            'Collecting',
+            'Building wheel for onnxruntime (cp313)',
+            'Created wheel for onnxruntime: filename=onnxruntime-1.23.0-cp313-cp313-linux_x86_64.whl size=17123456',
+            'Installing collected packages: onnxruntime',
+          ].map(measure);
+          state.hidden = true;
+          return out;
+        })())`),
+      ),
+    );
+    report(
+      'the bar does not move for any label length',
+      new Set(runs.map((r: any) => r.left)).size === 1 && new Set(runs.map((r: any) => r.right)).size === 1,
+      JSON.stringify(runs),
+    );
+    report(
+      'nor does the label change the width of its own track',
+      new Set(runs.map((r: any) => r.labelW)).size === 1 && runs[0].labelW >= 60,
+      JSON.stringify(runs),
+    );
+    report(
+      'nor do the words jump sideways under it',
+      new Set(runs.map((r: any) => r.labelLeft)).size === 1,
+      JSON.stringify(runs.map((r: any) => r.labelLeft)),
+    );
+    report('and a long line is cut rather than running past the panel', runs[3].cut === true, JSON.stringify(runs[3]));
+
+    await call('Page.navigate', { url: 'about:blank' });
+    await sleep4(400);
+    await call('Page.navigate', { url: `${APP_URL}/settings#models/downloads` });
+    await sleep4(2500);
+    if (!(await until(`document.querySelectorAll('.dl-row').length >= 2`))) {
+      throw new Error('the transfer rows did not render');
+    }
+    const rows = JSON.parse(
+      String(
+        await run(`JSON.stringify([...document.querySelectorAll('.dl-row')].map(r => {
+          const top = r.querySelector('.dl-row__top');
+          const status = r.querySelector('.dl-row__status');
+          return {
+            over: Math.round(status.getBoundingClientRect().right - top.getBoundingClientRect().right),
+            scrollOver: Math.round(r.scrollWidth - r.clientWidth),
+            titled: Boolean(status.title && status.title.length),
+          };
+        }))`),
+      ),
+    );
+    report('no download row spills its text past the card', rows.every((r: any) => r.over <= 1), JSON.stringify(rows));
+    report('and nothing scrolls sideways inside one', rows.every((r: any) => r.scrollOver <= 0), JSON.stringify(rows));
+    report('while the full text stays reachable on hover', rows.every((r: any) => r.titled), JSON.stringify(rows));
+
+    await call('Fetch.disable');
+    sock.close();
+  } catch (err) {
+    failures.push('the anchored-bar and download-row checks');
+    console.log(`  FAIL  the anchored-bar and download-row checks — ${(err as Error).message}`);
+  } finally {
+    done4();
+  }
+}
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) console.log(failures.map((f) => `  - ${f}`).join('\n'));
 process.exit(failures.length ? 1 : 0);
