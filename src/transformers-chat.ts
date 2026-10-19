@@ -14,7 +14,7 @@
  * a server that would answer nonsense.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 
 import { listDownloads, type HFDownload } from './huggingface.js';
@@ -201,14 +201,45 @@ export async function resolveTransformersModel(id: string): Promise<Transformers
   );
 }
 
+/** `<venv>/lib/python<version>/site-packages`, and the Windows spelling of the same. */
+function sitePackages(venv: string): string[] {
+  const out: string[] = [];
+  const lib = path.join(venv, 'lib');
+  try {
+    for (const entry of readdirSync(lib)) {
+      if (entry.startsWith('python')) out.push(path.join(lib, entry, 'site-packages'));
+    }
+  } catch {
+    /* a venv with no lib/ is one this cannot answer for */
+  }
+  const windows = path.join(venv, 'Lib', 'site-packages');
+  if (existsSync(windows)) out.push(windows);
+  return out;
+}
+
+/**
+ * Is transformers installed in the shared environment?
+ *
+ * Answered by looking for the package, not by importing it. This is called from
+ * the transformers provider's `configured` and `hint` getters, which
+ * `/api/providers` reads for every provider on every page load — and the check
+ * used to be `spawnSync(py, ['-c', 'import transformers'])`, which blocks the
+ * entire server for as long as that import takes. On this machine that import
+ * is 3.5 seconds (torch comes with it) and the route asks three or four times,
+ * so one page load froze the process for about fifteen seconds: the provider
+ * list was slow, and every other request — a keystroke's fetch, a panel that
+ * just wanted its settings — stalled behind it until it finished.
+ *
+ * Whether the import also *succeeds* is answered where it matters: starting the
+ * chat server reports the traceback, and the Runtimes page asks a real
+ * interpreter through probeVenv(). What the provider list needs is "is there
+ * anything here to offer", and the package directory answers that honestly.
+ */
 export function transformersAvailable(): boolean {
   const py = venvPython('venv');
   if (!py || !existsSync(py)) return false;
-  try {
-    return spawnSync(py, ['-c', 'import transformers'], { stdio: 'ignore' }).status === 0;
-  } catch {
-    return false;
-  }
+  const venv = path.dirname(path.dirname(py));
+  return sitePackages(venv).some((dir) => existsSync(path.join(dir, 'transformers', '__init__.py')));
 }
 
 interface Serving {
