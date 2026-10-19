@@ -89,9 +89,12 @@ export const gemini: Provider = {
 
     for await (const payload of parseSSE(res.body!)) {
       const event = JSON.parse(payload);
-      // A candidate can carry several parts; take the text ones in order.
+      // A candidate can carry several parts; take them in order, keeping
+      // thought parts (Gemini 2.5's thinking) out of the answer text.
       for (const part of event.candidates?.[0]?.content?.parts ?? []) {
-        if (part.text) yield part.text as string;
+        if (!part.text) continue;
+        if (part.thought) yield { type: 'reasoning', text: part.text as string };
+        else yield { type: 'text', text: part.text as string };
       }
       if (event.error) {
         throw new Error(`Google Gemini: ${event.error.message ?? 'stream error'}`);

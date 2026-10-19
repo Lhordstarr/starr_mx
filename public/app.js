@@ -525,7 +525,7 @@ function compressLong(bubble) {
   bubble.after(btn);
 }
 
-function addMessage(role, html, { meta, raw, images = [] } = {}) {
+function addMessage(role, html, { meta, raw, images = [], reasoning = '' } = {}) {
   els.welcome.remove();
   syncEmptyState();
 
@@ -536,7 +536,7 @@ function addMessage(role, html, { meta, raw, images = [] } = {}) {
   body.className = 'message-body';
   body.innerHTML = `
     <div class="bubble-wrap">
-      <div class="bubble">${html}</div>
+      <div class="bubble">${reasoning ? thinkingHtml(reasoning) : ''}${html}</div>
     </div>
     <div class="meta-row">
       ${meta ? `<span class="meta">${escapeHtml(meta)}</span>` : ''}
@@ -1249,6 +1249,50 @@ function activeStream() {
 const streamingAnswer = (s) => s.text;
 
 /**
+ * The scratchpad pane: thinking models' reasoning, above the answer.
+ *
+ * Rendered as plain HTML with a `data-open` attribute rather than a native
+ * `<details>`, because the live bubble's innerHTML is replaced on every paint
+ * and a `<details>` would slam shut under the reader mid-stream. The click
+ * handler flips the attribute in place; for the live bubble it also records
+ * the choice on the stream (s.thinkUser) so the next repaint honours it.
+ */
+function thinkingHtml(reasoning, { open = false } = {}) {
+  return (
+    `<div class="thinking"${open ? ' data-open="1"' : ''}>` +
+    '<button type="button" class="thinking-toggle" aria-expanded="' +
+    (open ? 'true' : 'false') +
+    '">' +
+    '<svg class="thinking-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+    'aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>' +
+    '<span class="thinking-label">Thinking</span>' +
+    '</button>' +
+    `<div class="thinking-body">${renderMarkdown(reasoning)}</div>` +
+    '</div>'
+  );
+}
+
+/**
+ * Whether the live thinking pane should be open.
+ *
+ * Open while the model is still thinking (reasoning and no answer yet, which
+ * is the moment the pane is the only thing happening), closed as soon as the
+ * answer starts — and never re-opened behind the reader's back. An explicit
+ * click always wins.
+ */
+function thinkOpen(s) {
+  if (s.thinkUser) return Boolean(s.thinkOpen);
+  return Boolean(s.reasoning) && !s.text.trim();
+}
+
+/** The live bubble's HTML: thinking pane first, then the answer so far. */
+function liveBubbleHtml(s) {
+  const think = s.reasoning ? thinkingHtml(s.reasoning, { open: thinkOpen(s) }) : '';
+  return think + renderMarkdown(streamingAnswer(s));
+}
+
+/**
  * Keeps the canvas honest: busy iff the open chat has an answer coming.
  *
  * A background answer is deliberately not allowed to dim the composer — you
@@ -1283,7 +1327,7 @@ function runPaint(s) {
     s.paintQueue = '';
     return;
   }
-  s.bubble.innerHTML = renderMarkdown(streamingAnswer(s));
+  s.bubble.innerHTML = liveBubbleHtml(s);
   scrollToBottom();
   syncLatestButton();
 }
@@ -1299,7 +1343,7 @@ function flushPaint(s) {
     return;
   }
   s.lastPaint = performance.now();
-  s.bubble.innerHTML = renderMarkdown(streamingAnswer(s));
+  s.bubble.innerHTML = liveBubbleHtml(s);
   s.paintQueue = '';
 }
 
@@ -1365,6 +1409,10 @@ async function send(text, { isRetry = false } = {}) {
   // Declared before the stream starts and outside the try, so the abort path
   // can reuse whatever arrived.
   let answer = '';
+  // The model's scratchpad, when it streams one: kept apart from the answer so
+  // the saved turn, the copy button and the speaking bar all carry the answer
+  // alone.
+  let reasoning = '';
   // Tool-call activity lines, in arrival order, so each result lands on the
   // line its call created.
   const pendingToolLines = [];
@@ -1379,6 +1427,7 @@ async function send(text, { isRetry = false } = {}) {
     actions,
     meta,
     text: answer,
+    reasoning,
     ctl: new AbortController(),
     paintQueue: '',
     paintTimer: 0,
@@ -1428,6 +1477,12 @@ async function send(text, { isRetry = false } = {}) {
           answer += parsed.text;
           s.text = answer;
           queuePaint(s, parsed.text);
+        } else if (event === 'reasoning') {
+          // Scratchpad in its own lane: painted into the thinking pane, never
+          // appended to `answer`.
+          reasoning += parsed.text;
+          s.reasoning = reasoning;
+          queuePaint(s, parsed.text);
         } else if (event === 'tool_call') {
           pendingToolLines.push(addSideLine(bubble, `${toolMeta(parsed.name).label} — ${parsed.args}`, 'tool-call'));
         } else if (event === 'tool_result') {
@@ -1470,7 +1525,13 @@ async function send(text, { isRetry = false } = {}) {
       }
       // Keep whatever arrived: a stopped answer is still the user's text, and
       // it belongs to this chat whether or not anyone is watching it.
-      if (answer.trim()) s.convo.push({ role: 'assistant', content: answer });
+      if (answer.trim()) {
+        s.convo.push(
+          s.reasoning
+            ? { role: 'assistant', content: answer, reasoning: s.reasoning }
+            : { role: 'assistant', content: answer },
+        );
+      }
       persistChat(s.chatId, s.convo);
       refreshChatRow(s.chatId);
     } else {
@@ -1521,8 +1582,13 @@ function finish(s, started) {
   }
   // Append to the conversation this request belongs to, and save that
   // conversation by id — not whatever chat happens to be open when the last
-  // token lands.
-  convo.push({ role: 'assistant', content: answer });
+  // token lands. The scratchpad rides along so reopening the chat can show it
+  // (collapsed); it is never sent back to a provider.
+  convo.push(
+    s.reasoning
+      ? { role: 'assistant', content: answer, reasoning: s.reasoning }
+      : { role: 'assistant', content: answer },
+  );
   persistChat(s.chatId, convo);
   if (!visible) {
     refreshChatRow(s.chatId);
@@ -1566,7 +1632,10 @@ function reattachStream(chatId) {
   // it, so the answer that lands next goes into the same array this view draws
   // from — two arrays for one chat is how a finished reply goes missing.
   conversation = s.convo;
-  const { bubble, actions, meta } = addMessage('assistant', s.text ? renderMarkdown(s.text) : '');
+  const { bubble, actions, meta } = addMessage(
+    'assistant',
+    s.text || s.reasoning ? liveBubbleHtml(s) : '',
+  );
   bubble.classList.add('cursor');
   s.bubble = bubble;
   s.actions = actions;
@@ -1674,6 +1743,28 @@ els.messages.addEventListener('click', (e) => {
     flashCodeButton(btn, 'Copied');
   } else {
     downloadCode(code.textContent, code.dataset.lang || '');
+  }
+});
+
+// The thinking pane's toggle. Delegated for the same reason as the code
+// buttons, plus one more: while a reply streams, the live bubble's innerHTML
+// is rebuilt on every paint. Flipping the attribute here is instant; if the
+// pane belongs to a live stream, the choice is recorded on the stream so the
+// next repaint honours it instead of reverting to the automatic state.
+els.messages.addEventListener('click', (e) => {
+  const btn = e.target.closest('.thinking-toggle');
+  if (!btn) return;
+  const box = btn.closest('.thinking');
+  const open = box.getAttribute('data-open') !== '1';
+  box.setAttribute('data-open', open ? '1' : '');
+  btn.setAttribute('aria-expanded', String(open));
+  const bubble = box.closest('.bubble');
+  for (const s of streams.values()) {
+    if (s.bubble === bubble) {
+      s.thinkUser = true;
+      s.thinkOpen = open;
+      break;
+    }
   }
 });
 
@@ -2504,6 +2595,7 @@ function renderConversation() {
     addMessage(m.role, renderMarkdown(text || (images.length ? '' : m.content)), {
       raw: text,
       images,
+      reasoning: typeof m.reasoning === 'string' ? m.reasoning : '',
     });
   }
   syncEmptyState();

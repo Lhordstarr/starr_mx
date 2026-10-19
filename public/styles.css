@@ -822,6 +822,58 @@ a.icon-btn {
   border-color: var(--danger);
 }
 
+/* The thinking pane: a thinking model's scratchpad, above its answer.
+   Quieter than the answer on purpose — a left rule and faint mono type read
+   as "supporting material" without boxing up half the transcript. Closed by
+   default once the answer starts; open only while the model is still
+   thinking, or when the reader opened it. */
+.thinking {
+  margin: 0 0 10px;
+  border-left: 2px solid var(--border);
+  padding-left: 9px;
+}
+
+.thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.thinking-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.thinking-chevron {
+  transition: transform var(--speed) var(--ease);
+}
+.thinking[data-open='1'] .thinking-chevron {
+  transform: rotate(180deg);
+}
+
+.thinking-body {
+  display: none;
+  font-size: 0.86em;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.thinking[data-open='1'] .thinking-body {
+  display: block;
+}
+.thinking-body > :first-child {
+  margin-top: 4px;
+}
+.thinking-body > :last-child {
+  margin-bottom: 0;
+}
+
 .meta {
   font-size: 0.72rem;
   color: var(--text-faint);

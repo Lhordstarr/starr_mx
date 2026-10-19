@@ -14,6 +14,8 @@
     "test:stt-local": "tsx scripts/stt-local-selftest.ts",
     "test:attachments": "tsx scripts/attachments-selftest.ts",
     "test:tools": "tsx scripts/tools-selftest.ts",
+    "test:reasoning": "tsx scripts/reasoning-selftest.ts",
+    "test:reasoning-ui": "node scripts/reasoning-ui-selftest.mjs",
     "test:ui-tools": "node scripts/ui-tools-selftest.mjs",
     "test:ollama-models": "tsx scripts/ollama-models-selftest.ts",
     "test:processes": "tsx scripts/processes-selftest.ts",

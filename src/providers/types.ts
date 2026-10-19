@@ -62,10 +62,17 @@ export interface TranscribeOptions {
 }
 
 /**
- * Streams assistant text for a request, yielding raw deltas as they arrive.
- * The server turns each delta into an SSE event for the browser.
+ * One piece of a plain (no-tools) completion. Text is the answer; reasoning is
+ * the model's scratchpad, which the transcript shows in its own pane — the two
+ * are separate because a thinking model streams both, often interleaved.
  */
-export type StreamFn = (opts: StreamOptions) => AsyncGenerator<string, void, unknown>;
+export type StreamEvent = { type: 'text'; text: string } | { type: 'reasoning'; text: string };
+
+/**
+ * Streams assistant output for a request, yielding events as they arrive.
+ * The server turns each into an SSE event for the browser.
+ */
+export type StreamFn = (opts: StreamOptions) => AsyncGenerator<StreamEvent, void, unknown>;
 
 /**
  * One turn of the agent loop's working history. Tool turns are neutral here;
@@ -86,9 +93,10 @@ export interface ToolCallRequest {
   args: unknown;
 }
 
-/** What a tool-capable round yields: live text, then any calls once complete. */
+/** What a tool-capable round yields: live text, any scratchpad, then calls. */
 export type ChatToolsEvent =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool_calls'; calls: ToolCallRequest[] };
 
 export interface ChatToolsOptions {

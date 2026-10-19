@@ -34,6 +34,10 @@ export type MessageContent = string | ContentPart[];
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: MessageContent;
+  /** A thinking model's scratchpad, kept beside the answer for display and
+   *  storage. Never sent back to a provider — the agent loop builds its turns
+   *  from role and content only. */
+  reasoning?: string;
 }
 
 export interface ChatRequestBody {

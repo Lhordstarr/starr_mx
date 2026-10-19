@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { acquireStream, rateLimit, releaseStream } from './limits.js';
 import { checkAttachments, contentLength, LIMITS, parseContent } from './attachments.js';
 import { isToolFormatError, isToolsUnsupported, runAgent, withToolGuidance } from './agent.js';
+import { ThinkingSplitter } from './reasoning.js';
 import { enabledTools, listTools, resolveToolSelection, setToolEnabled } from './tools.js';
 import type { Tool } from './tools.js';
 import {
@@ -1979,6 +1980,31 @@ app.post('/api/chat', async (req, res) => {
   const send = (event: string, data: unknown) =>
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
+  // Scratchpad written *into* the text stream — a raw gateway, or a template
+  // no server-side parser claimed — is split from the answer before either is
+  // forwarded. Reasoning that arrived as its own wire field is already a
+  // reasoning event and flows through untouched. Both deltas are named so the
+  // transcript can hang the thinking in its own pane rather than pad the answer.
+  const think = new ThinkingSplitter();
+  const emitText = (piece: string) => {
+    const { reasoning, content } = think.push(piece);
+    if (reasoning) send('reasoning', { text: reasoning });
+    if (content) send('delta', { text: content });
+  };
+  const forward = (ev: { type: string; text: string }) => {
+    if (ev.type === 'reasoning') send('reasoning', { text: ev.text });
+    else emitText(ev.text);
+  };
+  // Whatever the splitter still holds when the stream ends is not part of a
+  // tag (nothing more is arriving), so hand it to the side it was headed for
+  // and close the turn.
+  const finishStream = () => {
+    const { reasoning, content } = think.flush();
+    if (reasoning) send('reasoning', { text: reasoning });
+    if (content) send('delta', { text: content });
+    send('done', {});
+  };
+
   // A local backend may need bringing up before it can answer at all — llama.cpp
   // serves one model, so a request naming a different one starts a server with
   // it loaded. The progress lines become transcript notices, so a multi-gigabyte
@@ -2013,9 +2039,9 @@ app.post('/api/chat', async (req, res) => {
         typeof req.body.temperature === 'number' ? req.body.temperature : undefined,
       signal: controller.signal,
     });
-    for await (const delta of stream) {
+    for await (const ev of stream) {
       if (controller.signal.aborted) break;
-      send('delta', { text: delta });
+      forward(ev);
     }
   };
 
@@ -2033,7 +2059,7 @@ app.post('/api/chat', async (req, res) => {
         });
       }
       await streamPlain(plainMessages);
-      send('done', {});
+      finishStream();
       return;
     }
     // Only answer text counts as replied: tool activity lines are not an
@@ -2056,8 +2082,9 @@ app.post('/api/chat', async (req, res) => {
         if (controller.signal.aborted) break;
         if (ev.type === 'text') {
           replied = true;
-          send('delta', { text: ev.text });
-        } else if (ev.type === 'tool_call') send('tool_call', { name: ev.name, args: ev.args });
+          emitText(ev.text);
+        } else if (ev.type === 'reasoning') send('reasoning', { text: ev.text });
+        else if (ev.type === 'tool_call') send('tool_call', { name: ev.name, args: ev.args });
         else send('tool_result', { name: ev.name, ok: ev.ok, detail: ev.detail });
       }
     } catch (err) {
@@ -2091,7 +2118,7 @@ app.post('/api/chat', async (req, res) => {
       }
       await streamPlain(plainMessages);
     }
-    send('done', {});
+    finishStream();
   };
 
   try {
@@ -2109,11 +2136,11 @@ app.post('/api/chat', async (req, res) => {
         signal: controller.signal,
       });
 
-      for await (const delta of stream) {
+      for await (const ev of stream) {
         if (controller.signal.aborted) break;
-        send('delta', { text: delta });
+        forward(ev);
       }
-      send('done', {});
+      finishStream();
     }
   } catch (err) {
     // An abort is a user-initiated stop, not a failure to report.

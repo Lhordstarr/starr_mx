@@ -13,6 +13,7 @@
  * the server — the browser persists only the final text.
  */
 import { toOpenAIFormat } from './attachments.js';
+import { reasoningText } from './reasoning.js';
 import { ensureOk, parseSSE } from './sse.js';
 import { langChainTool, toolByName, toolNames, validateArgs } from './tools.js';
 import type { Tool, ToolDefinition, ToolScalar } from './tools.js';
@@ -34,9 +35,11 @@ export interface AgentTurn {
   output?: string;
 }
 
-/** What a provider adapter yields per round. */
+/** What a provider adapter yields per round. Mirrors the same union in
+ *  providers/types.ts, which the Provider interface consumes. */
 export type ChatToolsEvent =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool_calls'; calls: { id: string; name: string; args: unknown }[] };
 
 export interface ChatToolsOptions {
@@ -52,6 +55,7 @@ export type ChatToolsFn = (opts: ChatToolsOptions) => AsyncGenerator<ChatToolsEv
 /** What the loop emits for the SSE layer. */
 export type AgentEvent =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool_call'; name: string; args: string }
   | { type: 'tool_result'; name: string; ok: boolean; detail: string };
 
@@ -212,6 +216,11 @@ export async function* runAgent(opts: {
         if (ev.type === 'text') {
           text += ev.text;
           yield { type: 'text', text: ev.text };
+        } else if (ev.type === 'reasoning') {
+          // Scratchpad passes through to the transcript's thinking pane and is
+          // deliberately kept out of `text`: history turns carry the answer
+          // (and any calls), not a replay of the model's inner monologue.
+          yield { type: 'reasoning', text: ev.text };
         } else {
           // Ids are the loop's bookkeeping (OpenAI links calls to results with
           // them); adapters may omit them, so fill in per-round uniques here.
@@ -305,6 +314,10 @@ export async function* runAgent(opts: {
  * OpenAI-compatible /chat/completions with tools. Covers OpenAI, OpenRouter,
  * Groq, and every user-added endpoint, which all share this wire shape.
  * Headers are read per call so a settings-page key change applies live.
+ *
+ * Also covers the local servers behind the same wire (llama.cpp, the
+ * transformers one): when their chat template produced no native call and the
+ * model wrote one as text instead, AnswerBuffer's fallback converts it.
  */
 export function openAIChatTools(
   baseUrl: string,
@@ -351,14 +364,24 @@ export function openAIChatTools(
     });
     await ensureOk(res, label);
 
-    // Tool-call fragments stream per index and must be reassembled; text
-    // passes straight through as it arrives.
+    // Tool-call fragments stream per index and must be reassembled; text is
+    // gated so a call written as text (a template llama.cpp's parser did not
+    // claim, or an endpoint that just echoes the model) converts instead of
+    // leaking into the transcript. Reasoning fields pass straight through.
     const calls = new Map<number, { id: string; name: string; args: string }>();
+    const known = tools.length
+      ? new Set([...tools.map((t) => t.name), ...toolNames()])
+      : null;
+    const gate = new AnswerBuffer();
     for await (const payload of parseSSE(res.body!)) {
       const delta = JSON.parse(payload)?.choices?.[0]?.delta;
       if (!delta) continue;
-      if (typeof delta.content === 'string' && delta.content) {
-        yield { type: 'text', text: delta.content };
+      const reasoning = reasoningText(delta.reasoning_content ?? delta.reasoning);
+      if (reasoning) yield { type: 'reasoning', text: reasoning };
+      const piece = textOf(delta.content);
+      if (piece) {
+        const out = gate.feed(piece);
+        if (out) yield { type: 'text', text: out.text };
       }
       for (const tc of delta.tool_calls ?? []) {
         const index = typeof tc.index === 'number' ? tc.index : 0;
@@ -369,6 +392,7 @@ export function openAIChatTools(
         calls.set(index, cur);
       }
     }
+    for (const ev of gate.end(known, calls.size > 0)) yield ev;
     if (calls.size) {
       yield {
         type: 'tool_calls',
@@ -491,8 +515,13 @@ function scanJsonObjects(t: string): string[] | null {
  *  or any named tool when `known` is null (the closing round). */
 function asCall(src: string, known: Set<string> | null): { name: string; args: unknown } | null {
   let obj: unknown;
+  // Some templates escape a call through another layer of braces, yielding
+  // `{{"name":…}}`. A doubled opener is never valid JSON, so peeling one
+  // layer is safe; arguments nested inside the object are untouched.
+  let text = src.trim();
+  if (text.startsWith('{{') && text.endsWith('}}')) text = text.slice(1, -1);
   try {
-    obj = JSON.parse(src);
+    obj = JSON.parse(text);
   } catch {
     return null;
   }
@@ -519,18 +548,251 @@ function asCall(src: string, known: Set<string> | null): { name: string; args: u
   return { name, args: parsedArgs };
 }
 
+/* ---------------- XML tool-call dialects ----------------
+
+ * The other half of "models emit calls as text": several families write calls
+ * as XML tags rather than JSON — GLM-4.5, Qwen3-Coder / Qwen3.5, MiniMax-M2,
+ * Functionary — and those tags parse with one small state machine over a
+ * declarative table (the same shapes llama.cpp's chat parsers and LocalAI's
+ * preset table recognise). Ollama and the transformers server pass these
+ * straight through as content, so without this the transcript shows raw markup
+ * and the tool never runs.
+
+ * The JSON fallback keeps its whole-message-only rule, but a dialect block is
+ * explicitly tagged: prose around it is the model talking *and* calling, which
+ * is exactly what native tool rounds look like. Prose is kept and yielded as
+ * text ahead of the calls; a tag that fails to parse leaves the message alone.
+
+ * `known` follows the JSON path: null in the closing plain round (shape-check
+ * only; the loop drops the calls), the offered + registered names otherwise.
+ */
+
+interface XmlDialect {
+  /** Wrapper around the whole call section, or null when tags stand alone. */
+  scope: [start: string, end: string] | null;
+  /** Function name: opening tag, separator after the name, closing tag. */
+  tool: [start: string, sep: string, end: string];
+  /** One argument key, bracketed. */
+  key: [start: string, end: string];
+  /** One argument value; `start` may be empty (key tag ends where value begins). */
+  value: { start: string; end: string };
+  /** True when args are one raw JSON object between `tool.sep` and `tool.end`. */
+  rawJsonArgs?: boolean;
+}
+
+const XML_DIALECTS: XmlDialect[] = [
+  {
+    // GLM 4.5: <tool_call>fn<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+    scope: null,
+    tool: ['<tool_call>', '', '</tool_call>'],
+    key: ['<arg_key>', '</arg_key>'],
+    value: { start: '<arg_value>', end: '</arg_value>' },
+  },
+  {
+    // Qwen3-Coder / Qwen3.5:
+    // <tool_call><function=fn><parameter=k>v</parameter></function></tool_call>
+    scope: ['<tool_call>', '</tool_call>'],
+    tool: ['<function=', '>', '</function>'],
+    key: ['<parameter=', '>'],
+    value: { start: '', end: '</parameter>' },
+  },
+  {
+    // MiniMax M2:
+    // <minimax:tool_call><invoke name="fn"><parameter name="k">v</parameter></invoke></minimax:tool_call>
+    scope: ['<minimax:tool_call>', '</minimax:tool_call>'],
+    tool: ['<invoke name="', '">', '</invoke>'],
+    key: ['<parameter name="', '">'],
+    value: { start: '', end: '</parameter>' },
+  },
+  {
+    // Functionary: <function=fn>{"json":"args"}</function>
+    scope: null,
+    tool: ['<function=', '>', '</function>'],
+    key: ['', ''],
+    value: { start: '', end: '' },
+    rawJsonArgs: true,
+  },
+];
+
+/** Function names as OpenAI defines them. Anything else — whitespace, braces,
+ *  quotes — means a parser stumbled onto a JSON blob or prose rather than a
+ *  name (GLM's bare `<tool_call>` body is the classic case). */
+const TOOL_NAME = /^[A-Za-z0-9_.-]+$/;
+
+/** A dialect value is usually text but models routinely emit JSON inside the
+ *  tags (`{"a":1}`, `[1,2]`, `true`, `42`). Parse what parses; keep the rest
+ *  as the string it is. */
+function xmlValue(raw: string): unknown {
+  const t = raw.trim();
+  if (!t) return '';
+  const first = t[0];
+  const jsonish =
+    first === '{' || first === '[' || first === '"' ||
+    t === 'true' || t === 'false' || t === 'null' || /^-?\d/.test(t);
+  if (!jsonish) return t;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return t;
+  }
+}
+
+interface DialectParse {
+  calls: { name: string; args: unknown }[];
+  /** Text around the call section, so a preamble sentence still shows. */
+  prose: string;
+}
+
+/** One tool block at the head of `s`; null when it is anything else. */
+function parseXmlTool(
+  s: string,
+  d: XmlDialect,
+  known: Set<string> | null,
+): { name: string; args: unknown; rest: string } | null {
+  if (!s.startsWith(d.tool[0])) return null;
+  let rest = s.slice(d.tool[0].length);
+
+  let name: string;
+  if (d.tool[1] === '') {
+    // No separator: the name runs to the key tag or the tool's end.
+    const candidates = [rest.indexOf(d.key[0]), rest.indexOf(d.tool[2])].filter((i) => i >= 0);
+    if (!candidates.length) return null;
+    const stop = Math.min(...candidates);
+    name = rest.slice(0, stop).trim();
+    rest = rest.slice(stop);
+  } else {
+    const sep = rest.indexOf(d.tool[1]);
+    if (sep === -1) return null;
+    name = rest.slice(0, sep).trim();
+    rest = rest.slice(sep + d.tool[1].length);
+  }
+  if (!TOOL_NAME.test(name)) return null;
+  if (known && !known.has(name)) return null;
+
+  let args: Record<string, unknown> = {};
+  if (d.rawJsonArgs) {
+    const end = rest.indexOf(d.tool[2]);
+    if (end === -1) return null;
+    const src = rest.slice(0, end).trim();
+    rest = rest.slice(end);
+    if (src) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(src);
+      } catch {
+        return null;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      args = parsed as Record<string, unknown>;
+    }
+  } else {
+    while (!rest.startsWith(d.tool[2])) {
+      if (!rest.startsWith(d.key[0])) return null;
+      rest = rest.slice(d.key[0].length);
+      const keyEnd = rest.indexOf(d.key[1]);
+      if (keyEnd === -1) return null;
+      const key = rest.slice(0, keyEnd).trim();
+      rest = rest.slice(keyEnd + d.key[1].length);
+      if (d.value.start) {
+        if (!rest.startsWith(d.value.start)) return null;
+        rest = rest.slice(d.value.start.length);
+      }
+      const valEnd = rest.indexOf(d.value.end);
+      if (valEnd === -1) return null;
+      args[key] = xmlValue(rest.slice(0, valEnd));
+      rest = rest.slice(valEnd + d.value.end.length);
+    }
+    rest = rest.slice(d.tool[2].length);
+  }
+
+  return { name, args, rest };
+}
+
+/** Whole-message dialect parse; null when no dialect matches or one fails. */
+function dialectCalls(text: string, known: Set<string> | null): DialectParse | null {
+  for (const d of XML_DIALECTS) {
+    const anchor = d.scope ? d.scope[0] : d.tool[0];
+    const start = text.indexOf(anchor);
+    if (start === -1) continue;
+
+    const before = text.slice(0, start);
+    let rest = text.slice(start);
+    if (d.scope) {
+      rest = rest.slice(d.scope[0].length);
+    }
+
+    const calls: { name: string; args: unknown }[] = [];
+    let failed = false;
+    for (;;) {
+      rest = rest.replace(/^\s+/, '');
+      if (d.scope && rest.startsWith(d.scope[1])) {
+        rest = rest.slice(d.scope[1].length);
+        break;
+      }
+      // The last tool tag consumed the rest of the message: done.
+      if (!rest) break;
+      const tool = parseXmlTool(rest, d, known);
+      if (!tool) {
+        // An unscoped dialect has no closing wrapper, so anything after a
+        // parsed call is the model's prose — not a broken second call.
+        if (!d.scope && calls.length) break;
+        failed = true;
+        break;
+      }
+      calls.push({ name: tool.name, args: tool.args });
+      rest = tool.rest;
+    }
+    if (failed || !calls.length) continue;
+    const prose = [before, rest].map((p) => p.trim()).filter(Boolean).join('\n\n');
+    return { calls, prose };
+  }
+  return null;
+}
+
 /** Past any plausible pseudo-call length: longer buffered text is an answer.
  *  Roomy enough for a few pretty-printed calls back to back. */
 const HERMES_PEEK = 4000;
+
+/** Literal openers of the call shapes a model can write as text: the JSON
+ *  spellings and the XML dialects' first tags (see XML_DIALECTS). While the
+ *  buffered head is a prefix of one of these it must not stream — the rest of
+ *  the tag may still arrive beside the call. */
+const CALL_OPENERS = ['<tool_call>', '<function=', '<minimax:tool_call>', '<invoke name="'];
+
+/** Index of the first call opener in `s`, or -1. */
+function firstOpener(s: string): number {
+  let best = -1;
+  for (const opener of CALL_OPENERS) {
+    const i = s.indexOf(opener);
+    if (i !== -1 && (best === -1 || i < best)) best = i;
+  }
+  return best;
+}
+
+/** Longest tail of `s` that could still grow into a call opener. Held back in
+ *  live mode so a tag split across chunks is not painted half-typed. */
+function openerTail(s: string): number {
+  let most = 0;
+  for (const opener of CALL_OPENERS) {
+    const max = Math.min(s.length, opener.length - 1);
+    for (let n = max; n > 0; n -= 1) {
+      if (s.endsWith(opener.slice(0, n))) {
+        if (n > most) most = n;
+        break;
+      }
+    }
+  }
+  return most;
+}
 
 /** True while the buffered text could still grow into a pseudo-call.
  *
  * The buffer is cumulative, so this sees every prefix: a lone newline, a bare
  * `{`, a half-typed fence, `<tool_call>` mid-tag, `{"name":` with the call
- * still to come. Once the full opener (`{"name":`, `{"function":`, or
- * `<tool_call>`, optionally fenced) has been seen it stays a candidate no
- * matter how much follows; anything else — `Hello`, `[1, 2]`, a ```python
- * fence — streams live immediately with zero delay.
+ * still to come. Once the full opener (`{"name":`, `{"function":`,
+ * `<tool_call>`, or a dialect tag like `<function=`) has been seen it stays a
+ * candidate no matter how much follows; anything else — `Hello`, `[1, 2]`, a
+ * ```python fence — streams live immediately with zero delay.
  */
 function looksCallable(s: string): boolean {
   let t = s.replace(/^\s+/, '');
@@ -547,13 +809,18 @@ function looksCallable(s: string): boolean {
     if (t === '') return true;
   }
   if (/^\{\s*"(name|function)"\s*:/.test(t)) return true;
-  // Tag wrappers: the literal opener (complete or still being typed). Other
-  // `<`-led text is prose and streams live.
-  if (t.startsWith('<')) return '<tool_call>'.startsWith(t) || t.startsWith('<tool_call>');
+  // Tag wrappers, complete or still being typed. Other `<`-led text is prose
+  // and streams live — except while it is still a strict prefix of a known
+  // opener (`<fun` on its way to `<function=`).
+  if (t.startsWith('<')) {
+    return CALL_OPENERS.some((opener) => opener.startsWith(t) || t.startsWith(opener));
+  }
   // Otherwise a call must start with `{` and keep matching the opener —
   // whitespace-tolerant after the brace, because pretty-printed calls arrive
   // as `{\n  "name": ...` and must still be held for conversion.
   if (!t.startsWith('{')) return false;
+  // A doubled layer of braces is still a call in progress.
+  if (/^\{\s*\{/.test(t)) return looksCallable(t.replace(/^\{\s*\{/, '{'));
   const rest = t.slice(1).replace(/^\s+/, '');
   if (rest === '' || /^"(name|function)"\s*:/.test(rest)) return true;
   return '"name":'.startsWith(rest) || '"function":'.startsWith(rest);
@@ -584,6 +851,97 @@ function textOf(content: unknown): string {
       return part.type === 'text' && typeof part.text === 'string' ? part.text : '';
     })
     .join('');
+}
+
+/**
+ * Holds a round's text until it proves to be an answer.
+ *
+ * Three modes, one per honest state of knowledge about the text:
+ *
+ *   - `head`: nothing decided yet. Text is buffered while it could still be a
+ *     pseudo-call (`looksCallable`); the moment it cannot be, it all streams.
+ *   - `live`: the answer is underway — but models with tool-call templates
+ *     write calls *after* a sentence ("Sure, let me check.<tool_call>…"), so
+ *     a tagged opener still commits the rest to buffering. Bare JSON gets no
+ *     such second chance: that balance is exactly the JSON fallback's
+ *     whole-message-only rule.
+ *   - `call`: an opener arrived; everything from it is buffered, uncapped,
+ *     for the dialect parse at the end of the round.
+ *
+ * At the end of the round the buffer is converted — JSON shapes first
+ * (whole-message only), then the XML dialects, which may keep a preamble as
+ * text — or flushed as the answer. A native call alongside leftover text wins:
+ * the leftovers are a template's echo of the call, dropped when they parse,
+ * and shown as prose when they don't.
+ */
+class AnswerBuffer {
+  private mode: 'head' | 'live' | 'call' = 'head';
+  private buf = '';
+  /** Live-mode holdback: the tail of the last piece that could grow into an
+   *  opener. Empty in the other modes. */
+  private tail = '';
+
+  /** Feed one text piece; the returned text is what may stream now. */
+  feed(piece: string): { text: string } | null {
+    if (this.mode === 'call') {
+      this.buf += piece;
+      return null;
+    }
+    if (this.mode === 'live') return this.pass(this.tail + piece);
+    this.buf += piece;
+    if (this.buf.length > HERMES_PEEK || !looksCallable(this.buf)) {
+      const buffered = this.buf;
+      this.buf = '';
+      return this.pass(buffered);
+    }
+    return null;
+  }
+
+  /** Live mode: stream text through, committing to buffering at an opener. */
+  private pass(t: string): { text: string } | null {
+    const at = firstOpener(t);
+    if (at >= 0) {
+      this.mode = 'call';
+      this.buf = t.slice(at);
+      const text = t.slice(0, at);
+      return text ? { text } : null;
+    }
+    const keep = openerTail(t);
+    this.tail = keep ? t.slice(t.length - keep) : '';
+    const text = t.slice(0, t.length - keep);
+    return text ? { text } : null;
+  }
+
+  /** The round ended. Events to yield, in order. */
+  end(known: Set<string> | null, native: boolean): ChatToolsEvent[] {
+    const buf = this.buf || this.tail;
+    this.buf = '';
+    this.tail = '';
+    if (!buf) return [];
+    if (native) {
+      // Text alongside a native call is normally answer prose — but some
+      // templates leave the raw call JSON in the content as well. Call-shaped
+      // leftovers are dropped; only real prose streams.
+      return hermesCalls(buf, known) || dialectCalls(buf, known)
+        ? []
+        : [{ type: 'text', text: buf }];
+    }
+    const pseudo = hermesCalls(buf, known);
+    if (pseudo) {
+      return [{ type: 'tool_calls', calls: pseudo.map((c) => ({ id: '', name: c.name, args: c.args })) }];
+    }
+    const dialect = dialectCalls(buf, known);
+    if (dialect) {
+      const out: ChatToolsEvent[] = [];
+      if (dialect.prose) out.push({ type: 'text', text: dialect.prose });
+      out.push({
+        type: 'tool_calls',
+        calls: dialect.calls.map((c) => ({ id: '', name: c.name, args: c.args })),
+      });
+      return out;
+    }
+    return [{ type: 'text', text: buf }];
+  }
 }
 
 /**
@@ -652,15 +1010,20 @@ export function ollamaChatTools(baseUrl: string): ChatToolsFn {
       ? new Set([...tools.map((t) => t.name), ...toolNames()])
       : null;
     const native: { id: string; name: string; args: unknown }[] = [];
-    // Every round buffers text until it proves itself: a pseudo-call only
-    // reveals itself once complete, while a real answer declares itself in
-    // the first chunk. This holds for the closing round too — a model that
-    // calls once more there must not have the raw call leak into the
-    // transcript as the "answer"; the capped loop drops closing-round calls,
-    // and the server then answers directly.
-    let buf = '';
-    let live = false;
+    // Every round buffers text until it proves itself (see AnswerBuffer): a
+    // pseudo-call only reveals itself once complete, while a real answer
+    // declares itself in the first chunk. This holds for the closing round
+    // too — a model that calls once more there must not have the raw call leak
+    // into the transcript as the "answer"; the capped loop drops closing-round
+    // calls, and the server then answers directly.
+    const gate = new AnswerBuffer();
     for await (const chunk of await bound.stream(toLcMessages(turns), { signal })) {
+      // Ollama streams thinking models' scratchpad in `message.thinking`;
+      // LangChain parks it on the chunk as reasoning_content (verified live).
+      const reasoning = chunk.additional_kwargs?.reasoning_content;
+      if (typeof reasoning === 'string' && reasoning) {
+        yield { type: 'reasoning', text: reasoning };
+      }
       for (const tc of chunk.tool_call_chunks ?? []) {
         if (typeof tc.name === 'string' && tc.name) {
           native.push({
@@ -672,36 +1035,11 @@ export function ollamaChatTools(baseUrl: string): ChatToolsFn {
       }
       const piece = typeof chunk.content === 'string' ? chunk.content : textOf(chunk.content);
       if (piece) {
-        if (live) {
-          yield { type: 'text', text: piece };
-        } else {
-          buf += piece;
-          if (buf.length > HERMES_PEEK || !looksCallable(buf)) {
-            live = true;
-            yield { type: 'text', text: buf };
-            buf = '';
-          }
-        }
+        const out = gate.feed(piece);
+        if (out) yield { type: 'text', text: out.text };
       }
     }
-    if (native.length && buf) {
-      // Text alongside a native call is normally answer prose — but some
-      // templates leave the raw call JSON in the content as well. Call-shaped
-      // leftovers are dropped; only real prose streams.
-      if (!hermesCalls(buf, known)) yield { type: 'text', text: buf };
-      buf = '';
-    }
-    if (buf && !native.length) {
-      const pseudo = hermesCalls(buf, known);
-      if (pseudo) {
-        yield {
-          type: 'tool_calls',
-          calls: pseudo.map((c) => ({ id: '', name: c.name, args: c.args })),
-        };
-        buf = '';
-      }
-    }
-    if (buf) yield { type: 'text', text: buf };
+    for (const ev of gate.end(known, native.length > 0)) yield ev;
     if (native.length) {
       yield { type: 'tool_calls', calls: native };
     }

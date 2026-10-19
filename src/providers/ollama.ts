@@ -114,8 +114,12 @@ export const ollama: Provider = {
 
     for await (const event of parseNDJSON(res.body!)) {
       if (event.error) throw new Error(`Ollama: ${event.error}`);
+      // Thinking models put the scratchpad in `message.thinking`; it belongs
+      // in the transcript's thinking pane, not in the answer.
+      const thinking: string = event.message?.thinking ?? '';
+      if (thinking) yield { type: 'reasoning', text: thinking };
       const piece: string = event.message?.content ?? '';
-      if (piece) yield piece;
+      if (piece) yield { type: 'text', text: piece };
       if (event.done) break;
     }
   },

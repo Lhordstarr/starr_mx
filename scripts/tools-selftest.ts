@@ -982,6 +982,192 @@ await check('one unknown name keeps the whole message text', async () => {
   assert.equal((events[0] as { type: string }).type, 'text');
 });
 
+/* ---------------- XML tool-call dialects ---------------- */
+
+console.log('\n=== XML tool-call dialects ===');
+
+// Tags are built from escapes on purpose: a fixture IS the bytes a model
+// writes, and anything that mangles one tag into another would quietly turn a
+// parser test into a test of prose that happens to parse.
+const LT = '\x3c';
+const GT = '\x3e';
+const closeTag = (name: string) => `${LT}/${name}${GT}`;
+const el = (name: string, body = '') => `${LT}${name}${GT}${body}${closeTag(name)}`;
+const glmCall = (...pairs: [string, string][]) =>
+  el('tool_call', 'wikipedia' + pairs.map(([k, v]) => el('arg_key', k) + el('arg_value', v)).join(''));
+const qwenCall = (...pairs: [string, string][]) =>
+  el(
+    'tool_call',
+    `${LT}function=wikipedia${GT}` +
+      pairs.map(([k, v]) => `${LT}parameter=${k}${GT}${v}${closeTag('parameter')}`).join('') +
+      closeTag('function'),
+  );
+const minimaxCall = (...pairs: [string, string][]) =>
+  el(
+    'minimax:tool_call',
+    `${LT}invoke name="wikipedia"${GT}` +
+      pairs.map(([k, v]) => `${LT}parameter name="${k}"${GT}${v}${closeTag('parameter')}`).join('') +
+      closeTag('invoke'),
+  );
+const functionaryCall = (args: string) =>
+  `${LT}function=wikipedia${GT}${args}${closeTag('function')}`;
+
+function callsOf(events: unknown[]): { id: string; name: string; args: unknown }[] {
+  const ev = events.find((e) => (e as { type?: string }).type === 'tool_calls');
+  assert.ok(ev, 'expected a tool_calls event');
+  return (ev as { calls: { id: string; name: string; args: unknown }[] }).calls;
+}
+
+await check('GLM-4.5 arg_key/arg_value calls convert', async () => {
+  const events = await ollamaRound([glmCall(['query', 'Turing'])], ['wikipedia']);
+  const calls = callsOf(events);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'wikipedia');
+  assert.deepEqual(calls[0].args, { query: 'Turing' });
+});
+
+await check('Qwen3-Coder parameter calls convert, values coerced', async () => {
+  const events = await ollamaRound(
+    [qwenCall(['query', 'Turing'], ['limit', '2'])],
+    ['wikipedia'],
+  );
+  const calls = callsOf(events);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'wikipedia');
+  // `2` is a number after parsing: models put JSON scalars inside the tags.
+  assert.deepEqual(calls[0].args, { query: 'Turing', limit: 2 });
+});
+
+await check('MiniMax M2 invoke/parameter calls convert', async () => {
+  const events = await ollamaRound([minimaxCall(['query', 'Turing'])], ['wikipedia']);
+  const calls = callsOf(events);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'wikipedia');
+  assert.deepEqual(calls[0].args, { query: 'Turing' });
+});
+
+await check('Functionary raw-JSON calls convert', async () => {
+  const events = await ollamaRound(
+    [functionaryCall('{"query":"Turing"}')],
+    ['wikipedia'],
+  );
+  const calls = callsOf(events);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, { query: 'Turing' });
+});
+
+await check('prose before a tagged call is kept and streams first', async () => {
+  const events = await ollamaRound(
+    ['Let me check that. ' + glmCall(['query', 'X'])],
+    ['wikipedia'],
+  );
+  assert.equal(events.length, 2);
+  assert.equal((events[0] as { type: string }).type, 'text');
+  assert.equal((events[0] as { text: string }).text.trim(), 'Let me check that.');
+  assert.equal((events[1] as { type: string }).type, 'tool_calls');
+  assert.deepEqual(callsOf(events)[0].args, { query: 'X' });
+});
+
+await check('two calls in one Qwen scope both convert', async () => {
+  const one = `${LT}function=wikipedia${GT}${LT}parameter=query${GT}A${closeTag('parameter')}${closeTag('function')}`;
+  const two = `${LT}function=web_search${GT}${LT}parameter=query${GT}B${closeTag('parameter')}${closeTag('function')}`;
+  const events = await ollamaRound([el('tool_call', one + two)], ['wikipedia', 'web_search']);
+  const calls = callsOf(events);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].name, 'wikipedia');
+  assert.equal(calls[1].name, 'web_search');
+});
+
+await check('a dialect block split mid-tag across chunks still converts', async () => {
+  const raw = 'Sure. ' + glmCall(['query', 'Turing']);
+  const events = await ollamaRound(
+    [raw.slice(0, 24), raw.slice(24, 60), raw.slice(60)],
+    ['wikipedia'],
+  );
+  const text = events
+    .filter((e) => (e as { type: string }).type === 'text')
+    .map((e) => (e as { text: string }).text)
+    .join('');
+  assert.equal(text, 'Sure. ');
+  assert.deepEqual(callsOf(events)[0].args, { query: 'Turing' });
+});
+
+await check('an unknown tool name in a dialect block stays text', async () => {
+  const events = await ollamaRound(
+    [glmCall(['query', 'X']).replace('wikipedia', 'ghost')],
+    ['wikipedia'],
+  );
+  assert.equal(events.length, 1);
+  assert.equal((events[0] as { type: string }).type, 'text');
+});
+
+await check('malformed dialect markup leaves the message as text', async () => {
+  // The value tag never closes: no call can be read, so nothing is invented.
+  const broken = el(
+    'tool_call',
+    'wikipedia' + el('arg_key', 'query') + `${LT}arg_value${GT}Turing`,
+  );
+  const events = await ollamaRound([broken], ['wikipedia']);
+  assert.equal(events.length, 1);
+  assert.equal((events[0] as { type: string }).type, 'text');
+});
+
+await check('a closing-round dialect call still converts (loop drops it)', async () => {
+  // No tool list on the wire: shape-check only, so the loop can drop the call
+  // instead of surfacing raw markup as the answer.
+  const events = await ollamaRound([qwenCall(['query', 'X'])], []);
+  assert.equal(events.length, 1);
+  assert.equal((events[0] as { type: string }).type, 'tool_calls');
+});
+
+await check('double-wrapped JSON calls still convert', async () => {
+  const events = await ollamaRound(
+    ['{{"name":"wikipedia","arguments":{"query":"X"}}}'],
+    ['wikipedia'],
+  );
+  const calls = callsOf(events);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, { query: 'X' });
+});
+
+await check('openAIChatTools converts a dialect call in content', async () => {
+  // The llama.cpp and transformers paths get no tool_calls wire: the call is
+  // only ever text, and the same dialect parser has to catch it.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    sseBody([
+      JSON.stringify({ choices: [{ delta: { content: glmCall(['query', 'X']) } }] }),
+    ])) as typeof fetch;
+  try {
+    const chat = openAIChatTools('http://x/v1', () => ({}), 'Stub');
+    const events: unknown[] = [];
+    for await (const ev of chat({
+      model: 'm',
+      turns: [{ role: 'user', content: 'hi' }],
+      tools: [
+        {
+          name: 'wikipedia',
+          description: 'd',
+          parameters: {
+            type: 'object' as const,
+            properties: { query: { type: 'string' as const } },
+            required: ['query'],
+            additionalProperties: false as const,
+          },
+        },
+      ],
+      signal: noSignal,
+    })) {
+      events.push(ev);
+    }
+    assert.equal(events.length, 1);
+    assert.equal((events[0] as { type: string }).type, 'tool_calls');
+    assert.deepEqual(callsOf(events)[0].args, { query: 'X' });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 console.log('\n=== Ollama adapter (native wire) ===');
 
 await check('NDJSON content and tool calls parse (object and string args)', async () => {

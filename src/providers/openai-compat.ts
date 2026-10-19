@@ -1,3 +1,4 @@
+import { reasoningText } from '../reasoning.js';
 import { ensureOk, parseSSE } from '../sse.js';
 import { getKey, keySource } from '../store.js';
 import { toOpenAIFormat } from '../attachments.js';
@@ -173,8 +174,13 @@ export function openAICompatible(cfg: OpenAICompatConfig): Provider {
       await ensureOk(res, cfg.label);
 
       for await (const payload of parseSSE(res.body!)) {
-        const delta = JSON.parse(payload)?.choices?.[0]?.delta?.content;
-        if (delta) yield delta as string;
+        const delta = JSON.parse(payload)?.choices?.[0]?.delta;
+        if (!delta) continue;
+        const reasoning = reasoningText(delta.reasoning_content ?? delta.reasoning);
+        if (reasoning) yield { type: 'reasoning', text: reasoning };
+        if (typeof delta.content === 'string' && delta.content) {
+          yield { type: 'text', text: delta.content };
+        }
       }
     },
 

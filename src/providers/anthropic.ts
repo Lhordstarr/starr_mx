@@ -78,13 +78,20 @@ export const anthropic: Provider = {
     await ensureOk(res, 'Anthropic');
 
     let inTextBlock = false;
+    // Extended thinking blocks arrive as their own content block (a gateway
+    // may stream them even though this adapter never asks for thinking).
+    let inThinkingBlock = false;
     for await (const payload of parseSSE(res.body!)) {
       const event = JSON.parse(payload);
       if (event.type === 'content_block_start') {
         inTextBlock = event.content_block?.type === 'text';
+        inThinkingBlock = event.content_block?.type === 'thinking';
+      } else if (event.type === 'content_block_delta' && inThinkingBlock) {
+        const piece = event.delta?.thinking;
+        if (typeof piece === 'string' && piece) yield { type: 'reasoning', text: piece };
       } else if (event.type === 'content_block_delta' && inTextBlock) {
         const piece = event.delta?.text;
-        if (piece) yield piece as string;
+        if (piece) yield { type: 'text', text: piece as string };
       } else if (event.type === 'error') {
         throw new Error(`Anthropic: ${event.error?.message ?? 'stream error'}`);
       }
