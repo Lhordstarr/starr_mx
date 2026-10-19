@@ -1709,10 +1709,11 @@ async function copyText(text) {
 
 /* ---------------- Reading a reply aloud ----------------
 
-   Every AI reply carries a Speak button. The text goes through the very same
-   local Kokoro pipeline the studio's voice panel uses — POST /api/infer/tts,
-   the voice and speed that panel defaults to, the assigned model — so this
-   adds no server surface and inherits its honest errors verbatim. */
+   Every AI reply carries a Speak button. The text goes through the same local
+   voice pipeline the studio's voice panel uses — POST /api/infer/tts, the
+   voice and speed that panel defaults to, the assigned model — so this adds no
+   server surface and inherits its honest errors verbatim. Which runner speaks,
+   Kokoro or the transformers one, is decided by the weights and not here. */
 
 /** The reply as speech: markdown noise removed and code skipped. A fenced
  *  block is dropped whole (nobody wants keywords and braces read aloud), links
@@ -1740,8 +1741,155 @@ function speakableText(md) {
 let speakAudio = null;
 let speakButton = null;
 
-/** Stops playback and puts that button back to "Speak". */
-function stopSpeaking() {
+/* ---------------- The card that says what is being read ----------------
+
+   Speech is invisible: the only sign a reply is being read aloud is that it
+   sounds different. This is the sign — it rises above the composer while a
+   voice is being made and while it plays, and sinks back when it is done. It
+   carries only what the run itself reported: which model is speaking, the
+   device the runner landed on, and the real position in the clip. */
+
+/** The card currently up, if any. */
+let speaker = null;
+
+const SPEAKER_ICON = {
+  // Filled shapes: a triangle and two bars read as icons at 16px.
+  pause: { body: '<path d="M8 5h3v14H8zM13 5h3v14h-3z"/>', paint: 'fill="currentColor"' },
+  play: { body: '<path d="M8.5 5.4v13.2L19 12z"/>', paint: 'fill="currentColor"' },
+  // A cross is a stroke, not a filled shape: drawn with fill alone it has no
+  // area at all and the button comes out blank.
+  cancel: {
+    body: '<path d="M6 6l12 12M18 6L6 18"/>',
+    paint: 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"',
+  },
+};
+
+/** Builds the card and puts it up. `title` and `sub` are text, never markup:
+ *  the title is a slice of the model's own reply. */
+function openSpeaker(title, sub) {
+  // A clip replacing a clip must not leave two cards stacked in one slot.
+  for (const old of document.querySelectorAll('.speaker-slot')) old.remove();
+
+  const slot = document.createElement('div');
+  slot.className = 'speaker-slot';
+
+  const card = document.createElement('div');
+  card.className = 'speaker';
+  card.setAttribute('role', 'group');
+  card.setAttribute('aria-label', 'Reading a reply aloud');
+
+  const art = document.createElement('span');
+  art.className = 'speaker__art';
+  art.setAttribute('aria-hidden', 'true');
+  art.innerHTML =
+    '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.4 8.6a4.8 4.8 0 0 1 0 6.8"/><path d="M18.3 6a8.7 8.7 0 0 1 0 12"/></svg>';
+
+  const meta = document.createElement('div');
+  meta.className = 'speaker__meta';
+  const titleEl = document.createElement('p');
+  titleEl.className = 'speaker__title';
+  titleEl.textContent = title;
+  const subEl = document.createElement('p');
+  subEl.className = 'speaker__sub';
+  subEl.textContent = sub;
+  const bar = document.createElement('span');
+  bar.className = 'bar speaker__line';
+  const fill = document.createElement('i');
+  bar.appendChild(fill);
+  meta.append(titleEl, subEl, bar);
+
+  const eq = document.createElement('span');
+  eq.className = 'speaker__eq';
+  eq.setAttribute('aria-hidden', 'true');
+  for (let i = 0; i < 4; i += 1) eq.appendChild(document.createElement('b'));
+
+  const btn = document.createElement('button');
+  btn.type = 'button'; // never a submit: the card lives inside the composer form
+  btn.className = 'speaker__btn';
+  const icon = document.createElement('span');
+  btn.appendChild(icon);
+
+  card.append(art, meta, eq, btn);
+  slot.appendChild(card);
+  els.composer.appendChild(slot);
+
+  // One frame with the offset applied, then clear it, so the transition has a
+  // start value to animate from. The timer is the safety net: a backgrounded
+  // tab may not run rAF at all, and a card stuck at opacity 0 while audio
+  // plays would be worse than one that skipped its entrance.
+  const reveal = () => {
+    if (speaker?.card === card) card.classList.add('is-in');
+  };
+  requestAnimationFrame(reveal);
+  setTimeout(reveal, 120);
+
+  let mode = 'waiting'; // 'waiting' = making the voice, 'clip' = playing one
+  let cancel = null; // what the button does while there is no clip yet
+
+  const setIcon = (name, label) => {
+    const { body, paint } = SPEAKER_ICON[name];
+    icon.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" ${paint}>${body}</svg>`;
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+  };
+  setIcon('cancel', 'Stop making this voice');
+
+  btn.addEventListener('click', () => {
+    if (mode === 'waiting') {
+      cancel?.();
+      return;
+    }
+    if (!speakAudio) return;
+    if (speakAudio.paused) speakAudio.play().catch(() => {});
+    else speakAudio.pause();
+  });
+
+  speaker = {
+    card,
+    /** The button's job before there is a clip: stop making it. */
+    onCancel(fn) {
+      cancel = fn;
+    },
+    setSub(text) {
+      subEl.textContent = text;
+    },
+    /** No figure exists yet, so the line says "working" instead of inventing one. */
+    setWaiting() {
+      bar.classList.add('bar--live');
+      fill.style.width = '';
+    },
+    /** A clip exists: the line becomes its real position, the bars come alive. */
+    setPlaying(playing) {
+      mode = 'clip';
+      bar.classList.remove('bar--live');
+      card.classList.toggle('is-playing', playing);
+      setIcon(playing ? 'pause' : 'play', playing ? 'Pause reading' : 'Resume reading');
+    },
+    setProgress(fraction) {
+      fill.style.width = `${(Math.max(0, Math.min(1, fraction)) * 100).toFixed(1)}%`;
+    },
+  };
+  return speaker;
+}
+
+/** Takes the card down the way it came up. */
+function closeSpeaker() {
+  const up = speaker;
+  speaker = null;
+  if (!up) return;
+  up.card.classList.remove('is-in');
+  up.card.classList.add('is-out');
+  const slot = up.card.parentElement;
+  const remove = () => slot?.remove();
+  up.card.addEventListener('transitionend', remove, { once: true });
+  // transitionend never fires if the tab is backgrounded mid-transition, so
+  // guarantee the removal — the same net the toasts use.
+  setTimeout(remove, 400);
+}
+
+/** Silences the clip that is playing. The card is left alone: playClip takes
+ *  the one that is already up rather than blinking a new one into its place. */
+function stopAudio() {
   if (!speakAudio) return;
   speakAudio.pause();
   speakAudio.removeAttribute('src');
@@ -1753,15 +1901,42 @@ function stopSpeaking() {
   }
 }
 
-function playClip(btn, src) {
-  stopSpeaking();
+/** Stops playback and puts that button back to "Speak". */
+function stopSpeaking() {
+  stopAudio();
+  closeSpeaker();
+}
+
+function playClip(btn, src, info) {
+  stopAudio();
   const audio = new Audio(src);
   speakAudio = audio;
   speakButton = btn;
   btn.textContent = 'Stop';
-  const done = () => { if (speakAudio === audio) stopSpeaking(); };
+  // The card may already be up from the synthesis that produced this clip:
+  // reusing it means no flicker between making the voice and playing it.
+  const card =
+    speaker ?? openSpeaker(info?.title ?? 'Reading the reply aloud', info?.sub ?? '');
+  if (info?.sub) card.setSub(info.sub);
+  card.setPlaying(true);
+  // Real position, not a decorative sweep: the clip's own clock when the
+  // browser knows it, and the runner's reported length until then.
+  const progress = () => {
+    const total =
+      Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : info?.seconds ?? 0;
+    if (total > 0) card.setProgress(audio.currentTime / total);
+  };
+  audio.addEventListener('timeupdate', progress);
+  audio.addEventListener('play', () => card.setPlaying(true));
+  audio.addEventListener('pause', () => card.setPlaying(false));
+  const done = () => {
+    if (speakAudio === audio) stopSpeaking();
+  };
   audio.addEventListener('ended', done);
-  audio.addEventListener('error', () => { done(); notifyError('Could not play the audio.'); });
+  audio.addEventListener('error', () => {
+    done();
+    notifyError('Could not play the audio.');
+  });
   audio.play().catch(() => {
     // A browser may refuse playback with no gesture attached; the clip is
     // already on disk, so the button asks for one (Play) instead of failing.
@@ -1771,11 +1946,12 @@ function playClip(btn, src) {
 }
 
 /** Runs an /api/infer/* stream and resolves its terminal event. */
-async function inferStream(path, payload) {
+async function inferStream(path, payload, signal) {
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   });
   if (!res.ok || !res.body) {
     const err = await res.json().catch(() => ({}));
@@ -1814,11 +1990,12 @@ async function speakReply(btn, text) {
     return;
   }
   if (btn.dataset.clip) {
-    playClip(btn, btn.dataset.clip);
+    playClip(btn, btn.dataset.clip, { title: btn.dataset.clipTitle, sub: btn.dataset.clipSub });
     return;
   }
   btn.disabled = true;
   btn.textContent = 'Saying…';
+  let abort = null;
   try {
     const res = await fetch('/api/runnable?task=tts');
     const data = await res.json().catch(() => ({}));
@@ -1832,19 +2009,39 @@ async function speakReply(btn, text) {
     // The endpoint refuses over 20k; cut at a word edge first so a very long
     // reply is read as far as it goes instead of refused outright.
     const say = text.length > 19_000 ? `${text.slice(0, 19_000).replace(/\S+$/, '')}…` : text;
-    const out = await inferStream('/api/infer/tts', {
-      repo: model.repo, file: model.file, text: say, voice: 'af_heart', speed: 1, device: 'auto',
-    });
+    // Up before the wait, not after it: making the voice is the slow half — a
+    // long reply is seconds of synthesis — and until now the only sign of it
+    // was a disabled button. The title is what is being read, so a card left
+    // over a clip still says which reply it belongs to.
+    const label = model.label ?? model.repo;
+    const title = say.slice(0, 64);
+    const card = openSpeaker(title, `${label} · making the voice…`);
+    card.setWaiting();
+    abort = new AbortController();
+    card.onCancel(() => abort.abort());
+    const out = await inferStream(
+      '/api/infer/tts',
+      { repo: model.repo, file: model.file, text: say, voice: 'af_heart', speed: 1, device: 'auto' },
+      abort.signal,
+    );
     // The runner answers {path, samples, seconds, device}; the serving route
     // wants the bare filename out of that path.
     const name = String(out?.path ?? '').split('/').pop();
     if (!name) throw new Error(out?.message ?? 'The voice runner finished without audio.');
     btn.dataset.clip = `/api/infer/out/${encodeURIComponent(name)}`;
+    // The device is the runner's own report, not the request's wish — the
+    // request says 'auto', and only the run knows where it landed.
+    const sub = out?.device ? `${label} · on ${out.device}` : `${label} · speaking`;
+    btn.dataset.clipTitle = title;
+    btn.dataset.clipSub = sub;
     btn.disabled = false;
-    playClip(btn, btn.dataset.clip);
+    playClip(btn, btn.dataset.clip, { title, sub, seconds: Number(out?.seconds) || 0 });
   } catch (err) {
+    closeSpeaker();
     btn.disabled = false;
     btn.textContent = 'Speak';
+    // The card's button stopping the synthesis is a decision, not a fault.
+    if (abort?.signal.aborted) return;
     notifyError(err instanceof Error ? err.message : String(err));
   }
 }

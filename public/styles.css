@@ -983,6 +983,217 @@ a.icon-btn {
   box-shadow: 0 0 0 3px var(--accent-soft), var(--glass-sheen), var(--glass-shadow);
 }
 
+/* ---------- The speaking card ----------
+
+   Speech is invisible. Without this, the only sign a reply is being read aloud
+   is that it sounds different — nothing says what is being read, by which
+   voice, or how far along it is.
+
+   It floats above the composer, out of the reading column's way, and it rises
+   into place when speech starts and sinks back the way it came when it ends.
+   That motion is the point: a card that pops in reads as a notification, while
+   one that arrives from below reads as something surfacing to speak and
+   leaving when it is done. The equalizer arrives with a slight upward unfold
+   for the same reason — it is what "alive" looks like here.
+
+   The line is the app's own .bar, at the thickness of a line: indeterminate
+   while the voice is being made (there is no figure yet, and the sheen says
+   "working" without inventing one) and the real position in the clip once it
+   plays. */
+
+.speaker-slot {
+  position: absolute;
+  /* Above the composer, like .to-latest — which lives in the same airspace and
+     keeps priority: the card steps over the pill while the pill is up. */
+  bottom: calc(100% + 10px);
+  left: 0;
+  right: 0;
+  padding: 0 10px;
+  display: grid;
+  place-items: center;
+  /* The slot spans the column; only the card itself takes clicks. */
+  pointer-events: none;
+  transition: bottom var(--speed) var(--ease);
+  z-index: 6;
+}
+.composer:has(.to-latest.show) .speaker-slot {
+  bottom: calc(100% + 52px);
+}
+
+.speaker {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: min(100%, 470px);
+  padding: 11px 13px 11px 11px;
+  border-radius: var(--radius-lg);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  /* Arriving: from below, a touch small, decelerating into place. Leaving: the
+     same move backwards and quicker — a card on its way out should not be as
+     much of an event as one arriving. */
+  opacity: 0;
+  transform: translateY(16px) scale(0.965);
+  transition:
+    opacity 200ms var(--ease),
+    transform 300ms cubic-bezier(0.16, 0.84, 0.28, 1);
+}
+.speaker.is-in {
+  opacity: 1;
+  transform: none;
+}
+.speaker.is-out {
+  opacity: 0;
+  transform: translateY(10px) scale(0.985);
+  transition-duration: 170ms, 200ms;
+  pointer-events: none;
+}
+
+.speaker__art {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  color: var(--text-dim);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+}
+
+.speaker__meta {
+  flex: 1;
+  min-width: 0;
+}
+.speaker__title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.speaker__sub {
+  margin-top: 1px;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.speaker__line {
+  --meter-h: 3px;
+  margin-top: 9px;
+}
+/* Leaving: the line empties as the card sinks, so the last thing it says is
+   "finished" rather than "interrupted mid-sentence". */
+.speaker.is-out .speaker__line > i {
+  width: 0 !important;
+  transition: width 170ms var(--ease);
+}
+
+/* Four bars. Paused they hold a staggered waveform, playing they bounce —
+   animation-play-state is the pause, so nothing has to be re-armed. */
+.speaker__eq {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 20px;
+  transform-origin: bottom;
+  transform: scaleY(0.25);
+  transition: transform 320ms cubic-bezier(0.16, 0.84, 0.28, 1) 40ms;
+}
+.speaker.is-in .speaker__eq {
+  transform: none;
+}
+.speaker.is-out .speaker__eq {
+  transform: scaleY(0.2);
+  transition-duration: 140ms;
+}
+.speaker__eq b {
+  width: 3px;
+  height: 22%;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--text) 62%, var(--bg));
+  animation: speaker-bounce 900ms ease-in-out infinite alternate;
+  animation-play-state: paused;
+}
+.speaker__eq b:nth-child(2) {
+  animation-delay: -250ms;
+}
+.speaker__eq b:nth-child(3) {
+  animation-delay: -550ms;
+}
+.speaker__eq b:nth-child(4) {
+  animation-delay: -800ms;
+}
+.speaker.is-playing .speaker__eq b {
+  animation-play-state: running;
+}
+@keyframes speaker-bounce {
+  from {
+    height: 20%;
+  }
+  to {
+    height: 100%;
+  }
+}
+
+.speaker__btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color var(--speed) var(--ease), background var(--speed) var(--ease),
+    transform var(--speed) var(--ease);
+}
+.speaker__btn svg {
+  display: block;
+}
+.speaker__btn:hover {
+  color: var(--text);
+  background: var(--panel-3);
+}
+.speaker__btn:active {
+  transform: scale(0.93);
+}
+.speaker__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* With motion off the bars hold a still waveform rather than a bouncing one,
+     so the card still reads as an equalizer and not as four empty slots. */
+  .speaker__eq b {
+    animation: none;
+  }
+  .speaker__eq b:nth-child(1) {
+    height: 45%;
+  }
+  .speaker__eq b:nth-child(2) {
+    height: 80%;
+  }
+  .speaker__eq b:nth-child(3) {
+    height: 62%;
+  }
+  .speaker__eq b:nth-child(4) {
+    height: 100%;
+  }
+}
+
 /* The composer is a glass surface like the cards. It previously derived its
    fill from color-mix(--panel 92%, transparent), which in dark mode meant 92%
    BLACK over a black page — an invisible fill that left only the 1px border

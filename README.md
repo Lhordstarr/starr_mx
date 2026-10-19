@@ -206,6 +206,16 @@ The same rule as everywhere else applies to the device: it is read off the
 loaded model, never off the request, so a run that did not move cannot be
 reported as one that did.
 
+Speaking a reply is visible while it happens. The Speak button puts a card up
+above the composer — over the reading column, never over the input — from the
+moment the voice is asked for until the clip ends. It rises into place and sinks
+back the way it came, and it carries only what the run reported: the first words
+of the reply being read, the model that is reading it, the device the runner
+landed on, and the real position in the clip. While the voice is still being
+made the line is indeterminate, because there is no length to show yet, and the
+card's button stops the synthesis; once it plays, the same button pauses and
+resumes, and the equalizer holds still while it is paused.
+
 ## Attachments
 
 The paperclip in the composer takes **images** (PNG, JPEG, WebP, GIF) by picker,
@@ -312,6 +322,7 @@ scripts/
   processes-selftest.ts   job registry: stopping, ids, runtime mapping (`npm run test:processes`)
   tools-selftest.ts       registry, validation, loop, adapters, live executors (`npm run test:tools`)
   ui-tools-selftest.mjs   /tool picker + chips in headless chromium (`npm run test:ui-tools`; skips without a browser or a running server)
+  speaker-ui-selftest.mjs the "reading aloud" card, synthesis through playback, in headless chromium (`npm run test:speaker-ui`; skips without a browser, a running server or a voice model)
   runnable-selftest.ts    layout discovery for uncatalogued downloads, runtime reasons (`npm run test:runnable`)
 public/                   chat UI (no build step, no framework)
   theme.css               design tokens, per-provider accents
