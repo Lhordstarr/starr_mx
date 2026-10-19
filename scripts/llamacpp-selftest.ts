@@ -387,11 +387,16 @@ try {
       LLAMACPP_PORT: String(llamaPort),
       LLAMACPP_SERVER: fake,
       LLAMACPP_CTX: '2048',
-      // The idle window the real app gives ten minutes; six seconds proves the
-      // same timer and keeps the suite quick — and it leaves a wide margin for
-      // the hard-kill check at the end, which must not be able to mistake the
-      // idle timer for its own result.
-      LLAMACPP_IDLE_MS: '15000',
+      // The idle window the real app gives ten minutes; a short one proves the same
+      // timer and keeps the suite quick — and it leaves a wide margin for the
+      // hard-kill check at the end, which must not be able to mistake the idle
+      // timer for its own result.
+      //
+      // Twenty seconds rather than fifteen: the window has to outlast the
+      // suite's own slow steps, because everything that runs inside it is
+      // measuring something else and would otherwise report a different fault.
+      // The idle check below polls long enough to still see it.
+      LLAMACPP_IDLE_MS: '20000',
       FAKE_LOG: fakeLog,
       FAKE_DELAY_FILE: delayFile,
     },
@@ -478,17 +483,16 @@ try {
       JSON.stringify(launch),
     );
 
-    const running = (await (await fetch(`${appUrl}/api/providers`)).json()) as {
-      providers: { id: string; hint?: string }[];
-    };
-    report(
-      'the hint says what is loaded once it is up',
-      /Running with Qwen3-4B-Q4_K_M loaded/.test(running.providers.find((p) => p.id === 'llamacpp')?.hint ?? ''),
-      running.providers.find((p) => p.id === 'llamacpp')?.hint,
-    );
-
     // Same model again: the server it already has must be reused, or every
     // message in a conversation would pay the load again.
+    //
+    // Straight after the first chat, with nothing in between. That is not just
+    // tidiness — it is load-bearing. The app shuts the server down once it has
+    // sat unused for LLAMACPP_IDLE_MS, and if this pair of steps falls outside
+    // that window the server is legitimately gone and the next message
+    // correctly starts a fresh one. On a busy machine that made this check fail
+    // for a reason that had nothing to do with reuse, so the assertion now sits
+    // where the idle timer cannot reach it.
     writeFileSync(delayFile, '0');
     const second = await chat(ASK('Qwen3-4B-Q4_K_M'));
     report('the second message answers with the same model', deltas(second) === 'Hello from Qwen3-4B-Q4_K_M', deltas(second));
@@ -496,6 +500,17 @@ try {
       'no restart, and no start notice, for a model that is already loaded',
       starts().length === 1 && !notices(second).some((m) => /Starting llama\.cpp/.test(m)),
       `starts=${starts().length} notices=${notices(second).join(' | ')}`,
+    );
+
+    // After the pair above, while the same model is still loaded, so the hint
+    // still has something to report.
+    const running = (await (await fetch(`${appUrl}/api/providers`)).json()) as {
+      providers: { id: string; hint?: string }[];
+    };
+    report(
+      'the hint says what is loaded once it is up',
+      /Running with Qwen3-4B-Q4_K_M loaded/.test(running.providers.find((p) => p.id === 'llamacpp')?.hint ?? ''),
+      running.providers.find((p) => p.id === 'llamacpp')?.hint,
     );
 
     // A different model: llama-server serves one at a time, so this is a real
@@ -529,7 +544,10 @@ try {
   section('Idle shutdown and coming back');
   {
     let stopped = false;
-    for (let i = 0; i < 60 && !stopped; i += 1) {
+    // Half a second a poll for 50s, against an idle window of 20s. The window was
+    // lengthened for the reasons above, and this has to stay comfortably longer
+    // than it or the check fails on a slow machine for no reason of its own.
+    for (let i = 0; i < 100 && !stopped; i += 1) {
       await new Promise((r) => setTimeout(r, 500));
       const last = starts().at(-1);
       stopped = Boolean(last) && !alive(last!.pid);
