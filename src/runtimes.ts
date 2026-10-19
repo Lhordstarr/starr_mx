@@ -182,6 +182,18 @@ export { runtimesDir } from './paths.js';
  * tree cannot run on the machine's interpreter brings its own, named after it.
  */
 const venvName = (group: RuntimeGroup): string => group.venv ?? 'venv';
+
+/**
+ * What a person would call an environment, by what runs in it.
+ *
+ * "venv-kokoro" is a directory name; the thing a reader recognises is Kokoro.
+ * The shared environment has no single owner, so it is named for what it is.
+ */
+function venvLabel(name: string): string {
+  if (name === 'venv') return 'the shared environment';
+  const labels = RUNTIME_GROUPS.filter((g) => venvName(g) === name).map((g) => g.label);
+  return labels.length ? labels.join(', ') : name;
+}
 const venvDir = (name = 'venv'): string => path.join(runtimesDir(), name);
 
 /** Interpreter inside a venv, by platform layout. */
@@ -1044,13 +1056,39 @@ export interface RuntimeStatus {
    * have Vulkan on by default, so this means "configured", not "using".
    */
   ollamaVulkan: boolean;
-  /** What torch reports about usable devices, when torch is present. */
+  /**
+   * What torch reports in the shared environment, when torch is present there.
+   *
+   * This is one venv's answer, not the whole machine's — see `torches`. It is
+   * kept because the shared environment is where most of the runners live, but
+   * anything that speaks for all of them must read `torches` instead.
+   */
   torch: {
     version: string | null;
     cudaAvailable: boolean;
     deviceCount: number;
     deviceName: string | null;
   };
+  /**
+   * Torch as each environment actually has it, keyed by nothing — one entry per
+   * venv that has a torch at all, in a fixed order with the shared one first.
+   *
+   * A single reading is not enough, and reporting one as though it covered the
+   * machine is how a wrong answer gets out. Kokoro cannot share the main venv
+   * (its dependency tree has no wheels for newer interpreters), so it is built
+   * separately and can hold a different torch build — and its torch is the one
+   * that decides where Kokoro runs. Reading the shared venv and calling it "the
+   * Python runtime" said GPU on a machine where the interpreter that speaks was
+   * on the CPU.
+   */
+  torches: Array<{
+    venv: string;
+    /** What a person would call this environment. */
+    label: string;
+    version: string;
+    cudaAvailable: boolean;
+    deviceName: string | null;
+  }>;
   busy: boolean;
 }
 
@@ -1488,6 +1526,24 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
     if (name !== 'venv' && !side.has(name)) side.set(name, await probeVenv(name));
   }
 
+  // Every environment that has a torch, in a fixed order so the shared one is
+  // always first. One reading per environment, because one reading for the
+  // machine is the mistake this exists to undo.
+  const torches: RuntimeStatus['torches'] = [];
+  for (const [name, probe] of [['venv', main], ...side] as Array<
+    [string, Awaited<ReturnType<typeof probeVenv>>]
+  >) {
+    const t = probe?.torch;
+    if (!t) continue;
+    torches.push({
+      venv: name,
+      label: venvLabel(name),
+      version: t.version,
+      cudaAvailable: t.cuda,
+      deviceName: t.name,
+    });
+  }
+
   // Every group is detected the same way, from the same table the installer
   // writes to. A new group is installable and detectable in the same commit.
   const installed: Record<string, string | null> = {};
@@ -1526,6 +1582,7 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
       deviceCount: main?.torch?.count ?? 0,
       deviceName: main?.torch?.name ?? null,
     },
+    torches,
     busy,
   };
 }
@@ -2466,7 +2523,33 @@ export async function installRuntimes({
       else if (device === 'amd') deviceNote = 'ROCm wheels (AMD)';
       else deviceNote = presence.vendor ? `${presence.vendor} wheels (auto-detected)` : 'CPU wheels (no GPU found)';
       onProgress(`Installing PyTorch into ${where} — ${deviceNote}. This is the big one…`);
-      await runPip(py, [...common, '--index-url', resolved, 'torch'], 'PyTorch');
+
+      // What pip will not do on its own: swap a CPU-only wheel for a GPU one.
+      //
+      // Asked for `torch` with no version, pip answers "Requirement already
+      // satisfied" and stops — the wheel's local tag is invisible to that
+      // check. So a machine that installed these runtimes before its GPU
+      // driver, or with Compute left on CPU, kept a `+cpu` torch forever: no
+      // torch.cuda in the venv to move anything to, and reinstalling changed
+      // nothing. That is the whole reason "it says GPU but runs on the CPU"
+      // could survive a reinstall.
+      //
+      // `--upgrade` lets the index win, and it is only asked for when the
+      // wheels actually disagree — a venv that already matches is left alone
+      // rather than re-downloading a gigabyte to arrive at the same build.
+      const existing = await probeVenv(name);
+      const cpuOnlyTorch = Boolean(existing?.torch) && existing?.torch?.cuda === false;
+      const cpuWheelOnGpuIndex = resolved !== TORCH_INDEX.cpu && cpuOnlyTorch;
+      if (cpuWheelOnGpuIndex) {
+        onProgress(
+          `This environment has ${existing?.torch?.version} — a CPU-only build. Replacing it with the GPU build…`,
+        );
+      }
+      await runPip(
+        py,
+        [...common, ...(cpuWheelOnGpuIndex ? ['--upgrade'] : []), '--index-url', resolved, 'torch'],
+        'PyTorch',
+      );
       onProgress('PyTorch installed.');
     }
 

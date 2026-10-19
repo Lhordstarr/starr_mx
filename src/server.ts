@@ -1032,7 +1032,7 @@ app.get('/api/backends', async (_req, res) => {
       discoverLocalServers(true).catch(() => []),
     ]);
     const backends = await backendReports({
-      python: { venv: status.venv, torch: status.torch },
+      python: { venv: status.venv, torch: status.torch, torches: status.torches },
       groups: RUNTIME_GROUPS.map((g) => ({ id: g.id, label: g.label })),
       servers: servers.map((s) => ({ id: s.id, label: s.label, baseUrl: s.baseUrl })),
     });

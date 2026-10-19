@@ -17,8 +17,11 @@
  * everywhere, including on the machine running the suite.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+
+import { RUNTIME_GROUPS, installRuntimes, runtimeStatus, venvPython } from '../src/runtimes.ts';
 
 let passed = 0;
 const failures: string[] = [];
@@ -107,6 +110,128 @@ console.log('\nAnd the device it reports must be the one it is on');
       `reported ${reported}, torch says cuda is ${cudaAvailable ? 'available' : 'unavailable'}`,
     );
     report('it also produced audio', existsSync(path.resolve('.runtimes/out/kokoro-selftest.wav')));
+  }
+}
+
+console.log('\nAn environment whose PyTorch is a CPU-only build must be repairable');
+{
+  // The state a machine ends up in when the runtimes are installed before the
+  // GPU driver: Compute defaults to CPU until a usable card is seen, so torch
+  // arrives from the CPU index and `torch.cuda` does not exist in the venv at
+  // all. Reinstalling used to change nothing — pip answers "Requirement already
+  // satisfied" for a wheel it cannot tell apart by version, so the local tag
+  // that says `+cpu` was the one thing pip would never revisit.
+  //
+  // Driven against a real `installRuntimes`, a real probe and a real pip call,
+  // with a stand-in interpreter that reports a CPU-only torch and records what
+  // it was asked to install.
+  const home = mkdtempSync(path.join(tmpdir(), 'starr-tts-'));
+  const root = path.join(home, '.runtimes');
+  const log = path.join(home, 'pip-calls.log');
+
+  const saved = { dir: process.env.RUNTIMES_DIR, py: process.env.RUNTIMES_PYTHON };
+  process.env.RUNTIMES_DIR = root;
+  process.env.RUNTIMES_PYTHON = '';
+  // The app's own layout, asked for rather than guessed, so a change to where
+  // venvs live cannot leave this fixture passing against nothing.
+  const fake = venvPython('venv-kokoro');
+  process.env.RUNTIMES_PYTHON = fake;
+
+  mkdirSync(path.dirname(fake), { recursive: true });
+  writeFileSync(
+    fake,
+    [
+      '#!/bin/bash',
+      'case "$1" in',
+      '  -m)',
+      '    if [ "$2" = "pip" ] && [ "$3" = "--version" ]; then',
+      '      echo "pip 24.0 from /fake/lib (python 3.12)"; exit 0; fi',
+      '    if [ "$2" = "pip" ] && [ "$3" = "install" ]; then',
+      `      echo "$@" >> ${JSON.stringify(log)}`,
+      '      echo "Successfully installed"; exit 0; fi',
+      '    exit 0 ;;',
+      '  -c)',
+      // One line: the probe reads the last line of stdout and parses it, so a
+      // pretty-printed answer is silently a failed probe.
+      '    echo \'{"packages": {"kokoro": true}, "torch": {"version": "2.14.1+cpu", "cuda": false, "count": 0, "name": null, "cuda_version": null}}\'',
+      '    exit 0 ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(fake, 0o755);
+
+  const pipArgs = (): string[] => (existsSync(log) ? readFileSync(log, 'utf8').split('\n') : []);
+  const torchCall = (): string => pipArgs().find((l) => /\btorch\b/.test(l) && /--index-url/.test(l)) ?? '';
+
+  const kokoro = RUNTIME_GROUPS.find((g) => g.id === 'kokoro')!;
+  const lines: string[] = [];
+
+  try {
+    await installRuntimes({
+      groups: [kokoro],
+      // Forced rather than detected, so the GPU index is reached on a machine
+      // with no card — which is what makes this runnable in the suite.
+      device: 'nvidia',
+      onProgress: (l) => lines.push(l),
+      onNeedsPrivilege: () => {},
+    });
+
+    const call = torchCall();
+    report(
+      'installing with Compute on GPU asks pip to upgrade torch',
+      /--upgrade/.test(call),
+      call || '(no torch pip call recorded)',
+    );
+    report(
+      'and it asks the CUDA index for it, not the CPU one',
+      /download\.pytorch\.org\/whl\/cu128/.test(call),
+      call,
+    );
+    report(
+      'it says out loud that a CPU-only build is being replaced',
+      lines.some((l) => /CPU-only build/.test(l) && /Replacing/.test(l)),
+      lines.filter((l) => /CPU-only/.test(l)).join(' | ') || '(nothing said)',
+    );
+
+    // And the status names each environment's torch, rather than reporting one
+    // environment's answer as the machine's.
+    const status = await runtimeStatus(false);
+    const torches = status.torches ?? [];
+    const entry = torches.find((t) => t.venv === 'venv-kokoro');
+    report(
+      'the status reports Kokoro’s own environment separately',
+      entry?.label === 'Kokoro',
+      JSON.stringify(torches),
+    );
+    report(
+      'with the CPU-only build it really has',
+      entry?.cudaAvailable === false && entry?.version === '2.14.1+cpu',
+      JSON.stringify(entry),
+    );
+
+    // The flag must not be unconditional: a CPU install re-downloading a
+    // gigabyte of identical wheels every time is its own bug.
+    writeFileSync(log, '');
+    lines.length = 0;
+    await installRuntimes({
+      groups: [kokoro],
+      device: 'cpu',
+      onProgress: (l) => lines.push(l),
+      onNeedsPrivilege: () => {},
+    });
+    const cpuCall = torchCall();
+    report(
+      'a CPU install does not pass --upgrade',
+      !/--upgrade/.test(cpuCall) && /whl\/cpu/.test(cpuCall),
+      cpuCall || '(no torch pip call recorded)',
+    );
+  } finally {
+    if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+    else process.env.RUNTIMES_DIR = saved.dir;
+    if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+    else process.env.RUNTIMES_PYTHON = saved.py;
   }
 }
 

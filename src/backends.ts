@@ -145,7 +145,12 @@ async function serverBackend(
 
 /** The Python runtime: what torch and ctranslate2 resolved to. */
 async function pythonBackend(
-  status: { venv: boolean; torch: { cudaAvailable: boolean; deviceName: string | null } },
+  status: {
+    venv: boolean;
+    torch: { cudaAvailable: boolean; deviceName: string | null };
+    /** One entry per environment that has a torch, since they can disagree. */
+    torches?: Array<{ label: string; cudaAvailable: boolean; deviceName: string | null }>;
+  },
   groups: Array<{ id: string; label: string }>,
 ): Promise<BackendReport> {
   if (!status.venv) {
@@ -159,33 +164,74 @@ async function pythonBackend(
     };
   }
   const labels = groups.map((g) => g.label).join(', ');
-  if (status.torch.cudaAvailable) {
+  // Named per environment. The main venv and Kokoro's are built separately and
+  // can hold different torch builds, so one reading reported for the machine
+  // says GPU on a screen where the thing that speaks is on the CPU.
+  const torches = status.torches?.length
+    ? status.torches
+    : [
+        {
+          label: 'the Python runtime',
+          cudaAvailable: status.torch.cudaAvailable,
+          deviceName: status.torch.deviceName,
+        },
+      ];
+  const onCpu = torches.filter((t) => !t.cudaAvailable);
+  const onGpu = torches.filter((t) => t.cudaAvailable);
+
+  if (onCpu.length === 0) {
     return {
       id: 'python',
       label: 'Python runtime',
       device: 'gpu',
-      detail: `On the GPU via ${status.torch.deviceName ?? 'torch'}${labels ? ` — runs ${labels}` : ''}`,
+      detail: `On the GPU via ${onGpu[0]?.deviceName ?? 'torch'}${labels ? ` — runs ${labels}` : ''}`,
       gpuFraction: 1,
       controllable: false,
       readonlyReason:
         'Fixed at install time. Reinstall with a different compute choice to change it.',
-      evidence: 'torch reports is_available() is true',
+      evidence: `${torches.map((t) => t.label).join(' and ')} report is_available() is true`,
+    };
+  }
+  if (onGpu.length === 0) {
+    return {
+      id: 'python',
+      label: 'Python runtime',
+      device: 'cpu',
+      detail: `On the CPU${labels ? ` — runs ${labels}` : ''}`,
+      controllable: false,
+      // The actionable half. A CPU-only torch cannot move anything to a card
+      // even when one is fitted and working — the build has no torch.cuda at
+      // all — and pip will not replace it unless it is asked to upgrade, which
+      // is what this app now does on the next install.
+      readonlyReason:
+        'PyTorch here is the CPU-only build. Reinstall with Compute set to GPU to replace it.',
+      evidence: `${torches.map((t) => t.label).join(' and ')} report is_available() is false`,
     };
   }
   return {
     id: 'python',
     label: 'Python runtime',
+    // Conservative on purpose: part of this is on the CPU, so a reader told
+    // "GPU" would go looking for a speed-up that is not there for that part.
     device: 'cpu',
-    detail: `On the CPU${labels ? ` — runs ${labels}` : ''}`,
+    detail: `Split — ${onGpu.map((t) => t.label).join(', ')} on the GPU, ${onCpu
+      .map((t) => t.label)
+      .join(', ')} on the CPU${labels ? ` — runs ${labels}` : ''}`,
     controllable: false,
-    readonlyReason: 'Fixed at install time. Reinstall with a different compute choice to change it.',
-    evidence: 'torch reports is_available() is false',
+    readonlyReason: 'Reinstall the CPU-only environment to move it onto the GPU.',
+    evidence: `${onGpu.map((t) => t.label).join(', ')} report is_available() is true; ${onCpu
+      .map((t) => t.label)
+      .join(', ')} report it is false`,
   };
 }
 
 /** Everything, best-effort: one backend failing must not blank the others. */
 export async function backendReports(opts: {
-  python: { venv: boolean; torch: { cudaAvailable: boolean; deviceName: string | null } };
+  python: {
+    venv: boolean;
+    torch: { cudaAvailable: boolean; deviceName: string | null };
+    torches?: Array<{ label: string; cudaAvailable: boolean; deviceName: string | null }>;
+  };
   groups: Array<{ id: string; label: string }>;
   servers: Array<{ id: string; label: string; baseUrl: string }>;
 }): Promise<BackendReport[]> {

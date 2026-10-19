@@ -1711,11 +1711,22 @@ function renderRuntimeStatus(r) {
     const bits = ['Environment ready'];
     if (r.torch?.version) {
       bits.push(`PyTorch ${r.torch.version}`);
-      bits.push(
-        r.torch.cudaAvailable
-          ? `GPU ready — ${r.torch.deviceName ?? 'CUDA device'}`
-          : 'no GPU detected, running on CPU',
-      );
+      // Named per environment when they disagree. They can: Kokoro cannot share
+      // the main venv, so it has its own torch, and stating one of them for both
+      // was how a CPU-bound Kokoro got a "GPU ready" line above it.
+      const torches = r.torches?.length ? r.torches : [];
+      const onCpu = torches.filter((t) => !t.cudaAvailable);
+      const onGpu = torches.filter((t) => t.cudaAvailable);
+      if (torches.length > 1 && onCpu.length && onGpu.length) {
+        bits.push(
+          `GPU ready for ${onGpu.map((t) => t.label).join(', ')} — ` +
+            `${onCpu.map((t) => `${t.label} is on the CPU-only build`).join(', ')}`,
+        );
+      } else if (onCpu.length) {
+        bits.push('no GPU detected, running on CPU');
+      } else {
+        bits.push(`GPU ready — ${r.torch.deviceName ?? 'CUDA device'}`);
+      }
     }
     row.textContent = bits.join(' · ');
   }
@@ -1814,9 +1825,21 @@ async function loadRuntimes({ force = false } = {}) {
 
     const drv = document.getElementById('rt-driver-state');
     if (drv && data.gpu) {
+      // "CUDA/ROCm is active" is a claim about every runtime on this page, and
+      // only one environment's torch was consulted for it. Kokoro keeps its own
+      // — a CPU-only build there is exactly the case where the card works, the
+      // line says it is active, and speech still runs on the CPU.
+      const ts = data.runtimes?.torches ?? [];
+      const cpuOnly = ts.filter((t) => !t.cudaAvailable);
+      const cudaActive = ts.length ? cpuOnly.length === 0 : Boolean(data.runtimes?.torch?.cudaAvailable);
       drv.textContent = data.gpu.vendor
         ? `Detected ${data.gpu.vendor === 'amd' ? 'AMD' : 'NVIDIA'}: ${data.gpu.detail}` +
-          (data.runtimes?.torch?.cudaAvailable ? ' — CUDA/ROCm is active.' : '')
+          (cudaActive
+            ? ' — CUDA/ROCm is active.'
+            : cpuOnly.length
+              ? ` — but PyTorch for ${cpuOnly.map((t) => t.label).join(' and ')} is the CPU-only ` +
+                'build, so those run on the CPU. Install with Compute set to GPU to replace it.'
+              : '')
         : data.gpu.detail;
     }
 
