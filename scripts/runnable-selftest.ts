@@ -96,6 +96,25 @@ seed(root, 'Acme/tf-llm', {
   'model.safetensors': 'x',
   'config.json': JSON.stringify({ model_type: 'qwen2' }),
 });
+// A CTC speech model. `model_type` is not whisper — the architecture is what
+// matters, and the old whisper-only test is how every wav2vec2/HuBERT/MMS
+// download ended up on disk with no job.
+seed(root, 'Acme/ctc-asr', {
+  'model.safetensors': 'x',
+  'config.json': JSON.stringify({
+    model_type: 'wav2vec2',
+    architectures: ['Wav2Vec2ForCTC'],
+  }),
+  'preprocessor_config.json': '{}',
+});
+// The same encoder family with no CTC head: the ASR pipeline cannot load it.
+seed(root, 'Acme/ctc-lookalike', {
+  'model.safetensors': 'x',
+  'config.json': JSON.stringify({
+    model_type: 'wav2vec2',
+    architectures: ['Wav2Vec2Model'],
+  }),
+});
 // Weights with no config at all: nothing can be verified, nothing is claimed.
 seed(root, 'Acme/bare-weights', { 'model.safetensors': 'x' });
 // A diffusers pipeline tree.
@@ -119,6 +138,8 @@ const repos = [
   'Acme/ct2-not-whisper',
   'Acme/tf-whisper',
   'Acme/tf-llm',
+  'Acme/ctc-asr',
+  'Acme/ctc-lookalike',
   'Acme/bare-weights',
   'Acme/diff-pipe',
   'Acme/clip-thing',
@@ -168,6 +189,20 @@ await check('a transformers Whisper is discovered and anchored on its weights', 
   assert.equal(m.ready, true);
   assert.equal(m.file, 'model.safetensors');
   assert.deepEqual(m.runtimes, { torch: '2.14.1+cpu', transformers: 'installed' });
+});
+
+await check('a CTC speech model is discovered for stt, not only Whisper', async () => {
+  const stt = byRepo(await runnableModels('stt', deps(ALL)));
+  const m = stt.get('Acme/ctc-asr');
+  assert.ok(m, 'wav2vec2/HuBERT/MMS repo listed');
+  assert.equal(m.ready, true);
+  assert.equal(m.file, 'model.safetensors');
+  assert.equal(m.driver, 'transformers');
+});
+
+await check('an encoder with no CTC head is not claimed as speech-to-text', async () => {
+  const stt = byRepo(await runnableModels('stt', deps(ALL)));
+  assert.equal(stt.has('Acme/ctc-lookalike'), false);
 });
 
 await check('a same-shaped LLM (model_type qwen2) is not claimed as speech-to-text', async () => {

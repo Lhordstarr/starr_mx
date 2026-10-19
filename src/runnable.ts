@@ -125,6 +125,39 @@ async function modelTypeOf(dir: string): Promise<string> {
   }
 }
 
+/** `architectures` from a repo's config.json, or [] when absent or unreadable. */
+async function architecturesOf(dir: string): Promise<string[]> {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(dir, 'config.json'), 'utf8')) as {
+      architectures?: unknown;
+    };
+    return Array.isArray(parsed.architectures)
+      ? parsed.architectures.filter((a): a is string => typeof a === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Does this transformers architecture load into the ASR pipeline?
+ *
+ * Three shapes, all of them `automatic-speech-recognition` models: CTC heads —
+ * wav2vec2, HuBERT, WavLM, MMS, UniSpeech, SEW, whose class names all end in
+ * `ForCTC` — Whisper's conditional-generation head, and the seq2seq speech
+ * family (Speech2Text, Moonshine). Anything else is not claimed: a listing is a
+ * promise that running works, and the pipeline would refuse it.
+ */
+function isAsrArchitecture(name: string): boolean {
+  return (
+    /ForCTC$/i.test(name) ||
+    /^Whisper/i.test(name) ||
+    /^Speech2Text/i.test(name) ||
+    /^Moonshine/i.test(name) ||
+    /ForSpeechSeq2Seq$/i.test(name)
+  );
+}
+
 /**
  * What a downloaded repo is, when its files alone can say so.
  *
@@ -173,16 +206,27 @@ async function detectLayout(
         };
       }
     }
-    // Transformers repos declare their architecture. Only Whisper is claimed:
-    // it is the one the bundled runner is exercised against, and guessing past
-    // the config would offer directories that then fail to load.
-    if (files.has('config.json') && (await modelTypeOf(dir)) === 'whisper') {
-      const weight = files.has('model.safetensors')
-        ? 'model.safetensors'
-        : files.has('pytorch_model.bin')
-          ? 'pytorch_model.bin'
-          : null;
-      if (weight) {
+    // Transformers ASR repos declare their architecture in config.json, and the
+    // runner behind this is the generic `automatic-speech-recognition` pipeline
+    // — not a Whisper wrapper — so every architecture that pipeline loads is
+    // claimable here.
+    //
+    // This used to claim `model_type === 'whisper'` and nothing else. A
+    // downloaded wav2vec2, HuBERT or MMS model therefore sat in models/ with no
+    // job, while the Hub had labelled it speech-to-text and this app had a
+    // runner that could have transcribed it.
+    const weight = files.has('model.safetensors')
+      ? 'model.safetensors'
+      : files.has('pytorch_model.bin')
+        ? 'pytorch_model.bin'
+        : null;
+    if (weight && files.has('config.json')) {
+      // Some repos omit `architectures`. Whisper is the one family the config
+      // alone identifies, so `model_type` stays as the fallback rather than the
+      // sole test.
+      const whisper = (await modelTypeOf(dir)) === 'whisper';
+      const architectures = await architecturesOf(dir);
+      if (whisper || architectures.some(isAsrArchitecture)) {
         return {
           format: 'transformers',
           needs: [weight, 'config.json'],

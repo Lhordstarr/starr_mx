@@ -5148,6 +5148,21 @@ function renderLocalDownload(d, resolved) {
       }
     });
     meta.append(warn);
+  } else if (d.jobless) {
+    // A row no picker offers must not wear a runtime's name.
+    //
+    // The label came from the file's extension — `.safetensors` meant
+    // "Transformers" — so the row read "Transformers · no job uses this": one
+    // word saying it will run and another saying it will not. The runtime name
+    // is the half a reader believes. The format chip already says what the file
+    // is, so the state is all this row needs to add.
+    const noJob = document.createElement('span');
+    noJob.className = 'local-meta__state';
+    noJob.textContent = 'no local runner';
+    noJob.title =
+      'On disk and intact, but none of this app’s jobs — speech to text, speech, ' +
+      'image generation — can load it, so no picker offers it. It needs its own tooling.';
+    meta.append(noJob);
   } else if (runtime) {
     const name = document.createElement('span');
     name.className = 'local-meta__runtime';
@@ -5155,18 +5170,7 @@ function renderLocalDownload(d, resolved) {
     name.title = runtime.blurb;
     meta.append(name);
 
-    if (d.jobless) {
-      // No job in the app loads this repo, so runtime states — "not
-      // installed", install buttons — would read as steps toward using it.
-      // They are noise for a row no picker offers; the tag is the truth, and
-      // the runtime label above already says what format it is.
-      const noJob = document.createElement('span');
-      noJob.className = 'local-meta__state';
-      noJob.textContent = 'no job uses this';
-      noJob.title =
-        "None of this app's jobs — speech to text, speech, image generation — loads this model. It is listed because it is on disk; use it with its own tooling.";
-      meta.append(noJob);
-    } else if (runtime.external) {
+    if (runtime.external) {
       // Nothing here installs llama.cpp; saying so is more useful than a button
       // that would do nothing.
       const note = document.createElement('span');

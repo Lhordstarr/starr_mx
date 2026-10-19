@@ -70,7 +70,30 @@ def main() -> int:
             dtype=torch.float16 if use_gpu else torch.float32,
         )
         print(json.dumps({"stage": "transcribing"}), flush=True)
-        out = asr(audio, return_timestamps=True)
+
+        # Timestamps are not portable across ASR architectures.
+        #
+        # `True` is Whisper's segment timestamps, and only Whisper's: a CTC model
+        # — wav2vec2, HuBERT, WavLM, MMS — rejects it outright with "CTC can
+        # either predict character level timestamps, or word level timestamps",
+        # which is a hard failure rather than a missing extra. Those models take
+        # 'word'. Anything else is asked without timestamps; the transcript is
+        # the point, and a model that cannot report them should still transcribe.
+        kind = type(asr.model).__name__
+        try:
+            if kind.endswith("ForCTC"):
+                out = asr(audio, return_timestamps="word")
+            elif "Whisper" in kind:
+                out = asr(audio, return_timestamps=True)
+            else:
+                out = asr(audio)
+        except ValueError as exc:
+            # A CTC tokenizer that cannot do word alignment raises the same class
+            # of error as the one above. Losing the word times is acceptable;
+            # losing the transcription is not.
+            if "timestamp" not in str(exc).lower():
+                raise
+            out = asr(audio)
         print(
             json.dumps(
                 {
