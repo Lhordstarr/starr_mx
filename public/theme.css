@@ -134,6 +134,14 @@
   --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.11);
   --glass-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(0, 0, 0, 0.6);
   --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+  /* The primary nav gets the visionOS treatment: a brighter specular rim and
+     a deeper ambient shadow than a content panel, so the bar reads as a slab
+     floating over the field rather than a strip painted on it. Kept as tokens
+     because the rim has to weaken on black (where 0.95 measures as a hard
+     white line) and the light theme's glass is already nearly opaque. */
+  --glass-nav-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    0 24px 48px -28px rgba(0, 0, 0, 0.9);
+  --glass-blur-nav: blur(40px) saturate(150%) brightness(1.05);
 
   /* Syntax highlighting. Dark variants of the light theme's hues, tuned for
      the near-black code surface — every value clears 4.5:1 against --code-bg,
@@ -218,6 +226,11 @@
     inset 0 0 0 1px rgba(19, 26, 48, 0.06);
   --glass-shadow: 0 1px 2px rgba(19, 26, 48, 0.07), 0 8px 24px rgba(19, 26, 48, 0.08);
   --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+  /* See the dark block's note: the nav carries its own rim/depth pair. The
+     light rim keeps its dark hairline and adds a slightly deeper drop. */
+  --glass-nav-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(19, 26, 48, 0.05), 0 18px 36px -26px rgba(19, 26, 48, 0.32);
+  --glass-blur-nav: blur(16px) saturate(2) brightness(1.01);
 
   --code-bg: #f7f8fb;
   --code-com: #6b7280;
@@ -274,6 +287,9 @@
       inset 0 0 0 1px rgba(19, 26, 48, 0.06);
     --glass-shadow: 0 1px 2px rgba(19, 26, 48, 0.07), 0 8px 24px rgba(19, 26, 48, 0.08);
     --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+    --glass-nav-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      inset 0 0 0 1px rgba(19, 26, 48, 0.05), 0 18px 36px -26px rgba(19, 26, 48, 0.32);
+    --glass-blur-nav: blur(16px) saturate(2) brightness(1.01);
 
     --code-bg: #f7f8fb;
     --code-com: #6b7280;
@@ -331,6 +347,9 @@
     --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.11);
     --glass-shadow: 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(0, 0, 0, 0.6);
     --glass-blur: blur(var(--glass-blur-radius)) saturate(var(--glass-sat));
+    --glass-nav-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42),
+      0 24px 48px -28px rgba(0, 0, 0, 0.9);
+    --glass-blur-nav: blur(40px) saturate(150%) brightness(1.05);
 
     --code-bg: #0a0a0a;
     --code-com: #8a8a8a;

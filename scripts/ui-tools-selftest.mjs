@@ -153,6 +153,23 @@ try {
     ),
   );
 
+  /* The top bar takes the nav glass recipe, not the panel one: a specular
+     inset plus a separate offset shadow beneath. Split on top-level commas
+     so the rgba() argument lists are not mistaken for shadow layers. */
+  const navShadow = String(
+    await evalJs(`getComputedStyle(document.querySelector('.topbar')).boxShadow`),
+  );
+  const navLayers = navShadow
+    .split(/,(?![^(]*\))/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  report(
+    'the top bar carries both a specular rim and an ambient shadow',
+    navLayers.some((l) => l.includes('inset')) &&
+      navLayers.some((l) => !l.includes('inset')),
+    navShadow,
+  );
+
   /* "/tool" opens the picker without being submitted or left behind. */
   await evalJs(`(() => {
     const i = document.getElementById('input');

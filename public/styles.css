@@ -35,6 +35,14 @@ body {
      and 10px made the whole bar 4px taller than its own controls needed. */
   padding: 8px 18px;
   border-bottom: 1px solid var(--glass-border);
+  /* The nav's own glass recipe (theme.css): a brighter specular rim and a
+     deeper ambient drop than a content panel. The bar stays a full-width
+     strip — the sidebar below is flush to the same edge — but the material
+     makes it read as a slab floating above the conversation rather than
+     another panel sewn to it. */
+  box-shadow: var(--glass-nav-shadow);
+  backdrop-filter: var(--glass-blur-nav);
+  -webkit-backdrop-filter: var(--glass-blur-nav);
   /* The bar carries its own stacking level because the drawer sidebar
      (z-index 60) and the model menu (70) both open over it, and the panel
      backdrop (50) has to sit above the bar but below those. `relative` is
