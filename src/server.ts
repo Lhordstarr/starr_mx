@@ -10,7 +10,13 @@ import { fileURLToPath } from 'node:url';
 
 import { acquireStream, rateLimit, releaseStream } from './limits.js';
 import { checkAttachments, contentLength, LIMITS, parseContent } from './attachments.js';
-import { isToolFormatError, isToolsUnsupported, runAgent, withToolGuidance } from './agent.js';
+import {
+  directDateAnswer,
+  isToolFormatError,
+  isToolsUnsupported,
+  runAgent,
+  withToolGuidance,
+} from './agent.js';
 import { ThinkingSplitter } from './reasoning.js';
 import { enabledTools, listTools, resolveToolSelection, setToolEnabled } from './tools.js';
 import type { Tool } from './tools.js';
@@ -2059,6 +2065,18 @@ app.post('/api/chat', async (req, res) => {
     if (content) send('delta', { text: content });
     send('done', {});
   };
+
+  // A bare date question is answered from the clock, before any model is
+  // prepared: tiny models ignore the date in their system prompt, and some
+  // call a tool for it, so generation can only make this answer worse.
+  const direct = directDateAnswer(messages);
+  if (direct) {
+    emitText(direct);
+    finishStream();
+    res.end();
+    releaseStream();
+    return;
+  }
 
   // A local backend may need bringing up before it can answer at all — llama.cpp
   // serves one model, so a request naming a different one starts a server with

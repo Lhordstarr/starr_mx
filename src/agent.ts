@@ -102,6 +102,46 @@ export function currentDateLine(
   return `Today is ${date} (${zone}).`;
 }
 
+/**
+ * True for a message that only asks for today's date.
+ *
+ * Kept deliberately narrow: the whole message must be the question, plus
+ * optional politeness and a trailing "with wikipedia"-style clause. A real
+ * question that merely mentions a date ("what was the date of the treaty?",
+ * "what's today's date in Tokyo?") is left to the model. The chat route uses
+ * this to answer before a model is prepared: tiny models ignore the date in
+ * their system prompt, and some call Wikipedia for it instead.
+ */
+export function isDateQuestion(text: string): boolean {
+  let t = text.trim().toLowerCase();
+  // Strip punctuation both before and after the trailing clause: "date?
+  // with wikipedia" must end as "date", not "date?".
+  const strip = () => {
+    t = t.replace(/[!?.,;:]+$/g, '').trim();
+  };
+  strip();
+  t = t.replace(/\s+(?:with|using|via)\s+.*$/i, '');
+  strip();
+  t = t.replace(/\s+(?:please|pls|thanks|thank you)$/i, '');
+  strip();
+  return /^(?:(?:tell me|do you know) )?(?:what(?:['’]s|s| is) (?:today['’]?s? date|the date(?: today)?|the current date(?: today)?|today)|what (?:day|date) is (?:it|today)|today['’]?s date|current date)$/.test(
+    t,
+  );
+}
+
+/**
+ * The server's own answer when the last message is a bare date question.
+ *
+ * Only the last message counts, and only when it is a user turn with plain
+ * text: a trailing assistant turn, or a message carrying an image, is a
+ * different request. Returning null leaves the normal model path untouched.
+ */
+export function directDateAnswer(messages: ChatMessage[]): string | null {
+  const last = messages.at(-1);
+  if (!last || last.role !== 'user' || typeof last.content !== 'string') return null;
+  return isDateQuestion(last.content) ? currentDateLine() : null;
+}
+
 /** True for the error a provider raises when the chosen model has no tool
  *  support (Ollama: "… does not support tools"). The chat then degrades to a
  *  plain answer with a notice instead of surfacing the failure. */
@@ -564,9 +604,14 @@ function scanJsonObjects(t: string): string[] | null {
   return out.length ? out : null;
 }
 
-/** One scanned object as a call: exactly `{name|function, arguments}`, with
+/** One scanned object as a call: `{name|function, arguments|parameters}`, with
  *  arguments as an object or a JSON-stringified object, naming a known tool —
- *  or any named tool when `known` is null (the closing round). */
+ *  or any named tool when `known` is null (the closing round).
+ *
+ *  Most templates write `arguments`; Llama 3.1 writes `parameters`. They mean
+ *  the same thing, and a 1B Llama emitted exactly that shape as its final
+ *  answer — where it leaked into the transcript because only `arguments`
+ *  parsed. */
 function asCall(src: string, known: Set<string> | null): { name: string; args: unknown } | null {
   let obj: unknown;
   // Some templates escape a call through another layer of braces, yielding
@@ -581,14 +626,15 @@ function asCall(src: string, known: Set<string> | null): { name: string; args: u
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
   const keys = Object.keys(obj);
-  if (keys.length !== 2 || !keys.includes('arguments')) return null;
-  // Two spellings in the wild: {"name": ..., "arguments": {...}} and
-  // {"function": ..., "arguments": {...}}. Either is fine as long as it names
-  // a known tool — and only a bare object counts, never prose around one.
+  if (keys.length !== 2) return null;
+  // The name side is `name` in most templates and `function` in others; the
+  // args side is `arguments` in most and `parameters` in Llama 3.1. Either
+  // combination is fine as long as it names a known tool — and only a bare
+  // object counts, never prose around one.
   const rec = obj as Record<string, unknown>;
   const name = rec.name ?? rec.function;
-  const rawArgs = rec.arguments;
-  if (typeof name !== 'string') return null;
+  const rawArgs = rec.arguments !== undefined ? rec.arguments : rec.parameters;
+  if (typeof name !== 'string' || rawArgs === undefined) return null;
   if (known && !known.has(name)) return null;
   let parsedArgs: unknown = rawArgs;
   if (typeof parsedArgs === 'string') {

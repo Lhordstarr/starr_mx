@@ -36,6 +36,8 @@ import {
 import type { Tool } from '../src/tools.js';
 import {
   currentDateLine,
+  directDateAnswer,
+  isDateQuestion,
   isToolFormatError,
   isToolsUnsupported,
   normalizeArgs,
@@ -702,6 +704,63 @@ await check('a broken TZ falls back to UTC instead of failing the chat', () => {
   assert.equal(currentDateLine(now, undefined as unknown as string), expected);
 });
 
+await check('a bare date question is recognized, a date topic is not', () => {
+  for (const q of [
+    "what's today's date?",
+    'what’s today’s date?',
+    'What is the date today',
+    'what day is it?',
+    'what date is today?',
+    "today's date",
+    'current date',
+    'whats todays date',
+    "tell me today's date",
+    "what's today's date please",
+    "what's today's date? with wikipedia",
+    "what's today's date with wikipidia",
+  ]) {
+    assert.equal(isDateQuestion(q), true, q);
+  }
+  for (const q of [
+    'what was the date of the treaty?',
+    "what's today's date in Tokyo?",
+    "what's the date format?",
+    "history of today's parent",
+    'what is a date?',
+    "what's today's weather?",
+    'summarize this date',
+  ]) {
+    assert.equal(isDateQuestion(q), false, q);
+  }
+});
+
+await check('only a trailing plain-text user turn takes the clock answer', () => {
+  assert.match(
+    String(directDateAnswer([{ role: 'user', content: "what's today's date?" }])),
+    /^Today is .+\.$/,
+  );
+  // A trailing assistant turn is not a fresh question.
+  assert.equal(
+    directDateAnswer([
+      { role: 'user', content: "what's today's date?" },
+      { role: 'assistant', content: 'Yesterday was Monday.' },
+    ]),
+    null,
+  );
+  // An image turn is a different request; the model must see it.
+  assert.equal(
+    directDateAnswer([
+      { role: 'user', content: [{ type: 'image', data: 'AA==', mimeType: 'image/png' }] },
+    ]),
+    null,
+  );
+  // A timezone qualifier is a real question, not the bare clock answer.
+  assert.equal(
+    directDateAnswer([{ role: 'user', content: "what's today's date in Tokyo?" }]),
+    null,
+  );
+});
+
 await check('tool guidance merges into an existing system turn', () => {
   const msgs: ChatMessage[] = [
     { role: 'system', content: 'Be terse.' },
@@ -846,6 +905,37 @@ await check('bare pseudo-call converts, no text leaks', async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].name, 'wikipedia');
   assert.deepEqual(calls[0].args, { query: 'X' });
+});
+
+await check('Llama 3.1 parameters spelling converts', async () => {
+  // Llama 3.1 writes {"name": ..., "parameters": ...}; a 1B model emitted
+  // this as its final answer, and it leaked as text while only `arguments`
+  // parsed.
+  const events = await ollamaRound(
+    ['{"name":"wikipedia","parameters":{"query":"Today\'s date","sentences":"2"}}'],
+    ['wikipedia'],
+  );
+  assert.equal(events.length, 1);
+  assert.equal((events[0] as { type: string }).type, 'tool_calls');
+  const calls = (events[0] as { calls: { name: string; args: unknown }[] }).calls;
+  assert.equal(calls[0].name, 'wikipedia');
+  assert.deepEqual(calls[0].args, { query: "Today's date", sentences: '2' });
+});
+
+await check('parameters spelling with the function key also converts', async () => {
+  const events = await ollamaRound(
+    ['{"function":"wikipedia","parameters":{"query":"Z"}}'], ['wikipedia']);
+  assert.equal(events.length, 1);
+  const calls = (events[0] as { calls: { name: string; args: unknown }[] }).calls;
+  assert.equal(calls[0].name, 'wikipedia');
+  assert.deepEqual(calls[0].args, { query: 'Z' });
+});
+
+await check('a parameters call in the closing round does not leak', async () => {
+  const events = await ollamaRound(
+    ['{"name":"wikipedia","parameters":{"query":"X"}}'], []);
+  assert.equal(events.length, 1);
+  assert.equal((events[0] as { type: string }).type, 'tool_calls');
 });
 
 await check('a call-shaped closing round converts instead of leaking JSON', async () => {
