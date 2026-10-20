@@ -35,6 +35,7 @@ import {
 } from '../src/tools.js';
 import type { Tool } from '../src/tools.js';
 import {
+  currentDateLine,
   isToolFormatError,
   isToolsUnsupported,
   normalizeArgs,
@@ -586,9 +587,46 @@ await check('a repeated identical call reuses the first result', async () => {
     if (ev.type === 'tool_result') results.push({ ok: ev.ok, detail: ev.detail });
   }
   assert.equal(runs, 2, 'the duplicate did not run the tool again; the new query did');
-  assert.equal(results.length, 3);
+  assert.equal(results.length, 2, 'one transcript line per unique call');
   assert.ok(results.every((r) => r.ok));
-  assert.equal(results[0].detail, results[1].detail, 'the repeat sees the first result');
+  // The repeat still gets its own tool turn: the wire needs a response for
+  // every call id, even when the transcript hides the duplicate line.
+  const repeated = (s.seen[2] as AgentTurn[]).filter((t) => t.role === 'tool');
+  assert.equal(repeated.length, 2);
+  assert.deepEqual(repeated.map((t) => t.output), ['result for cats', 'result for cats']);
+});
+
+await check('a batch of identical calls shows once and answers each id', async () => {
+  let runs = 0;
+  const counted: Tool = {
+    ...stubTool,
+    execute: async (args) => {
+      runs += 1;
+      return `result for ${args.query}`;
+    },
+  };
+  const s = stubChat([
+    {
+      calls: [
+        { name: 'stub_search', args: { query: 'cats' } },
+        { name: 'stub_search', args: { query: 'cats' } },
+        { name: 'stub_search', args: { query: 'cats' } },
+      ],
+    },
+    { text: 'done' },
+  ]);
+  const results: string[] = [];
+  for await (const ev of runAgent({
+    chat: s.chat as never, model: 'm', messages: MSGS, tools: [counted], signal: noSignal,
+  })) {
+    if (ev.type === 'tool_result') results.push(ev.detail);
+  }
+  assert.equal(runs, 1);
+  assert.equal(results.length, 1);
+  // All three ids are answered in the next request.
+  const toolTurns = (s.seen[1] as AgentTurn[]).filter((t) => t.role === 'tool');
+  assert.equal(toolTurns.length, 3);
+  assert.deepEqual(toolTurns.map((t) => t.output), Array(3).fill('result for cats'));
 });
 
 await check('round cap stops a stubborn model', async () => {
@@ -636,6 +674,32 @@ await check('tool guidance names the tools enabled for this request', () => {
   assert.match(String(named[0].content), /never write out a pretend call/);
   const generic = withToolGuidance(msgs, true);
   assert.doesNotMatch(String(generic[0].content), /only these/);
+});
+
+await check('the system note states today, so the model does not look it up', () => {
+  const out = withToolGuidance([{ role: 'user', content: 'hi' }], true, ['wikipedia']);
+  const note = String(out[0].content);
+  assert.match(note, /Today is [A-Z][a-z]+, \d{1,2} [A-Z][a-z]+ \d{4} \([^)]+\)\./);
+  assert.match(note, /do not call a tool to look it up/i);
+  assert.doesNotMatch(note, /today's date, recent events/);
+  // The no-tools fallback can still answer a date question from the same line.
+  const plain = String(withToolGuidance([{ role: 'user', content: 'hi' }], false)[0].content);
+  assert.match(plain, /Today is /);
+  assert.match(plain, /date questions/i);
+});
+
+await check('the date line is timezone-explicit and testable', () => {
+  assert.equal(
+    currentDateLine(new Date('2026-10-20T23:30:00Z'), 'UTC'),
+    'Today is Tuesday, 20 October 2026 (UTC).',
+  );
+});
+
+await check('a broken TZ falls back to UTC instead of failing the chat', () => {
+  const now = new Date('2026-10-20T23:30:00Z');
+  const expected = 'Today is Tuesday, 20 October 2026 (UTC).';
+  assert.equal(currentDateLine(now, 'Not/AZone'), expected);
+  assert.equal(currentDateLine(now, undefined as unknown as string), expected);
 });
 
 await check('tool guidance merges into an existing system turn', () => {

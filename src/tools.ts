@@ -559,7 +559,12 @@ async function wikipediaExecute(
     ),
   );
   const title = Array.isArray(found) && Array.isArray(found[1]) ? String(found[1][0] ?? '') : '';
-  if (!title) return `No Wikipedia article found for "${query}".`;
+  if (!title) {
+    return (
+      `No Wikipedia article found for "${query}". Wikipedia titles are short topic ` +
+      `names (people, places, concepts), not questions; try one of those instead.`
+    );
+  }
   const summary: any = JSON.parse(
     await fetchPublicText(
       `${base}/w/api.php?action=query&prop=extracts&exsentences=${sentences}` +
@@ -630,7 +635,9 @@ const BUILTINS: BuiltinSpec[] = [
     icon: 'book',
     description:
       'Looks up a topic on Wikipedia and returns the lead summary. Best for ' +
-      'stable factual questions: people, places, concepts, history.',
+      'stable facts about people, places, concepts and history. Pass a short ' +
+      'topic name, not a question; this is not a source for today\'s date or ' +
+      'breaking news.',
     schema: z.object({
       query: z.string().max(200).describe('The topic to look up.'),
       sentences: z.number().int().min(1).max(10).describe('Summary sentences (1-10).').optional(),

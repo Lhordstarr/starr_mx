@@ -62,6 +62,46 @@ export type AgentEvent =
 /** Rounds that may call tools, before the forced plain final round. */
 export const MAX_TOOL_ROUNDS = 5;
 
+/**
+ * The date, stated in the system turn.
+ *
+ * Without this the model has no clock. Asked "what's today's date" it did what
+ * the tool guidance seemed to invite and looked it up — on Wikipedia, which
+ * has no such article, so the call completed with nothing useful and the model
+ * then explained the miss. The date is cheap, always correct for this request,
+ * and belongs in context rather than in a search.
+ *
+ * The zone is stated because the server may not be in the user's zone; making
+ * the reference explicit is better than silently presenting a UTC date as
+ * local. Both arguments are injectable so the line can be tested without
+ * depending on the wall clock.
+ */
+export function currentDateLine(
+  now: Date = new Date(),
+  timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
+): string {
+  const format = (zone: string) =>
+    new Intl.DateTimeFormat('en-GB', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: zone,
+    }).format(now);
+  // A bad TZ is a process-wide default, and Intl can resolve it to undefined
+  // (or throw for an explicit unknown zone). Either way the date must still
+  // reach the model; fall back to UTC rather than breaking every request.
+  let zone = typeof timeZone === 'string' && timeZone ? timeZone : 'UTC';
+  let date: string;
+  try {
+    date = format(zone);
+  } catch {
+    zone = 'UTC';
+    date = format(zone);
+  }
+  return `Today is ${date} (${zone}).`;
+}
+
 /** True for the error a provider raises when the chosen model has no tool
  *  support (Ollama: "… does not support tools"). The chat then degrades to a
  *  plain answer with a notice instead of surfacing the failure. */
@@ -96,18 +136,21 @@ export function withToolGuidance(
   names?: string[],
 ): ChatMessage[] {
   const note = available
-    ? `${
+    ? `${currentDateLine()} ${
         names?.length
           ? `Tool calls are available, and only these: ${names.join(', ')}.`
           : 'Tool calls are available.'
       } When the user asks you to use a tool, or asks about ` +
-      "something that needs current information — today's date, recent events, the " +
-      'contents of a page — call the matching tool instead of answering from memory. ' +
+      'something that needs current information — recent events, prices, docs, ' +
+      'or the contents of a page — call the matching tool instead of answering ' +
+      'from memory. The current date stated above is already known: do not call ' +
+      'a tool to look it up. ' +
       'A tool call is a real invocation, not text: never write out a pretend call, ' +
       'describe a search you did not run, or present results you did not receive.'
-    : 'Tools are not available for this request, so nothing can be searched, fetched or ' +
+    : `${currentDateLine()} Tools are not available for this request, so nothing can be searched, fetched or ` +
       'looked up. Answer from your own knowledge, and say plainly when you are not ' +
-      'sure. Never claim or imply that you used a tool, and never invent search or ' +
+      'sure. Remember that the date above is known, so answer date questions from it. ' +
+      'Never claim or imply that you used a tool, and never invent search or ' +
       'page results.';
   const [first, ...rest] = messages;
   if (first?.role === 'system' && typeof first.content === 'string') {
@@ -196,6 +239,11 @@ export async function* runAgent(opts: {
   // result instead of running the tool again: small models loop on the same
   // call, and a repeated search would just re-fetch what round one returned.
   const executed = new Map<string, string>();
+  // The transcript shows one line per unique call. A 1B model often emits the
+  // same lookup five times in a single batch; the wire still needs a result
+  // for every call id, but five identical "Wikipedia — today's date" lines
+  // tell the reader nothing and hide the answer below them.
+  const shown = new Set<string>();
 
   for (let round = 0; round <= maxRounds; round++) {
     if (opts.signal.aborted) return;
@@ -260,7 +308,6 @@ export async function* runAgent(opts: {
       // keys); the transcript summary and the executor both use the cleaned
       // shape, so the side line shows the call that actually ran.
       const args = tool ? normalizeArgs(tool.definition, call.args) : call.args;
-      yield { type: 'tool_call', name: call.name, args: summarizeArgs(args) };
       let output: string;
       let ok = true;
       // A registered tool that wasn't selected for this request is a
@@ -272,6 +319,10 @@ export async function* runAgent(opts: {
         : validateArgs(tool.definition, args);
       const cacheKey = problem ? '' : `${call.name}\u0000${JSON.stringify(args)}`;
       const cached = cacheKey ? executed.get(cacheKey) : undefined;
+      // Failures are never hidden: they were not cached, so a retry is a new
+      // attempt and should be visible.
+      const repeat = cacheKey !== '' && shown.has(cacheKey);
+      if (!repeat) yield { type: 'tool_call', name: call.name, args: summarizeArgs(args) };
       if (problem) {
         output = `Error: ${problem}`;
         ok = false;
@@ -292,12 +343,15 @@ export async function* runAgent(opts: {
       if (output.length > MAX_TOOL_OUTPUT) {
         output = `${output.slice(0, MAX_TOOL_OUTPUT)}\n\n[…truncated…]`;
       }
-      yield {
-        type: 'tool_result',
-        name: call.name,
-        ok,
-        detail: ok ? `${output.length} chars returned` : output.slice(0, 160),
-      };
+      if (!repeat) {
+        yield {
+          type: 'tool_result',
+          name: call.name,
+          ok,
+          detail: ok ? `${output.length} chars returned` : output.slice(0, 160),
+        };
+        if (ok && cacheKey) shown.add(cacheKey);
+      }
       results.push({ id: call.id, output });
     }
 
