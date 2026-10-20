@@ -10,3 +10,4 @@ models/
 .hf-cache/
 *.log
 *.pem
+LocalAI
