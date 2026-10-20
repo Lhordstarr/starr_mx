@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import {
   assertPublicUrl,
   decodeEntities,
+  describeTransportError,
   enabledTools,
   htmlToText,
   langChainTool,
@@ -64,8 +65,10 @@ async function check(name: string, fn: () => void | Promise<void>): Promise<void
 /** A live check that degrades to SKIP on transport trouble, never a false fail.
  *  Only network-level failures skip (DNS, timeouts, resets, bot challenges);
  *  wrong content or HTTP errors still fail, so real bugs can't hide behind
- *  a SKIP. */
-const SKIP_TRANSPORT = /fetch failed|Could not resolve|Timeout|timeout|abort|challenged|ENOTFOUND|EAI_AGAIN|ECONNRESET|socket hang up/i;
+ *  a SKIP. The vocabulary matches what describeTransportError emits
+ *  ("Could not reach host: the connection timed out (ETIMEDOUT).") as well as
+ *  the raw undici message, so a translated failure still skips. */
+const SKIP_TRANSPORT = /fetch failed|timed out|ETIMEDOUT|Could not resolve|Timeout|timeout|abort|challenged|ENOTFOUND|EAI_AGAIN|ECONNRESET|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED|socket hang up/i;
 
 async function checkLive(name: string, fn: () => Promise<void>): Promise<void> {
   try {
@@ -244,6 +247,46 @@ await check('non-http schemes and credentials rejected', async () => {
 await check('public hostnames pass (needs DNS)', async () => {
   const u = await assertPublicUrl('https://example.com/');
   assert.equal(u.hostname, 'example.com');
+});
+
+/* ---------------- transport diagnostics ---------------- */
+
+console.log('\n=== transport diagnostics ===');
+await check('a connection timeout names the host and the reason', () => {
+  const raw = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('connect ETIMEDOUT 185.15.59.224:443'), {
+      code: 'ETIMEDOUT',
+    }),
+  });
+  assert.equal(
+    describeTransportError('https://en.wikipedia.org/w/api.php?x=1', raw).message,
+    'Could not reach en.wikipedia.org: the connection timed out (ETIMEDOUT).',
+  );
+});
+await check('a missing host is named, without leaking the query', () => {
+  const raw = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+  });
+  const msg = describeTransportError('https://nope.example/api?token=secret', raw).message;
+  assert.match(msg, /nope\.example/);
+  assert.doesNotMatch(msg, /token=secret/);
+});
+await check('a timeout signal is reported as a timeout', () => {
+  const err = new Error('The operation was aborted due to timeout');
+  err.name = 'TimeoutError';
+  assert.equal(
+    describeTransportError('https://a.example/', err).message,
+    'Timed out reaching a.example.',
+  );
+});
+await check('a caller abort is passed through, not relabelled', () => {
+  const err = new Error('The user stopped this');
+  err.name = 'AbortError';
+  assert.equal(describeTransportError('https://a.example/', err), err);
+});
+await check('the process does not race address families', async () => {
+  const net = await import('node:net');
+  assert.equal(net.getDefaultAutoSelectFamily(), false);
 });
 
 /* ---------------- persistence ---------------- */

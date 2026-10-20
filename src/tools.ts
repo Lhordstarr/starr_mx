@@ -268,6 +268,49 @@ async function fetchWithRetry(url: string, init: RequestInit, callerSignal?: Abo
   throw lastErr;
 }
 
+/**
+ * Turn undici's bare `fetch failed` into a sentence that names the host and
+ * the transport problem.
+ *
+ * The cause is hidden in `err.cause.code`; without unwrapping it the tool
+ * result showed only "✗ failed — fetch failed", which tells neither the user
+ * nor the model whether the host was missing, refused, timed out, or had a bad
+ * certificate. Caller cancellations are returned untouched: those are
+ * decisions, and their AbortError carries its own meaning.
+ */
+export function describeTransportError(url: string, err: unknown): Error {
+  if (!(err instanceof Error)) return new Error(String(err));
+  if (err.name === 'AbortError') return err;
+  let host: string;
+  try {
+    host = new URL(url).host;
+  } catch {
+    host = url;
+  }
+  if (err.name === 'TimeoutError') return new Error(`Timed out reaching ${host}.`);
+  const code = (err as { cause?: { code?: string } }).cause?.code;
+  const reasons: Record<string, string> = {
+    ENOTFOUND: 'the host could not be found',
+    EAI_AGAIN: 'the DNS lookup failed temporarily',
+    ECONNREFUSED: 'the connection was refused',
+    ECONNRESET: 'the connection was reset',
+    ETIMEDOUT: 'the connection timed out',
+    ENETUNREACH: 'the network is unreachable',
+    EHOSTUNREACH: 'the host is unreachable',
+    EPIPE: 'the connection closed unexpectedly',
+    CERT_HAS_EXPIRED: 'the site certificate has expired',
+    DEPTH_ZERO_SELF_SIGNED_CERT: 'the site certificate is self-signed',
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'the site certificate could not be verified',
+  };
+  const reason = code ? reasons[code] : undefined;
+  if (reason) return new Error(`Could not reach ${host}: ${reason} (${code}).`);
+  const cause = (err as { cause?: unknown }).cause;
+  if (err.message === 'fetch failed' && cause instanceof Error && cause.message) {
+    return new Error(`Could not reach ${host}: ${cause.message}.`);
+  }
+  return err;
+}
+
 export async function fetchPublicText(urlString: string, opts: FetchTextOptions = {}): Promise<string> {
   const { timeoutMs = 15000, maxBytes = 2_000_000, headers = {}, maxRedirects = 3 } = opts;
   const timeout = AbortSignal.timeout(timeoutMs);
@@ -285,9 +328,9 @@ export async function fetchPublicText(urlString: string, opts: FetchTextOptions 
     try {
       res = await fetchWithRetry(url.toString(), init, opts.signal);
     } catch (err) {
-      // Kept as the caller's error: the retry helper has already exhausted
-      // what a fresh socket can fix.
-      throw err;
+      // The retry helper has already exhausted what a fresh socket can fix.
+      // Name the host and the cause rather than passing on "fetch failed".
+      throw describeTransportError(url.toString(), err);
     }
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
       current = new URL(res.headers.get('location')!, url.toString()).toString();
