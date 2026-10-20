@@ -62,23 +62,6 @@ body {
   flex-shrink: 0;
 }
 
-/* Matches the control height so the logo tile lines up with the chips and
-   icon buttons instead of floating 4px short of them. */
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: var(--bar-h);
-  height: var(--bar-h);
-  border-radius: 9px;
-  background: var(--prov-soft);
-  border: 1px solid var(--prov-border);
-  color: var(--prov-text);
-  font-size: 0.78rem;
-  line-height: 1;
-  transition: background var(--speed) var(--ease), border-color var(--speed) var(--ease),
-    color var(--speed) var(--ease);
-}
-
 /* ---- Wordmark: STARR Matrix, side by side ----
 
    Plain HTML rather than a component: this app ships no framework, and the CSP
