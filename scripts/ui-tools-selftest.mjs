@@ -374,6 +374,87 @@ try {
   );
   await cdp('Emulation.clearDeviceMetricsOverride');
 
+  /* ---- settings: the on-state track is a live gradient ---- */
+
+  await cdp('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-color-scheme', value: 'dark' }],
+  });
+  await cdp('Page.navigate', { url: new URL('settings#tools', APP_URL).href });
+  const gotToggle = await waitFor(
+    `document.readyState === 'complete' && document.querySelectorAll('.tool-toggle').length > 0`,
+  );
+  report('the settings page renders tool switches', gotToggle, 'no .tool-toggle found');
+
+  if (gotToggle) {
+    const readToggle = () =>
+      evalJs(`(() => {
+        const t = document.querySelector('.tool-toggle');
+        const track = getComputedStyle(t, '::before');
+        const knob = getComputedStyle(t, '::after');
+        return {
+          on: t.dataset.on === '1',
+          opacity: track.opacity,
+          animation: track.animationName,
+          play: track.animationPlayState,
+          image: track.backgroundImage,
+          knobLeft: knob.left,
+        };
+      })()`);
+
+    const start = await readToggle();
+    if (!start.on) {
+      await evalJs(`document.querySelector('.tool-toggle').click()`);
+      await waitFor(`document.querySelector('.tool-toggle').dataset.on === '1'`);
+    }
+    const on = await readToggle();
+    report(
+      'a switch that is on streams a gradient through its track',
+      on.opacity === '1' &&
+        on.animation === 'tool-toggle-stream' &&
+        on.play === 'running' &&
+        on.image.includes('linear-gradient'),
+      JSON.stringify(on),
+    );
+    report('the knob sits at the right end when on', on.knobLeft === '20px', on.knobLeft);
+
+    /* The accessibility path keeps the gradient but stops the movement. */
+    await cdp('Emulation.setEmulatedMedia', {
+      features: [
+        { name: 'prefers-color-scheme', value: 'dark' },
+        { name: 'prefers-reduced-motion', value: 'reduce' },
+      ],
+    });
+    await sleep(150);
+    report(
+      'reduced motion freezes the stream instead of dropping the state',
+      await evalJs(
+        `getComputedStyle(document.querySelector('.tool-toggle'), '::before').animationName === 'none'`,
+      ),
+    );
+    await cdp('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-color-scheme', value: 'dark' }],
+    });
+
+    await evalJs(`document.querySelector('.tool-toggle').click()`);
+    await waitFor(`document.querySelector('.tool-toggle').dataset.on === ''`);
+    await waitFor(
+      `getComputedStyle(document.querySelector('.tool-toggle'), '::before').opacity === '0'`,
+    );
+    const off = await readToggle();
+    report(
+      'a switch that is off fades the stream out and pauses it',
+      off.opacity === '0' && off.play === 'paused',
+      JSON.stringify(off),
+    );
+    report('the knob returns to the left when off', off.knobLeft === '2px', off.knobLeft);
+
+    // Leave the setting exactly as it was found.
+    if (start.on) {
+      await evalJs(`document.querySelector('.tool-toggle').click()`);
+      await waitFor(`document.querySelector('.tool-toggle').dataset.on === '1'`);
+    }
+  }
+
   ws.close();
 } finally {
   await cleanup();

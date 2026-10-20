@@ -569,6 +569,44 @@ h1 {
   position: relative;
   cursor: pointer;
   flex-shrink: 0;
+  transition:
+    background var(--speed) var(--ease),
+    border-color var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease);
+}
+
+/* The "on" track is a stream, not a fill: a gradient wider than the pill
+   slides through it, and the pill carries a soft outer glow. The stops are
+   theme-derived greys — light-dark() follows the root's color-scheme — rather
+   than fixed hues, because this build is deliberately achromatic. The stream
+   is paused while off so a page of idle switches is not repainting forever;
+   `opacity` still eases the change in. */
+.tool-toggle::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    light-dark(#eef1f8, #262626),
+    light-dark(#c3ccda, #4f4f4f),
+    light-dark(#8b95a6, #7d7d7d),
+    light-dark(#eef1f8, #262626)
+  );
+  background-size: 200% 100%;
+  opacity: 0;
+  transition: opacity var(--speed) var(--ease);
+  animation: tool-toggle-stream 2.8s linear infinite;
+  animation-play-state: paused;
+}
+
+@keyframes tool-toggle-stream {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
 }
 
 .tool-toggle::after {
@@ -586,11 +624,24 @@ h1 {
 .tool-toggle[data-on="1"] {
   background: var(--prov-soft);
   border-color: var(--prov-border);
+  box-shadow: 0 0 12px 1px color-mix(in srgb, var(--prov-text) 30%, transparent);
+}
+
+.tool-toggle[data-on="1"]::before {
+  opacity: 1;
+  animation-play-state: running;
 }
 
 .tool-toggle[data-on="1"]::after {
   left: 20px;
   background: var(--prov-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-toggle::before {
+    animation: none;
+    background-position: 0% 0;
+  }
 }
 
 .tool-toggle:disabled {
