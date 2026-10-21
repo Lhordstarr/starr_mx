@@ -15,7 +15,9 @@ npm run dev
 Open http://localhost:3000, settings at http://localhost:3000/settings.
 
 Ollama is detected automatically at `http://localhost:11434`. Your installed
-models appear in the dropdown immediately.
+models appear in the dropdown immediately: the list is read from Ollama's own
+manifest store, so it is complete even while the daemon is idle (it starts
+with the first message or pull).
 
 ## Settings page
 
@@ -65,7 +67,8 @@ again when you are done with it.
 Both chat backends are started for you. The llama.cpp server comes up with the
 model you pick; the Ollama daemon comes up the first time a request needs it,
 because listing models deliberately does not start it — opening the settings
-page should not launch anything. Both appear in the same process manager, stop
+page should not launch anything. That list comes from Ollama's manifest store,
+so it is complete before the daemon runs. Both appear in the same process manager, stop
 from the same Stop button, shut down after ten idle minutes
 (`OLLAMA_IDLE_MS`), and are killed when the app exits.
 

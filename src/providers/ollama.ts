@@ -1,6 +1,7 @@
 import { parseNDJSON } from '../sse.js';
 import { toOllamaMessage } from '../attachments.js';
 import { ollamaChatTools } from '../agent.js';
+import { listLocalModels } from '../ollama-models.js';
 import {
   ensureOllamaRunning,
   hookOllamaExit,
@@ -48,18 +49,13 @@ export const ollama: Provider = {
   async listModels() {
     // No `withDaemon` here on purpose. This runs on every page load and every
     // settings refresh, and launching a daemon because someone opened a page is
-    // the kind of surprise this app has spent its life avoiding. An empty list
-    // simply means nothing is running; a pull or a chat will start it.
+    // the kind of surprise this app has spent its life avoiding. When the
+    // daemon is down — it is killed when this app exits — the list comes from
+    // Ollama's manifest store, so a restart still offers the installed models
+    // (and one of them can start the daemon). Most recent first: that model is
+    // the one most likely already resident in memory.
     try {
-      const res = await fetch(`${baseUrl}/api/tags`);
-      if (!res.ok) return [];
-      const data = (await res.json()) as { models?: { name: string; modified_at?: string }[] };
-      // Most recently pulled first: that model is the one most likely already
-      // resident in memory, so it's the fastest to start.
-      return (data.models ?? [])
-        .slice()
-        .sort((a, b) => (b.modified_at ?? '').localeCompare(a.modified_at ?? ''))
-        .map((m) => m.name);
+      return (await listLocalModels()).map((m) => m.name);
     } catch {
       return [];
     }
@@ -106,9 +102,20 @@ export const ollama: Provider = {
       signal,
     });
     if (!res.ok) {
+      // A non-ok response means Ollama answered — 404 is its "model not
+      // found", not a dead daemon. Telling people to start a daemon that is
+      // already serving is how an unpulled model looks like a broken install.
+      const body = await res.text().catch(() => '');
+      let detail = '';
+      try {
+        detail = (JSON.parse(body) as { error?: string }).error ?? '';
+      } catch {
+        /* not JSON — fall through to the status */
+      }
+      if (detail) throw new Error(`Ollama: ${detail}`);
       throw new Error(
-        `Ollama is not answering at ${baseUrl} (HTTP ${res.status}). ` +
-          'Start it with `ollama serve` in a terminal, or reinstall the Ollama runtime.',
+        `Ollama answered HTTP ${res.status} at ${baseUrl}: ` +
+          (body.slice(0, 200) || res.statusText),
       );
     }
 

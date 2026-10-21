@@ -335,6 +335,39 @@ table". A dtype suite (`npm run test:image-dtype`, 4 checks) asks the runner
 for its policy and compares it with the machine facts read independently, so
 a future edit that hard-codes one dtype fails.
 
+### 3.9 Ollama after a restart — the model list lives on disk
+
+The daemon is this app's own child and is killed when the app exits, by
+design. The chat picker got its models from `/api/tags` only, so right after
+a restart it was empty — and picking a model is what starts the daemon, so
+it could never start. Settings showed "not reachable" instead of the models
+that were installed. A real deadlock, and the reason "Ollama is Installed but
+does not work" looked true even with models on disk.
+
+- **The list is on disk either way.** Ollama writes one small manifest per
+  tag under `OLLAMA_MODELS` (default `~/.ollama/models`), in two layouts that
+  coexist: `manifests/<registry>/<namespace>/<name>/<tag>` files, and since
+  Ollama 0.12 `manifests-v2/<registry>/<namespace>/<name>/<tag>` symlinks
+  into `blobs/`. `modelsOnDisk()` walks both, dedupes by name (the v2 entry
+  wins — the daemon reads it too), sums the layer sizes, and reads the config
+  blob for `parameter_size`, `quantization_level` and `family` — the exact
+  three fields `/api/tags` emits (`model_type`, `file_type`,
+  `model_family`). Verified on this box: all 7 models, sizes and details are
+  identical with the daemon up and with it killed.
+- **`listLocalModels()` falls back to that store** only when the daemon call
+  fails, and never when the caller aborted. The chat provider's `listModels()`
+  now goes through the same function, so it stays daemon-free on page load
+  and still shows everything installed.
+- **The 404 wording was lying.** Ollama answers 404 for a model it does not
+  have; the provider turned that into "Ollama is not answering … start the
+  daemon", which made an unpulled model look like a broken install. It now
+  surfaces Ollama's own text: `Ollama: model 'x' not found`.
+- **Verified live:** daemon down → 7 models in `/api/providers` and
+  `/api/ollama/models`; a chat request starts the daemon, and the picker
+  still lists 7. The new checks in `npm run test:ollama-models` use a fake
+  store in both layouts with a dead daemon; against the old code the first
+  one fails with "not reachable".
+
 ---
 
 ## 4. Methods that were tried and did **not** work
@@ -487,10 +520,16 @@ This section exists so nobody spends the same afternoon again.
   is simply no GGUF on disk to load.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
-- **The live box at `/kaggle/working/starr_mx` is behind.** It only has
-  through `7f1a231`; it needs a pull and a restart to get the ONNX and warm
-  engine work, the tools switch, and the image fixes. The Cloudflare URL in
-  the notes is stale.
+- **The live box at `/content/starr_mx` is current.** The Cloudflare URL in
+  the notes is stale; the working one is
+  `https://sites-madonna-imaging-looks.trycloudflare.com`. Verified through
+  it: `/tools` redirects to `/#tools` (the tools-tab removal is there),
+  `torch 2.11.0+cu128` on a Tesla T4, sd-turbo ready, and a 512x512 / 4-step
+  image came back in **13 s** with `device: cuda` and a clean three-apple
+  table — so the guidance fix is on the box too. Ollama is installed there
+  with **0 models pulled**; the daemon auto-starts on the first chat probe
+  and answers `model '…' not found`, which is the honest state behind
+  "Installed but does not work".
 
 ### Questions that are still open, and are the user's to answer
 
@@ -501,9 +540,11 @@ This section exists so nobody spends the same afternoon again.
    distilled model. Verified here with sd-turbo at 512x512, 4 steps. The
    **GPU path is the one branch this laptop cannot test** — worth confirming
    on the box with the card, where fp16 runs.
-3. **Ollama shows "Installed" but does not work.** Needs
-   `command -v ollama`, `ls -la /usr/local/bin/ollama /usr/bin/ollama`, and
-   the `installed` object from `/api/runtimes`.
+3. ~~**Ollama shows "Installed" but does not work.**~~ Answered: on the live
+   box the daemon does start on demand; the box has **no models pulled at
+   all** (`/api/tags` is `[]`), so there was nothing to pick and nothing to
+   run. Pull one from Settings → Models. The restart deadlock that made this
+   worse (an empty picker could not start the daemon) is fixed in §3.9.
 4. **The avatar's "generating" motion** — which animation it should use.
 5. ~~**ONNX on the GPU**~~ — done: the GPU build is installed on an NVIDIA
    machine, the runners ask for CUDA and report what they got, and the

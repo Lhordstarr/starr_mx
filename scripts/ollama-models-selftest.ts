@@ -7,13 +7,17 @@
  */
 import '../src/net.js';
 import assert from 'node:assert/strict';
+import { lutimes, mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   acquirePull,
   deleteLocalModel,
   listLocalModels,
+  modelsOnDisk,
   pullModel,
   releasePull,
   validateModelName,
@@ -180,8 +184,72 @@ await check('one pull at a time', () => {
   releasePull();
 });
 
+console.log('\n=== a dead daemon is not an empty library ===');
+
+// Ollama's own store, laid out the way the daemon leaves it: one model in the
+// older `manifests/` files and one in the 0.12 `manifests-v2/` symlinks.
+const store = await mkdtemp(path.join(tmpdir(), 'starr-ollama-'));
+const blobs = path.join(store, 'blobs');
+await mkdir(blobs, { recursive: true });
+const hex = (c: string) => c.repeat(64);
+const blob = (digest: string, body: unknown) =>
+  writeFile(path.join(blobs, `sha256-${digest}`), JSON.stringify(body));
+const oldLib = path.join(store, 'manifests', 'registry.ollama.ai', 'library');
+await mkdir(path.join(oldLib, 'legacy'), { recursive: true });
+await mkdir(path.join(oldLib, 'fresh'), { recursive: true });
+
+await blob(hex('a'), { model_type: '7.1B', file_type: 'Q4_0', model_family: 'llama' });
+await writeFile(
+  path.join(oldLib, 'legacy', '7b'),
+  JSON.stringify({
+    config: { digest: `sha256:${hex('a')}`, size: 100 },
+    layers: [{ size: 1000 }, { size: 2000 }],
+  }),
+);
+
+await blob(hex('b'), { model_type: '1.5B', file_type: 'Q8_0', model_family: 'qwen2' });
+await blob(hex('c'), {
+  config: { digest: `sha256:${hex('b')}`, size: 50 },
+  layers: [{ size: 5000 }],
+});
+const v2dir = path.join(store, 'manifests-v2', 'ollama.com', 'library', 'fresh');
+await mkdir(v2dir, { recursive: true });
+await symlink(`../../../../blobs/sha256-${hex('c')}`, path.join(v2dir, '1.5b'));
+
+// The same name also sitting in the old layout: it must neither duplicate the
+// entry nor win the size (the daemon reads the v2 manifest).
+await writeFile(
+  path.join(oldLib, 'fresh', '1.5b'),
+  JSON.stringify({ config: { size: 1 }, layers: [{ size: 1 }] }),
+);
+
+const older = new Date('2026-01-01T00:00:00Z');
+const newer = new Date('2026-01-02T00:00:00Z');
+await utimes(path.join(oldLib, 'legacy', '7b'), older, older);
+await lutimes(path.join(v2dir, '1.5b'), newer, newer);
+
+process.env.OLLAMA_MODELS = store;
+process.env.OLLAMA_BASE_URL = 'http://127.0.0.1:1';
+
+await check('installed models list without the daemon', async () => {
+  const models = await listLocalModels(noSignal);
+  assert.deepEqual(
+    models.map((m) => m.name),
+    ['fresh:1.5b', 'legacy:7b'],
+  );
+  assert.equal(models.filter((m) => m.name === 'fresh:1.5b').length, 1);
+  assert.equal(models[0].size, 5050);
+  assert.equal(models[0].parameterSize, '1.5B');
+  assert.equal(models[0].quantization, 'Q8_0');
+  assert.equal(models[0].family, 'qwen2');
+  assert.equal(models[1].size, 3100);
+  assert.equal(models[1].parameterSize, '7.1B');
+  assert.deepEqual(await modelsOnDisk(), models);
+});
+
 await check('dead daemon explains itself', async () => {
-  process.env.OLLAMA_BASE_URL = 'http://127.0.0.1:1';
+  const empty = await mkdtemp(path.join(tmpdir(), 'starr-ollama-empty-'));
+  process.env.OLLAMA_MODELS = empty;
   await assert.rejects(() => listLocalModels(noSignal), /not reachable/);
   await assert.rejects(
     (async () => {
@@ -192,10 +260,14 @@ await check('dead daemon explains itself', async () => {
     /not reachable/,
   );
   process.env.OLLAMA_BASE_URL = stub.base;
+  delete process.env.OLLAMA_MODELS;
+  await rm(empty, { recursive: true, force: true });
 });
 
 await stub.close();
+await rm(store, { recursive: true, force: true });
 delete process.env.OLLAMA_BASE_URL;
+delete process.env.OLLAMA_MODELS;
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) {
