@@ -2547,6 +2547,70 @@ if (browser && serverUp) {
     report('and nothing scrolls sideways inside one', rows.every((r: any) => r.scrollOver <= 0), JSON.stringify(rows));
     report('while the full text stays reachable on hover', rows.every((r: any) => r.titled), JSON.stringify(rows));
 
+    /* What the buttons say. A finished download has nothing to resume, so it
+       offers Delete and no Resume; a paused one offers Resume; a failed one
+       offers Retry. Stubbed in the page rather than through the CDP Fetch
+       domain: the ticker polls /api/transfers on its own, and the stub has to
+       answer every poll. The three states are the server's own words —
+       "paused" is a deliberate stop that kept the partial file, anything else
+       with an error is a failure — so the rows have to read the same. */
+    await run(`(() => {
+      const rows = [
+        { id: 'dl-finished', kind: 'download', repo: 'acme/finished', file: 'a.bin',
+          state: 'done', received: 1024, total: 1024, startedAt: 1 },
+        { id: 'dl-paused', kind: 'download', repo: 'acme/paused', file: 'b.bin',
+          state: 'error', error: 'download paused', received: 512, total: 1024, startedAt: 2 },
+        { id: 'dl-failed', kind: 'download', repo: 'acme/failed', file: 'c.bin',
+          state: 'error', error: 'HTTP 404', received: 0, total: 1024, startedAt: 3 },
+      ];
+      const original = window.fetch;
+      window.__origTransfersFetch = original;
+      window.fetch = (url, opts) =>
+        String(url).includes('/api/transfers')
+          ? Promise.resolve(new Response(JSON.stringify({ active: [], recent: rows }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }))
+          : original(url, opts);
+      document.querySelector('[data-subview="downloads"]').click();
+      return true;
+    })()`);
+    if (!(await until(`document.querySelectorAll('.dl-row').length === 3`, 15000))) {
+      throw new Error('the stubbed transfer rows did not render');
+    }
+    const labelRows = JSON.parse(
+      String(
+        await run(`JSON.stringify([...document.querySelectorAll('.dl-row')].map(r => ({
+          repo: r.querySelector('.dl-row__name')?.textContent ?? '',
+          status: r.querySelector('.dl-row__status')?.textContent ?? '',
+          cls: r.className,
+          buttons: [...r.querySelectorAll('button')].map(b => b.textContent.trim()),
+        })))`),
+      ),
+    );
+    const byRepo = (frag: string) => labelRows.find((r: any) => r.repo.includes(frag));
+    const finishedRow = byRepo('finished');
+    report(
+      'a finished download offers Delete and no Resume',
+      Boolean(finishedRow) &&
+        finishedRow.buttons.includes('Delete') &&
+        !finishedRow.buttons.some((b: string) => /Resume|Retry/.test(b)),
+      JSON.stringify(finishedRow),
+    );
+    const pausedRow = byRepo('paused');
+    report(
+      'a paused download says so and offers Resume',
+      Boolean(pausedRow) && pausedRow.status === 'paused' && pausedRow.buttons.includes('Resume'),
+      JSON.stringify(pausedRow),
+    );
+    const failedRow = byRepo('failed');
+    report(
+      'a failed download offers Retry, not Resume',
+      Boolean(failedRow) && failedRow.buttons.includes('Retry') && !failedRow.buttons.includes('Resume'),
+      JSON.stringify(failedRow),
+    );
+    await run(`window.fetch = window.__origTransfersFetch; true`);
+
     /* The models page: one button for the runtimes the models are waiting on,
        not one per group. Three models waiting on three different runtimes
        used to put three buttons on the page, and all three did the same

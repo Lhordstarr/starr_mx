@@ -222,7 +222,10 @@ Three things on the Models page, all reported at once:
     download that was not running, which included the ones that had
     finished. A paused download (the partial file is kept) says **Resume**; a
     failed one says **Retry**; the server now says which happened
-    ("paused" / "cancelled") so the label can be honest.
+    ("paused" / "cancelled") so the label can be honest. The suite holds the
+    three states against a stubbed `/api/transfers` — finished offers Delete
+    and no Resume, paused says "paused" and offers Resume, failed offers
+    Retry — so the old "Resume for anything not running" rule fails it.
   - **One install button for the runtimes the models are waiting on.** Three
     models waiting on three different runtimes produced three buttons that
     all opened the same page. There is one now, and each group still says
