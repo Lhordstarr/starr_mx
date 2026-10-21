@@ -1473,7 +1473,7 @@ function restoreDevice() {
   }
 }
 
-function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}, ollamaVulkan = false) {
+function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}, ollamaVulkan = false, onnx = []) {
   const blockedBy = new Map(blocked.map((b) => [b.id, b]));
 
   // Reconcile the selection with reality. Anything already installed, blocked
@@ -1538,6 +1538,27 @@ function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}, oll
       // so any package without an `unlocks` list left an empty span in the
       // document — invisible, but markup that means nothing.
       meta.append(state);
+      // Which build of ONNX Runtime this environment has. The CPU wheel and
+      // the GPU wheel import under the same name, so "Installed" cannot say —
+      // and "is my ONNX model on the card?" is exactly the question a person
+      // asks when the answer turns out to be "no".
+      const onnxBuild = (g) => {
+        if (!isIn) return null;
+        if (g.id !== 'onnxruntime' && g.id !== 'kokoro') return null;
+        const env = g.venv ?? 'venv';
+        const entry = (onnx ?? []).find((o) => o.venv === env);
+        if (!entry) return null;
+        if (entry.providers.includes('CUDAExecutionProvider')) return 'GPU build (CUDA)';
+        if (entry.providers.includes('ROCMExecutionProvider')) return 'GPU build (ROCm)';
+        return 'CPU build';
+      };
+      const build = onnxBuild(g);
+      if (build) {
+        const chip = document.createElement('span');
+        chip.className = 'rt-unlocks';
+        chip.textContent = build;
+        meta.append(chip);
+      }
       // Which backend Ollama will actually use. Without it, the only way to tell
       // whether the card is being used is to read the service's own logs, and
       // "Installed" says nothing about where it runs.
@@ -1550,11 +1571,29 @@ function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}, oll
       // A better build is available for this machine (e.g. Vulkan instead of
       // the CPU build). Offer a one-click reinstall that swaps it in.
       if (isIn && upgrades[g.id]) {
+        const kind = upgrades[g.id];
         const up = document.createElement('button');
         up.type = 'button';
         up.className = 'btn-ghost btn-tiny';
-        up.textContent = `Upgrade to ${upgrades[g.id] === 'vulkan' ? 'GPU (Vulkan)' : upgrades[g.id]}`;
+        up.textContent =
+          kind === 'vulkan' ? 'Upgrade to GPU (Vulkan)' : kind === 'gpu' ? 'Upgrade to GPU (CUDA)' : `Upgrade to ${kind}`;
+        up.title =
+          kind === 'gpu'
+            ? 'Reinstall this with the GPU build of ONNX Runtime — the device is set to Auto so the card is used'
+            : 'Reinstall this with the better build';
         up.addEventListener('click', () => {
+          if (kind === 'gpu') {
+            // The GPU build of ONNX Runtime is chosen by the device, so the
+            // device has to be Auto for the reinstall to bring it. Silently
+            // reinstalling the CPU build because the radio happened to say so
+            // would be the same lie in a different place.
+            rtDevice = 'auto';
+            rtDeviceChosen = true;
+            for (const o of document.querySelectorAll('.rt-device__opt')) {
+              o.setAttribute('aria-checked', String(o.dataset.device === 'auto'));
+            }
+            applyRovingTabindex();
+          }
           rtPicked = new Set([g.id]);
           updateRuntimeTotal(groups);
           void runRuntimeInstall();
@@ -1940,6 +1979,7 @@ async function loadRuntimes({ force = false } = {}) {
       data.blocked ?? [],
       data.upgrades ?? {},
       r.ollamaVulkan === true,
+      r.onnx ?? [],
     );
     // renderRuntimeGroups already disabled this when nothing is ticked; that
     // decision was being overwritten by the busy check alone, so an empty

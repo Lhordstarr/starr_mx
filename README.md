@@ -181,6 +181,36 @@ Upstream publishes no GPU build for Linux, so this one runs on the CPU. The
 Windows archive does have CUDA variants, and the installer picks them up if a
 future build publishes one for Linux.
 
+### ONNX Runtime, and the card
+
+ONNX Runtime is the runtime behind two of the app's local models: the ONNX
+Whisper export for transcription and the ONNX export of Kokoro for speech. It
+ships **two wheels with the same import name** — a CPU one and a GPU one — so
+which one is installed is not a detail pip can decide:
+
+  - **On an NVIDIA machine the GPU build is installed**, and the row on
+    Settings → Runtimes says so: *GPU build (CUDA)*. The wheel is pinned to the
+    CUDA major that the torch build uses (1.26.0, a CUDA 12 build, because
+    that is what `cu128` is), because a CUDA 13 runtime does not run on a
+    CUDA 12 driver.
+  - **The CUDA libraries are not in that wheel.** They are the ones torch
+    already brought in with its own CUDA build, and the runners import torch
+    before ONNX Runtime and then call `preload_dlls()`, so the runtime finds
+    them. Without that the GPU build loads and then fails at the first
+    session, which is a much worse place to find out.
+  - **A GPU that will not start is not a failed run.** The session falls back
+    to the CPU, says so in the log, and the row reports the device it actually
+    landed on.
+  - **A machine without an NVIDIA card gets the CPU build** — about 23 MB
+    rather than 244 MB — and the row says *CPU build*. AMD is not wired: the
+    ROCm build of ONNX Runtime is a separate wheel with its own compatibility
+    story, and the CPU build is the honest answer rather than a promise.
+
+An installation that already has the CPU wheel is offered a one-click
+**Upgrade to GPU (CUDA)** on the same row, which reinstalls the group with the
+device set to Auto. The two builds are never left installed side by side: they
+write the same files, so the one that is not wanted is removed first.
+
 ### Speech, and the runners behind it
 
 Kokoro is not the only text-to-speech model this app can run, and its PyTorch
@@ -193,7 +223,9 @@ checkpoint is not the only way to run Kokoro. There are three runners:
     style table) with the acoustic graph run by ONNX Runtime instead of torch.
     The catalog bundles the q4f16 graph, the `af_heart` voice and the phoneme
     vocabulary, because the graph alone cannot pronounce anything. The Kokoro
-    environment installs the CPU ONNX Runtime wheel, so this is the CPU path.
+    environment installs the **GPU** build of ONNX Runtime on an NVIDIA
+    machine, so the graph runs on the card; without one it is the CPU build,
+    and the row says which is installed.
   - **The transformers `text-to-speech` pipeline** — **VITS** (which is what
     every MMS-TTS checkpoint is, `facebook/mms-tts-eng` among them), SpeechT5,
     Bark and FastSpeech2. It uses the shared Python environment, so **nothing

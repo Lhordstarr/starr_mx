@@ -29,10 +29,44 @@ CHUNK_SECONDS = 30.0
 SAMPLE_RATE = 16000
 
 
-def pick_providers(requested):
-    """Map the app's device vocabulary onto ONNX Runtime providers."""
+def prepare_runtime():
+    """Get ONNX Runtime ready to use a GPU, if there is one.
+
+    Two things have to happen in the right order, and both were wrong the
+    first time:
+
+      * **torch is imported before onnxruntime.** The CUDA libraries are
+        loaded into the process when torch is imported, and a runtime that
+        initialises its providers before those libraries are there cannot
+        find them. The GPU build of ONNX Runtime then loads and fails at the
+        first session instead of failing here, where the reason can be said.
+      * **the libraries are preloaded.** `preload_dlls` looks for the CUDA
+        and cuDNN libraries that came in with torch's own CUDA build, which
+        is where they are on a machine that has torch. Without it the
+        runtime is looking in the system paths, where a pip-installed torch
+        has put nothing.
+
+    Returns the onnxruntime module, imported and ready.
+    """
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        pass
     import onnxruntime as ort
 
+    preload = getattr(ort, "preload_dlls", None)
+    if callable(preload):
+        try:
+            preload()
+        except Exception:
+            # Preloading is an optimisation, not a requirement: the runtime
+            # may still find the libraries by itself.
+            pass
+    return ort
+
+
+def pick_providers(ort, requested):
+    """Map the app's device vocabulary onto ONNX Runtime providers."""
     available = ort.get_available_providers()
     want = (requested or "cpu").lower()
     if want != "cpu":
@@ -41,6 +75,29 @@ def pick_providers(requested):
         if "ROCMExecutionProvider" in available:
             return ["ROCMExecutionProvider", "CPUExecutionProvider"]
     return ["CPUExecutionProvider"]
+
+
+def open_session(ort, model_path, providers, report=None):
+    """Open a session, falling back to the CPU when the GPU cannot start.
+
+    The usual reason the GPU provider fails to start is that it cannot find
+    the CUDA libraries. Transcription still works on the processor, and the
+    report says which one it landed on.
+    """
+    emit = report or (lambda event: print(json.dumps(event), flush=True))
+    try:
+        return ort.InferenceSession(model_path, providers=providers)
+    except Exception as exc:
+        if providers == ["CPUExecutionProvider"]:
+            raise
+        emit(
+            {
+                "stage": "fallback",
+                "from": providers[0],
+                "error": f"{type(exc).__name__}: {exc}"[:400],
+            }
+        )
+        return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
 
 
 def provider_label(providers):
@@ -142,7 +199,6 @@ def main() -> int:
     print(json.dumps({"stage": "loading"}), flush=True)
     try:
         import numpy as np
-        import onnxruntime as ort
         from transformers import WhisperFeatureExtractor, WhisperTokenizer
     except ImportError as exc:
         print(json.dumps({"error": f"missing dependency: {exc.name}"}))
@@ -163,9 +219,10 @@ def main() -> int:
             )
             return 1
 
-        providers = pick_providers(device)
-        enc_sess = ort.InferenceSession(encoder_path, providers=providers)
-        dec_sess = ort.InferenceSession(decoder_path, providers=providers)
+        ort = prepare_runtime()
+        providers = pick_providers(ort, device)
+        enc_sess = open_session(ort, encoder_path, providers)
+        dec_sess = open_session(ort, decoder_path, providers)
         landed = provider_label(enc_sess.get_providers())
         # Read before any model work so the resource row is right even when the
         # tokenizer or the audio later fails.

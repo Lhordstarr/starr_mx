@@ -339,11 +339,13 @@ export const CATALOG: CatalogSection[] = [
         task: 'text-to-speech',
         blurb:
           'The same 82M voice model as the PyTorch checkpoint, exported to ONNX ' +
-          'Runtime. It runs on the CPU without a CUDA build, so it is the ' +
-          'portable option rather than the fastest one; the Speak button and ' +
-          'Studio use it like any other voice. The q4f16 weights, the af_heart ' +
-          'style table and the phoneme vocabulary are one bundle — the graph ' +
-          'alone cannot pronounce anything.',
+          'Runtime. On an NVIDIA machine the ONNX Runtime in the Kokoro ' +
+          'environment is the GPU build, so the graph runs on the card; ' +
+          'without one it is the CPU build, which is the portable option ' +
+          'rather than the fastest one. The Speak button and Studio use it ' +
+          'like any other voice. The q4f16 weights, the af_heart style table ' +
+          'and the phoneme vocabulary are one bundle — the graph alone cannot ' +
+          'pronounce anything.',
         runtime: 'onnxruntime (Kokoro)',
         files: [
           { name: 'onnx/model_q4f16.onnx', label: 'q4f16 weights', bytes: 154586422 },

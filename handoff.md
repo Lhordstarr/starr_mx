@@ -183,7 +183,32 @@ paid for the model load again.
 Measured on this box: Kokoro `.pth` first reply 33.7 s → next reply 4.6 s.
 Kokoro ONNX 21.0 s → 6.1 s. The same pid answers both.
 
-### 3.3 Smaller things, from the recent history
+### 3.3 ONNX on the card — the GPU build of ONNX Runtime
+
+The ONNX models ran on the processor even on a machine with a GPU, because
+ONNX Runtime was installed as its **CPU wheel** and nothing ever asked for the
+other one. The CPU wheel and the GPU wheel import under the same name, so
+"installed" could not tell them apart, and nothing in the app knew which one
+it had.
+
+  - `src/runtimes.ts` — the ONNX Runtime group and the Kokoro group now
+    resolve their packages from the device: the GPU wheel on an NVIDIA
+    machine, the CPU wheel without one. The GPU wheel is pinned to
+    `onnxruntime-gpu==1.26.0`, a **CUDA 12** build, because that is the CUDA
+    the `cu128` torch build uses.
+  - The two builds are never left side by side — they write the same files —
+    so the one that is not wanted is uninstalled first.
+  - `src/runtimes.ts` — the probe now reads the runtime's own execution
+    providers, and the Runtimes page shows *GPU build (CUDA)* or *CPU build*,
+    with a one-click **Upgrade to GPU (CUDA)** when a card is there and the
+    CPU build is installed.
+  - `scripts/py/speak_onnx.py`, `scripts/py/transcribe_onnx.py` — import torch
+    **before** ONNX Runtime and call `preload_dlls()`, because the CUDA
+    libraries are the ones torch brought in and the runtime has to be told
+    where they are. A GPU that will not start falls back to the CPU and says
+    so, rather than failing the run.
+
+### 3.4 Smaller things, from the recent history
 
 - `d228929` — a bare date question is answered from the clock, before the
   model is even prepared, instead of being sent to Wikipedia.
@@ -229,6 +254,34 @@ This section exists so nobody spends the same afternoon again.
 - **Loading a torch checkpoint just to get the phonemiser.** `KPipeline(
   lang_code='a', repo_id='hexgrad/Kokoro-82M', model=False)` gives the front
   end without the weights. First use costs about 4.6 s.
+
+### ONNX on the GPU
+
+- **Installing the latest `onnxruntime-gpu`.** The newest releases (1.27.0 and
+  later) are **CUDA 13** builds; 1.26.0 and earlier are CUDA 12. A CUDA 13
+  runtime does not run on a CUDA 12 driver, and the torch build this app
+  installs is `cu128` — CUDA 12. So the wheel is pinned to `==1.26.0`. Check
+  the boundary before changing it: the PyPI metadata for each release says
+  which CUDA its `nvidia-*` extras want.
+- **Installing the GPU wheel over the CPU one and leaving it there.** They
+  are different distributions that install the same import package, so they
+  overwrite each other's files and a later "Remove" deletes the build that is
+  actually in use. The installer now uninstalls the rival first.
+- **Importing onnxruntime before torch.** The CUDA libraries are loaded into
+  the process when torch is imported. A runtime that initialises its
+  providers before that finds no libraries, loads anyway, and then fails at
+  the first session — a much worse place to find out than at import.
+- **Expecting the wheel to carry CUDA.** It does not (since 1.19). The
+  libraries are the ones torch's own CUDA build brought in, and
+  `onnxruntime.preload_dlls()` is what points the runtime at them. It exists
+  in 1.31 and is the reason the GPU build works with a pip-installed torch.
+- **Offering the ROCm build for AMD.** `onnxruntime-rocm` is a separate wheel
+  with its own compatibility story. It is not wired: an AMD machine gets the
+  CPU build and is told so, which is the honest answer rather than a promise
+  that could not be kept.
+- **Reporting the request instead of the answer.** A runner that was asked
+  for CUDA and got the CPU has to say *cpu*. The provider reported is read
+  off the session (`sess.get_providers()`), never off the request.
 
 ### The warm engine
 
@@ -303,10 +356,10 @@ This section exists so nobody spends the same afternoon again.
    `command -v ollama`, `ls -la /usr/local/bin/ollama /usr/bin/ollama`, and
    the `installed` object from `/api/runtimes`.
 4. **The avatar's "generating" motion** — which animation it should use.
-5. **ONNX on the GPU** — ONNX Runtime is installed as the CPU wheel, so the
-   ONNX voice and the ONNX transcriber run on the CPU even on a CUDA
-   machine. The PyTorch Kokoro remains the GPU path. Wiring
-   `onnxruntime-gpu` is possible and has not been done.
+5. ~~**ONNX on the GPU**~~ — done: the GPU build is installed on an NVIDIA
+   machine, the runners ask for CUDA and report what they got, and the
+   Runtimes page says which build is installed. It still needs verifying on
+   the live box, which is the only machine here with an NVIDIA card.
 
 ---
 
@@ -320,9 +373,9 @@ worth doing:
    ours to guess).
 2. Push the ONNX and warm-engine work to the live box and verify it there,
    including that the live box's Kokoro environment is reinstalled so it has
-   `onnxruntime`.
-3. Decide the ONNX GPU question: keep ONNX on the CPU as the honest
-   portable path, or install `onnxruntime-gpu` when the machine has CUDA.
-4. Whatever comes next, the bar is the same as always: it must work on the
+   `onnxruntime`, and that the ONNX models actually land on the T4 — the
+   Runtimes page says *GPU build (CUDA)* or *CPU build*, and the resource
+   manager's row says which device the run reached.
+3. Whatever comes next, the bar is the same as always: it must work on the
    live box, it must be honest, and it must come with a test that fails
    against the old code.

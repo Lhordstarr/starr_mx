@@ -256,6 +256,44 @@ const TORCH_INDEX: Record<Device, string> = {
   auto: 'https://download.pytorch.org/whl/cpu',
 };
 
+/**
+ * The ONNX Runtime GPU build, pinned to the CUDA major this app's torch uses.
+ *
+ * ONNX Runtime publishes a wheel per CUDA major: 1.26.0 and earlier are CUDA
+ * 12 builds, 1.27.0 and later are CUDA 13. A CUDA 13 runtime does not run on
+ * a CUDA 12 driver, so the wheel has to match the machine — and the torch
+ * index is already the app's answer to "which CUDA is this", because that is
+ * where it installs torch from.
+ *
+ * The CUDA libraries themselves are not in this wheel. They are the ones torch
+ * already brought in with its own CUDA build, and ONNX Runtime is told where
+ * to find them (`preload_dlls`) before it tries to open a session.
+ */
+const ONNX_GPU_CUDA12 = 'onnxruntime-gpu==1.26.0';
+const ONNX_GPU_CUDA13 = 'onnxruntime-gpu';
+
+/** The GPU wheel that matches the torch build this app installs. */
+function onnxGpuPackage(): string {
+  return TORCH_INDEX.nvidia.includes('cu13') ? ONNX_GPU_CUDA13 : ONNX_GPU_CUDA12;
+}
+
+/**
+ * Does this machine want the GPU build of ONNX Runtime?
+ *
+ * NVIDIA only, for now. The ROCm build of ONNX Runtime is a separate wheel
+ * with its own compatibility story, and offering it without being able to
+ * stand behind it would be the same promise this app refuses to make
+ * anywhere else — so an AMD machine gets the CPU build and is told so.
+ */
+function wantsOnnxGpu(device: Device, presence: GpuPresence): boolean {
+  if (device === 'nvidia') return true;
+  if (device === 'cpu' || device === 'amd') return false;
+  // Auto: what the machine actually has. `usable` is false when a card is
+  // present but the driver cannot run CUDA on it, and a GPU wheel for that
+  // would be 244 MB of something that cannot be used.
+  return presence.vendor === 'nvidia' && presence.usable !== false;
+}
+
 export interface RuntimeGroup {
   id: string;
   /** Group installed by a vendor installer or a pinned binary rather than pip. */
@@ -267,6 +305,23 @@ export interface RuntimeGroup {
   unlocks: string[];
   /** Fixed pip specs. Never user input. */
   pkgs: string[];
+  /**
+   * What this group installs on *this* machine.
+   *
+   * ONNX Runtime has a CPU wheel and a GPU wheel that install the same import
+   * package, so which one is wanted cannot be written down in the table: it
+   * depends on the device the machine has and on the CUDA build the app
+   * installs for it. When this is set, it answers instead of `pkgs` and
+   * `approxMB`.
+   */
+  deviceInstall?: (device: Device, presence: GpuPresence) => { pkgs: string[]; approxMB: number };
+  /**
+   * Every package this group may have installed, for the Remove button.
+   *
+   * A group whose packages depend on the device has more than one possible
+   * answer, and Remove has to take whichever one is actually there.
+   */
+  allPkgs?: string[];
   /** Needs torch first; torch itself is installed via the device index. */
   needsTorch: boolean;
   /** Approximate download size, so the button can warn before a big fetch. */
@@ -355,14 +410,27 @@ approxMB: 17,
     // speech-to-text; the Kokoro environment installs its own copy because the
     // TTS front end lives there. Neither claims every `.onnx` file: a graph
     // still needs a runner that knows its inputs.
+    //
+    // The build depends on the machine: a GPU wheel on an NVIDIA card, the
+    // CPU wheel without one. The GPU wheel is the one that makes an ONNX
+    // model use the card, and it is the reason this group is not a fixed
+    // list of packages.
     blurb:
-      'Runs the ONNX Whisper export for speech-to-text. The Kokoro environment ' +
-      'installs its own copy for the ONNX voice model, so this row is the ' +
-      'shared-environment package and not a promise that any .onnx file will run.',
+      'Runs the ONNX Whisper export for speech-to-text, and the ONNX export ' +
+      'of Kokoro in the Kokoro environment. On an NVIDIA machine this is the ' +
+      'GPU build, so those models run on the card; without one it is the CPU ' +
+      'build. The row says which one is installed. It is still not a promise ' +
+      'that any .onnx file will run — a graph needs a runner that knows its ' +
+      'inputs.',
     unlocks: ['speech-to-text'],
-    pkgs: ['onnxruntime'],
+    pkgs: [],
+    deviceInstall: (device, presence) =>
+      wantsOnnxGpu(device, presence)
+        ? { pkgs: [onnxGpuPackage()], approxMB: 244 }
+        : { pkgs: ['onnxruntime'], approxMB: 23 },
+    allPkgs: ['onnxruntime', 'onnxruntime-gpu'],
     needsTorch: false,
-    approxMB: 18,
+    approxMB: 23,
   },
   {
     id: 'torch',
@@ -434,15 +502,25 @@ approxMB: 17,
       'environment on Python 3.12 or older — nothing in its dependency tree ' +
       'has wheels for newer interpreters, so it cannot share the main venv. ' +
       'ONNX Runtime is installed alongside it so the ONNX export of Kokoro ' +
-      'can run in the same environment; an environment installed before that ' +
+      'can run in the same environment — the GPU build on an NVIDIA machine, ' +
+      'so the ONNX voice uses the card; an environment installed before that ' +
       'runner existed needs a reinstall to add it.',
     unlocks: ['text-to-speech'],
     // ONNX Runtime is not optional here: the catalog's ONNX Kokoro entry runs
     // its graph through it, and the export lives in this venv because the G2P
     // front end does. The shared ONNX Runtime group is a separate copy for STT.
-    pkgs: ['kokoro', 'soundfile', 'onnxruntime'],
+    //
+    // Which build of it depends on the machine, for the same reason as
+    // everywhere else: the GPU wheel on an NVIDIA card, the CPU wheel without
+    // one.
+    pkgs: ['kokoro', 'soundfile'],
+    deviceInstall: (device, presence) =>
+      wantsOnnxGpu(device, presence)
+        ? { pkgs: ['kokoro', 'soundfile', onnxGpuPackage()], approxMB: 274 }
+        : { pkgs: ['kokoro', 'soundfile', 'onnxruntime'], approxMB: 53 },
+    allPkgs: ['kokoro', 'soundfile', 'onnxruntime', 'onnxruntime-gpu'],
     needsTorch: true,
-    approxMB: 30,
+    approxMB: 53,
     maxPython: '<3.13',
     venv: 'venv-kokoro',
   },
@@ -1048,6 +1126,31 @@ function resolveIndex(device: Device, presence: GpuPresence): string {
   return TORCH_INDEX.cpu;
 }
 
+/**
+ * Is a better ONNX Runtime build available for this machine?
+ *
+ * The CPU wheel is installed and the machine has a card: the GPU build is a
+ * 244 MB download away, and it is the difference between an ONNX model
+ * running on the card and running on the processor.
+ *
+ * Answered per group, because the two copies are in different environments:
+ * the shared one runs the ONNX transcriber and the Kokoro one runs the ONNX
+ * voice. A machine can have one and not the other.
+ */
+export function onnxGpuUpgradeGroups(
+  status: RuntimeStatus,
+  presence: GpuPresence,
+  device: Device,
+): string[] {
+  if (!wantsOnnxGpu(device, presence)) return [];
+  const out: string[] = [];
+  const shared = status.onnx.find((o) => o.venv === 'venv');
+  if (shared && !shared.providers.includes('CUDAExecutionProvider')) out.push('onnxruntime');
+  const kokoro = status.onnx.find((o) => o.venv === 'venv-kokoro');
+  if (kokoro && !kokoro.providers.includes('CUDAExecutionProvider')) out.push('kokoro');
+  return out;
+}
+
 export interface RuntimeStatus {
   venv: boolean;
   python: string | null;
@@ -1094,6 +1197,16 @@ export interface RuntimeStatus {
     cudaAvailable: boolean;
     deviceName: string | null;
   }>;
+  /**
+   * The execution providers each environment's ONNX Runtime actually has.
+   *
+   * The CPU wheel and the GPU wheel import under the same name, so "is it
+   * installed" cannot tell them apart — and which one it is, is the whole
+   * question when someone asks why their ONNX model is still on the CPU.
+   * Read off the runtime itself, per environment, because the Kokoro
+   * environment has its own copy and that is the one the ONNX voice uses.
+   */
+  onnx: Array<{ venv: string; label: string; providers: string[] }>;
   busy: boolean;
 }
 
@@ -1117,12 +1230,21 @@ function buildProbe(): string {
   const names = [...new Set(RUNTIME_GROUPS.map((g) => g.probe))];
   return `
 import json, importlib.util
-out = {"packages": {}, "torch": None}
+out = {"packages": {}, "torch": None, "onnx_providers": []}
 for name in ${JSON.stringify(names)}:
     try:
         out["packages"][name] = True if importlib.util.find_spec(name) else False
     except Exception:
         out["packages"][name] = False
+try:
+    # Which build of ONNX Runtime this is. The CPU wheel and the GPU wheel
+    # import under the same name, so "installed" cannot tell them apart — and
+    # the difference is the whole question when someone asks why their ONNX
+    # model is still on the CPU.
+    import onnxruntime as _ort
+    out["onnx_providers"] = list(_ort.get_available_providers())
+except Exception:
+    pass
 try:
     import torch
     out["torch"] = {
@@ -1446,6 +1568,14 @@ function findCudart(dir: string, depth: number): boolean {
 type VenvProbe = {
   packages: Record<string, boolean>;
   torch: { version: string; cuda: boolean; count: number; name: string | null; cudaVersion?: string | null } | null;
+  /**
+   * The execution providers this environment's ONNX Runtime has.
+   *
+   * Empty when ONNX Runtime is not installed here. `CPUExecutionProvider`
+   * alone means the CPU build; `CUDAExecutionProvider` means the GPU build,
+   * which is what makes an ONNX model use the card.
+   */
+  onnxProviders: string[];
 };
 
 /**
@@ -1479,9 +1609,21 @@ function runVenvProbe(py: string): Promise<VenvProbe> {
     child.on('close', () => {
       clearTimeout(timer);
       try {
-        resolve(JSON.parse(out.trim().split('\n').pop() ?? '{}'));
+        const parsed = JSON.parse(out.trim().split('\n').pop() ?? '{}') as {
+          packages?: Record<string, boolean>;
+          torch?: VenvProbe['torch'];
+          onnx_providers?: string[];
+        };
+        // The probe script is Python and names its fields in snake_case; this
+        // is where they become the camelCase the rest of the app uses. A key
+        // that is not mapped here is a field that silently reads as empty.
+        resolve({
+          packages: parsed.packages ?? {},
+          torch: parsed.torch ?? null,
+          onnxProviders: Array.isArray(parsed.onnx_providers) ? parsed.onnx_providers : [],
+        });
       } catch {
-        resolve({ packages: {}, torch: null });
+        resolve({ packages: {}, torch: null, onnxProviders: [] });
       }
     });
   });
@@ -1549,6 +1691,19 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
     });
   }
 
+  // Which build of ONNX Runtime each environment has, read off the runtime
+  // itself. Two environments can disagree — the shared one runs the ONNX
+  // transcriber and the Kokoro one runs the ONNX voice — and both answers
+  // are wanted, because they are different pieces of work.
+  const onnx: RuntimeStatus['onnx'] = [];
+  for (const [name, probe] of [['venv', main], ...side] as Array<
+    [string, Awaited<ReturnType<typeof probeVenv>>]
+  >) {
+    const providers = probe?.onnxProviders ?? [];
+    if (!providers.length) continue;
+    onnx.push({ venv: name, label: venvLabel(name), providers });
+  }
+
   // Every group is detected the same way, from the same table the installer
   // writes to. A new group is installable and detectable in the same commit.
   const installed: Record<string, string | null> = {};
@@ -1588,6 +1743,7 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
       deviceName: main?.torch?.name ?? null,
     },
     torches,
+    onnx,
     busy,
   };
 }
@@ -2560,9 +2716,34 @@ export async function installRuntimes({
 
     for (const g of list) {
       if (g.id === 'torch') continue;
-      if (!g.pkgs.length) continue;
+      // What this group installs depends on the machine for some groups: the
+      // ONNX Runtime GPU wheel and the CPU wheel are different packages with
+      // the same import name.
+      const plan = g.deviceInstall
+        ? g.deviceInstall(device, presence)
+        : { pkgs: g.pkgs, approxMB: g.approxMB };
+      if (!plan.pkgs.length) continue;
+
+      // The two ONNX Runtime builds install the same import package, so the
+      // one that is not wanted has to go before the other arrives. Left in
+      // place they overwrite each other's files, and a later Remove would
+      // then delete the build that is actually in use.
+      const rival = plan.pkgs.some((p) => p.startsWith('onnxruntime-gpu'))
+        ? 'onnxruntime'
+        : plan.pkgs.includes('onnxruntime')
+          ? 'onnxruntime-gpu'
+          : null;
+      if (rival) {
+        onProgress(`Removing the old ONNX Runtime build (${rival})…`);
+        await runPip(
+          py,
+          ['-m', 'pip', 'uninstall', '-y', '--disable-pip-version-check', '--no-input', rival],
+          g.label,
+        );
+      }
+
       onProgress(`Installing ${g.label} into ${where}…`);
-      await runPip(py, [...common, ...g.pkgs], g.label);
+      await runPip(py, [...common, ...plan.pkgs], g.label);
       onProgress(`${g.label} installed.`);
     }
   }
@@ -3245,7 +3426,10 @@ export async function removeRuntimeGroup(
     onProgress('whisper.cpp removed. Its models are left in place for other runtimes.');
     return { removed: id, label: group.label, reason: null };
   }
-  if (!group.pkgs.length) {
+  // A group whose packages depend on the device may have installed either
+  // build, so Remove has to be able to take both.
+  const removable = group.allPkgs ?? group.pkgs;
+  if (!removable.length) {
     return {
       removed: id,
       label: group.label,
@@ -3267,7 +3451,7 @@ export async function removeRuntimeGroup(
   // removing the environment — torch and the rest of its tree go with it
   // rather than being left behind in a venv nothing else uses.
   if (name !== 'venv') {
-    onProgress(`Removing the ${group.label} environment (${group.pkgs.join(', ')})…`);
+    onProgress(`Removing the ${group.label} environment (${removable.join(', ')})…`);
     await rm(venvDir(name), { recursive: true, force: true });
     venvVersions.delete(name);
     invalidateRuntimeProbes();
@@ -3275,11 +3459,11 @@ export async function removeRuntimeGroup(
     return { removed: id, label: group.label, reason: null };
   }
 
-  onProgress(`Removing ${group.label} (${group.pkgs.join(', ')})…`);
+  onProgress(`Removing ${group.label} (${removable.join(', ')})…`);
   await new Promise<void>((resolve, reject) => {
     const child = spawn(
       py,
-      ['-m', 'pip', 'uninstall', '-y', '--disable-pip-version-check', '--no-input', ...group.pkgs],
+      ['-m', 'pip', 'uninstall', '-y', '--disable-pip-version-check', '--no-input', ...removable],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
     const bump = (buf: Buffer) => {

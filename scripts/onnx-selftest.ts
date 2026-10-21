@@ -17,7 +17,7 @@
  * local-runner suites follow.
  */
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -25,6 +25,7 @@ import { CATALOG, ONNX_WHISPER_SIDECARS } from '../src/model-catalog.ts';
 import { runnableModels } from '../src/runnable.ts';
 import { speak, transcribe } from '../src/infer.ts';
 import { SCRIPT_RUNTIMES } from '../src/processes.ts';
+import { RUNTIME_GROUPS, installRuntimes, venvPython } from '../src/runtimes.ts';
 import { modelsDir, type HFDownload } from '../src/huggingface.ts';
 
 let passed = 0;
@@ -210,6 +211,160 @@ await check('the resource manager credits the ONNX runners with their packages',
   // ONNX work; a process row that names nothing is still a wrong row.
   assert.deepEqual(SCRIPT_RUNTIMES['speak_hf.py'], ['torch', 'transformers']);
 });
+
+console.log('\nThe ONNX runners have to be able to use the card');
+await check('the ONNX runners ask for CUDA when the device is not the CPU', () => {
+  for (const file of ['speak_onnx.py', 'transcribe_onnx.py']) {
+    const source = readFileSync(path.resolve('scripts/py', file), 'utf8');
+    assert.match(source, /CUDAExecutionProvider/, `${file} never asks for CUDA`);
+    assert.match(source, /ROCMExecutionProvider/, `${file} never asks for ROCm`);
+    // The request is not the answer: the provider reported is the one the
+    // session actually got.
+    assert.match(
+      source,
+      /provider_label\((?:enc_)?sess\.get_providers\(\)\)/,
+      `${file} reports the request`,
+    );
+  }
+});
+await check('they load torch first, and preload the CUDA libraries', () => {
+  for (const file of ['speak_onnx.py', 'transcribe_onnx.py']) {
+    const source = readFileSync(path.resolve('scripts/py', file), 'utf8');
+    assert.match(source, /import torch/, `${file} does not import torch`);
+    assert.match(source, /preload_dlls/, `${file} does not preload the CUDA libraries`);
+    // torch has to be imported before the runtime: the CUDA libraries are
+    // loaded when torch is, and a runtime that looks for them before that
+    // finds nothing.
+    const torchAt = source.indexOf('import torch');
+    const runtimeAt = source.indexOf('import onnxruntime');
+    assert.ok(torchAt >= 0 && runtimeAt > torchAt, `${file} imports the runtime before torch`);
+  }
+});
+await check('and a GPU that will not start falls back to the CPU, and says so', () => {
+  for (const file of ['speak_onnx.py', 'transcribe_onnx.py']) {
+    const source = readFileSync(path.resolve('scripts/py', file), 'utf8');
+    assert.match(source, /def open_session\(/, `${file} has no session helper`);
+    assert.match(source, /"stage": "fallback"/, `${file} does not say it fell back`);
+    assert.match(
+      source,
+      /InferenceSession\(model_path, providers=\["CPUExecutionProvider"\]\)/,
+      `${file} does not fall back to the CPU`,
+    );
+  }
+});
+
+console.log('\nThe installer has to bring the build the machine needs');
+{
+  // Driven against a real installRuntimes and a stand-in interpreter that
+  // records what pip was asked to do, because the choice of wheel is the whole
+  // of this: the CPU wheel and the GPU wheel import under the same name, so
+  // getting it wrong means ONNX silently stays on the processor.
+  const home = mkdtempSync(path.join(tmpdir(), 'starr-onnx-gpu-'));
+  const root = path.join(home, '.runtimes');
+  const log = path.join(home, 'pip-calls.log');
+  const saved = { dir: process.env.RUNTIMES_DIR, py: process.env.RUNTIMES_PYTHON };
+  process.env.RUNTIMES_DIR = root;
+  const fake = venvPython('venv');
+  process.env.RUNTIMES_PYTHON = fake;
+  mkdirSync(path.dirname(fake), { recursive: true });
+  writeFileSync(
+    fake,
+    [
+      '#!/bin/bash',
+      'case "$1" in',
+      '  -m)',
+      '    if [ "$2" = "pip" ] && [ "$3" = "--version" ]; then',
+      '      echo "pip 24.0 from /fake/lib (python 3.12)"; exit 0; fi',
+      '    if [ "$2" = "pip" ] && [ "$3" = "install" ]; then',
+      `      echo "install $@" >> ${JSON.stringify(log)}`,
+      '      echo "Successfully installed"; exit 0; fi',
+      '    if [ "$2" = "pip" ] && [ "$3" = "uninstall" ]; then',
+      `      echo "uninstall $@" >> ${JSON.stringify(log)}`,
+      '      exit 0; fi',
+      '    exit 0 ;;',
+      '  -c)',
+      '    echo \'{"packages": {"onnxruntime": true}, "torch": null, "onnx_providers": ["CPUExecutionProvider"]}\'',
+      '    exit 0 ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(fake, 0o755);
+
+  const group = RUNTIME_GROUPS.find((g) => g.id === 'onnxruntime');
+  const calls = (): string => (existsSync(log) ? readFileSync(log, 'utf8') : '');
+
+  try {
+    await check('an NVIDIA machine gets the GPU build', async () => {
+      assert.ok(group, 'the ONNX Runtime group exists');
+      writeFileSync(log, '');
+      await installRuntimes({
+        groups: [group!],
+        device: 'nvidia',
+        onProgress: () => {},
+        onNeedsPrivilege: () => {},
+      });
+      const said = calls();
+      assert.match(said, /^install .*onnxruntime-gpu/m, said || '(pip was not asked for anything)');
+      // And the build it is replacing goes first: the two install the same
+      // import package, and left in place they overwrite each other.
+      assert.match(said, /^uninstall .*onnxruntime\b/m, said || '(nothing was uninstalled)');
+    });
+
+    await check('a machine without a card gets the CPU build', async () => {
+      writeFileSync(log, '');
+      await installRuntimes({
+        groups: [group!],
+        device: 'cpu',
+        onProgress: () => {},
+        onNeedsPrivilege: () => {},
+      });
+      const said = calls();
+      // The lines are prefixed, because "uninstall" contains "install" and a
+      // looser match would read the removal of the GPU build as its install.
+      assert.match(said, /^install .*onnxruntime\b(?!-gpu)/m, said || '(pip was not asked for anything)');
+      assert.doesNotMatch(said, /^install .*onnxruntime-gpu/m, said);
+      // And the build it is replacing goes first.
+      assert.match(said, /^uninstall .*onnxruntime-gpu/m, said || '(nothing was uninstalled)');
+    });
+
+    await check('and the GPU wheel is the one that matches the CUDA build torch uses', () => {
+      const gpu = group?.deviceInstall?.('nvidia', {
+        vendor: 'nvidia',
+        detail: '',
+        needsGroup: false,
+      });
+      assert.ok(gpu, 'the group resolves a device-specific install');
+      assert.equal(gpu.pkgs.length, 1);
+      assert.match(gpu.pkgs[0], /^onnxruntime-gpu==/);
+      // The wheel has to be a CUDA 12 build, because that is the CUDA the
+      // torch build comes from — a CUDA 13 runtime does not run on a CUDA 12
+      // driver.
+      const version = gpu.pkgs[0].split('==')[1] ?? '';
+      const [major, minor] = version.split('.').map((n) => Number(n));
+      assert.ok(major < 27, `${version} is a CUDA 13 build`);
+      assert.ok(Number.isFinite(minor));
+    });
+
+    await check('the size the page shows is the one that will be fetched', () => {
+      const gpu = group?.deviceInstall?.('nvidia', {
+        vendor: 'nvidia',
+        detail: '',
+        needsGroup: false,
+      });
+      const cpu = group?.deviceInstall?.('cpu', { vendor: null, detail: '', needsGroup: false });
+      assert.ok(gpu && cpu);
+      assert.ok(gpu.approxMB > cpu.approxMB, 'the GPU wheel is the bigger download');
+      assert.ok(cpu.approxMB > 0);
+    });
+  } finally {
+    if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+    else process.env.RUNTIMES_DIR = saved.dir;
+    if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+    else process.env.RUNTIMES_PYTHON = saved.py;
+  }
+}
 
 const onnxKokoroDir = path.resolve('models/onnx-community--Kokoro-82M-v1.0-ONNX');
 const onnxWhisperDir = path.resolve('models/onnx-community--whisper-tiny.en');

@@ -1378,6 +1378,24 @@ if (!browser) {
     if (!opened) throw new Error('the Runtimes subview would not open');
     await waitFor(`document.querySelectorAll('.rt-row').length > 0`, 30000);
 
+    // The ONNX Runtime row has to say which build it has. The CPU wheel and
+    // the GPU wheel import under the same name, so "Installed" cannot say —
+    // and "is my ONNX model on the card?" is the question a person asks when
+    // the answer turns out to be "no".
+    {
+      const row = await evalJs(
+        `(() => {
+          const r = [...document.querySelectorAll('.rt-row')].find((r) => /ONNX Runtime/.test(r.textContent));
+          return r ? r.textContent : '';
+        })()`,
+      );
+      report(
+        'the ONNX Runtime row names the build it has',
+        /GPU build|CPU build/.test(String(row)),
+        String(row) || '(no ONNX Runtime row)',
+      );
+    }
+
     // Stubs the install endpoint and records what the client sent. The real
     // install is not what is under test here; the prompt contract is.
     const stub = `(() => {

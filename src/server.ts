@@ -85,6 +85,7 @@ import {
   groupBlockedReason,
   groupById,
   installRuntimes,
+  onnxGpuUpgradeGroups,
   parseDevice,
   removeRuntimeGroup,
   removeRuntimes,
@@ -999,6 +1000,8 @@ app.get('/api/runtimes', async (_req, res) => {
   const status = await runtimeStatus(runtimeBusy);
   const device = parseDevice(_req.query.device);
   const python = await venvPythonVersion();
+  // What the machine actually has, so Auto is not a guess.
+  const presence = await detectGpu();
   // Which groups cannot be installed here, and why. A group in the shared venv
   // is judged by that venv's interpreter; one with its own venv (Kokoro) is
   // judged by whether a compatible interpreter exists to build it on. Offering
@@ -1009,18 +1012,29 @@ app.get('/api/runtimes', async (_req, res) => {
     const reason = await groupBlockedReason(g);
     if (reason) blocked.push({ id: g.id, label: g.label, maxPython: g.maxPython, reason });
   }
+  // What each group would install *here*. Some of them depend on the device —
+  // the ONNX Runtime GPU wheel is a different package with a different size —
+  // and the page shows the size before the download, so the size it shows has
+  // to be the one that will actually be fetched.
+  const groups = RUNTIME_GROUPS.map((g) => {
+    const plan = g.deviceInstall?.(device, presence);
+    return plan ? { ...g, approxMB: plan.approxMB, devicePkgs: plan.pkgs } : g;
+  });
+  // Runtime upgrades available for the installed build (e.g. a CPU build on a
+  // machine with a GPU). The UI offers a one-click reinstall for these.
+  const upgrades: Record<string, string> = {};
+  if (await llamaCppUpgradeKind()) upgrades['llama-cpp'] = 'vulkan';
+  for (const id of onnxGpuUpgradeGroups(status, presence, device)) upgrades[id] = 'gpu';
   const payload = {
     runtimes: status,
-    groups: RUNTIME_GROUPS,
+    groups,
     python,
     blocked,
     // Surfaced up front so the UI can warn before a multi-hundred-MB download.
     warning: await deviceWarning(device),
     // What the machine actually has, so Auto is not a guess.
-    gpu: await detectGpu(),
-    // Runtime upgrades available for the installed build (e.g. a CPU build on a
-    // machine with a GPU). The UI offers a one-click reinstall for these.
-    upgrades: (await llamaCppUpgradeKind()) ? { 'llama-cpp': 'vulkan' } : {},
+    gpu: presence,
+    upgrades,
   };
   runtimesCache = payload;
   runtimesCacheAt = Date.now();
