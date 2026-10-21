@@ -66,7 +66,26 @@ export interface CatalogSection {
 const MB = 1024 * 1024;
 
 /**
- * The four files a CTranslate2 Whisper repository ships. All are required:
+ * The small companions an ONNX Whisper export needs.
+ *
+ * The graph files are the weights, but the runner also asks `transformers` for
+ * the feature extractor and the tokenizer, and both read these by relative
+ * name. They are listed once so the catalog's bundle and the layout detector
+ * cannot drift apart on which sidecar is optional — none of them is.
+ */
+export const ONNX_WHISPER_SIDECARS = [
+  'config.json',
+  'generation_config.json',
+  'preprocessor_config.json',
+  'tokenizer.json',
+  'tokenizer_config.json',
+  'special_tokens_map.json',
+  'vocab.json',
+  'merges.txt',
+  'normalizer.json',
+] as const;
+
+/** The four files a CTranslate2 Whisper repository ships. All are required:
  * `model.bin` is the weights, and the other three are the vocabulary and
  * tokenizer CTranslate2 insists on finding next to them.
  */
@@ -169,7 +188,8 @@ export const CATALOG: CatalogSection[] = [
     title: 'Speech to text',
     note:
       'Ollama has no transcription models — pull returns 404. The CTranslate2 ' +
-      'builds and the ggml-*.bin builds are the two this app can run itself.',
+      'builds, the ggml-*.bin builds and the ONNX export are the three this app ' +
+      'can run itself.',
     entries: [
       // One file per entry, and deliberately not a list of quantisations: the
       // runnable check treats every file in an entry as required, so offering
@@ -260,6 +280,42 @@ export const CATALOG: CatalogSection[] = [
         run: { kind: 'stt', requires: ['faster-whisper'] },
       },
       {
+        repo: 'onnx-community/whisper-tiny.en',
+        label: 'Whisper tiny (ONNX, int8)',
+        task: 'speech-to-text',
+        blurb:
+          'Whisper tiny as an ONNX Runtime export, quantized to about 43 MB. ' +
+          'No CTranslate2 and no whisper.cpp binary: the shared Python ' +
+          'environment runs the encoder and decoder graphs directly. The least ' +
+          'accurate Whisper of the family, and the right size for short ' +
+          'dictation on an old CPU.',
+        runtime: 'onnxruntime',
+        files: [
+          {
+            name: 'onnx/encoder_model_quantized.onnx',
+            label: 'encoder (int8)',
+            bytes: 10124993,
+          },
+          {
+            name: 'onnx/decoder_model_merged_quantized.onnx',
+            label: 'decoder (merged, int8)',
+            bytes: 30718858,
+          },
+          { name: 'config.json', label: 'config.json', bytes: 2197 },
+          { name: 'generation_config.json', label: 'generation_config.json', bytes: 1646 },
+          { name: 'preprocessor_config.json', label: 'preprocessor_config.json', bytes: 339 },
+          { name: 'tokenizer.json', label: 'tokenizer.json', bytes: 2405679 },
+          { name: 'tokenizer_config.json', label: 'tokenizer_config.json', bytes: 282662 },
+          { name: 'special_tokens_map.json', label: 'special_tokens_map.json', bytes: 2173 },
+          { name: 'vocab.json', label: 'vocab.json', bytes: 999186 },
+          { name: 'merges.txt', label: 'merges.txt', bytes: 456318 },
+          { name: 'normalizer.json', label: 'normalizer.json', bytes: 52666 },
+        ],
+        bundle: true,
+        bundleMB: 43,
+        run: { kind: 'stt', requires: ['onnxruntime', 'transformers'] },
+      },
+      {
         repo: 'openai/whisper-large-v3-turbo',
         label: 'Whisper large-v3-turbo (safetensors)',
         task: 'speech-to-text',
@@ -273,18 +329,31 @@ export const CATALOG: CatalogSection[] = [
   {
     task: 'text-to-speech',
     title: 'Text to speech',
-    note: 'No Ollama path exists. These run through onnxruntime, the kokoro package, or piper.',
+    note:
+      'No Ollama path exists. These run through onnxruntime, the kokoro ' +
+      'package, or the shared transformers pipeline.',
     entries: [
       {
         repo: 'onnx-community/Kokoro-82M-v1.0-ONNX',
         label: 'Kokoro 82M (ONNX)',
         task: 'text-to-speech',
-        blurb: 'Eighty-two million parameters, sounds far larger, and runs on CPU. This is the ONNX export — the in-app Speak button runs the PyTorch checkpoint (Kokoro 82M (pth)), so this one is for running the export yourself with onnxruntime or transformers.js.',
-        runtime: 'onnxruntime or transformers.js',
+        blurb:
+          'The same 82M voice model as the PyTorch checkpoint, exported to ONNX ' +
+          'Runtime. It runs on the CPU without a CUDA build, so it is the ' +
+          'portable option rather than the fastest one; the Speak button and ' +
+          'Studio use it like any other voice. The q4f16 weights, the af_heart ' +
+          'style table and the phoneme vocabulary are one bundle — the graph ' +
+          'alone cannot pronounce anything.',
+        runtime: 'onnxruntime (Kokoro)',
         files: [
-          { name: 'onnx/model.onnx', label: 'fp32', bytes: 310 * MB },
-          { name: 'onnx/model_q4f16.onnx', label: 'q4f16', bytes: 147 * MB },
+          { name: 'onnx/model_q4f16.onnx', label: 'q4f16 weights', bytes: 154586422 },
+          { name: 'voices/af_heart.bin', label: 'af_heart voice', bytes: 522240 },
+          { name: 'tokenizer.json', label: 'phoneme vocabulary', bytes: 3497 },
+          { name: 'config.json', label: 'config.json', bytes: 44 },
         ],
+        bundle: true,
+        bundleMB: 148,
+        run: { kind: 'tts', requires: ['kokoro'] },
       },
       {
         repo: 'hexgrad/Kokoro-82M',

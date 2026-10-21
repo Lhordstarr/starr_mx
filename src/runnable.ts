@@ -21,9 +21,15 @@
  * discovered by layout below, with the same ready/reason discipline.
  */
 import './net.js';
-import { readdir, readFile } from 'node:fs/promises';
+import { access, readdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import { CATALOG, catalogRepoIds, type CatalogEntry, type CatalogTask } from './model-catalog.js';
+import {
+  CATALOG,
+  ONNX_WHISPER_SIDECARS,
+  catalogRepoIds,
+  type CatalogEntry,
+  type CatalogTask,
+} from './model-catalog.js';
 import { hubCacheDir, listDownloads, modelsDir, type HFDownload } from './huggingface.js';
 import { runtimeStatus } from './runtimes.js';
 
@@ -49,10 +55,10 @@ export interface RunnableModel {
    *
    * Not something the client can work out: whisper-cli reads wav/flac/mp3/ogg
    * and nothing else, so a browser recording has to be decoded to 16 kHz WAV
-   * before it is uploaded — but only for that runner. The two Python ones take
+   * before it is uploaded — but only for that runner. The Python ones take
    * the original bytes and their own audio libraries.
    */
-  driver?: 'whisper-cpp' | 'faster-whisper' | 'transformers';
+  driver?: 'whisper-cpp' | 'faster-whisper' | 'transformers' | 'onnx';
   /** False when a required runtime is blocked on this interpreter. */
   blocked: boolean;
   /** Why it cannot run, or '' when it can. */
@@ -175,7 +181,7 @@ const TTS_MODEL_TYPES = new Set(['vits', 'speecht5', 'bark', 'fastspeech2_confor
  * Is this directory a transformers text-to-speech model?
  *
  * Read from the config, and asked by the runner as well as by discovery, because
- * the app's two speech runners are not interchangeable: `speak.py` is Kokoro —
+ * the app's speech runners are not interchangeable: `speak.py` is Kokoro —
  * a styletts2 checkpoint the `kokoro` package loads from a .pth beside its
  * `voices/` — and `speak_hf.py` is the transformers pipeline. Kokoro's config
  * declares no `architectures` at all, so a config naming one of the above is the
@@ -184,6 +190,64 @@ const TTS_MODEL_TYPES = new Set(['vits', 'speecht5', 'bark', 'fastspeech2_confor
 export async function isTransformersTts(dir: string): Promise<boolean> {
   if ((await architecturesOf(dir)).some(isTtsArchitecture)) return true;
   return TTS_MODEL_TYPES.has(await modelTypeOf(dir));
+}
+
+/**
+ * The ONNX graph inside a Kokoro export, repo-relative, or null.
+ *
+ * The export's `config.json` is only `{"model_type":"style_text_to_speech_2"}`,
+ * so the file layout and that marker are the whole identity. The tokenizer is
+ * required here because the graph takes phoneme ids, not text; a directory with
+ * the graph and no vocabulary would only fail later, inside the runner.
+ */
+export async function findKokoroOnnx(dir: string): Promise<string | null> {
+  if ((await modelTypeOf(dir)) !== 'style_text_to_speech_2') return null;
+  let files: string[];
+  try {
+    files = await readdir(path.join(dir, 'onnx'));
+  } catch {
+    return null;
+  }
+  const preferred = [
+    'model_q4f16.onnx',
+    'model_q4.onnx',
+    'model_quantized.onnx',
+    'model_uint8.onnx',
+    'model_fp16.onnx',
+    'model.onnx',
+  ];
+  const model = preferred.find((name) => files.includes(name)) ??
+    files.filter((name) => /\.onnx$/i.test(name)).sort()[0];
+  if (!model) return null;
+  try {
+    await access(path.join(dir, 'tokenizer.json'));
+  } catch {
+    return null;
+  }
+  return `onnx/${model}`;
+}
+
+/**
+ * True when a directory is an ONNX Whisper export the bundled runner can load.
+ *
+ * The merged decoder is the deliberate requirement: the runner's no-cache path
+ * feeds one graph and needs both the encoder and the decoder in it. A repository
+ * that split the decoder into `decoder_model.onnx` and `decoder_with_past_model
+ * .onnx` is a different layout, and claiming it here would produce a failure
+ * deep inside ONNX Runtime rather than a "no job" label.
+ */
+export async function isOnnxWhisper(dir: string): Promise<boolean> {
+  let files: string[];
+  try {
+    files = await readdir(path.join(dir, 'onnx'));
+  } catch {
+    return false;
+  }
+  const encoder = files.some((name) => /^encoder_model.*\.onnx$/i.test(name));
+  const decoder = files.some((name) => /^decoder_model_merged.*\.onnx$/i.test(name));
+  if (!encoder || !decoder) return false;
+  if ((await modelTypeOf(dir)) === 'whisper') return true;
+  return (await architecturesOf(dir)).some((name) => /^Whisper/i.test(name));
 }
 
 /**
@@ -234,6 +298,22 @@ async function detectLayout(
         };
       }
     }
+    // ONNX Whisper: two graphs plus the usual tokenizer sidecars. The runner
+    // is `transcribe_onnx.py`, which asks the shared environment's ONNX Runtime
+    // for the encoder and the merged decoder and does its own greedy loop.
+    const encoder = [...files].find((f) => /^onnx\/encoder_model.*\.onnx$/i.test(f));
+    const decoder = [...files].find((f) => /^onnx\/decoder_model_merged.*\.onnx$/i.test(f));
+    if (encoder && decoder && files.has('config.json')) {
+      const declared = await modelTypeOf(dir);
+      const architectures = await architecturesOf(dir);
+      if (declared === 'whisper' || architectures.some((a) => /^Whisper/i.test(a))) {
+        return {
+          format: 'ONNX',
+          needs: [...new Set([encoder, decoder, ...ONNX_WHISPER_SIDECARS])],
+          requires: ['onnxruntime', 'transformers'],
+        };
+      }
+    }
     // Transformers ASR repos declare their architecture in config.json, and the
     // runner behind this is the generic `automatic-speech-recognition` pipeline
     // — not a Whisper wrapper — so every architecture that pipeline loads is
@@ -281,6 +361,17 @@ async function detectLayout(
     };
   }
   if (task === 'tts') {
+    const onnx = await findKokoroOnnx(dir);
+    if (onnx) {
+      const voice = [...files].find((f) => /^voices\/.+\.bin$/i.test(f));
+      if (voice) {
+        return {
+          format: 'ONNX',
+          needs: [onnx, voice, 'tokenizer.json', 'config.json'],
+          requires: ['kokoro'],
+        };
+      }
+    }
     /* Kokoro was the only speech this app could make, so every other TTS repo
      * was refused here with "nothing loads it". That was true of the app and
      * false of the machine: the shared Python runtime has transformers, and its
@@ -399,6 +490,10 @@ function needsSatisfied(files: Set<string>, entry: string): boolean {
 function driverFor(requires: string[]): RunnableModel['driver'] {
   if (requires.includes('whisper-cpp')) return 'whisper-cpp';
   if (requires.includes('faster-whisper')) return 'faster-whisper';
+  // ONNX first: the ONNX Whisper runner also uses the transformers package for
+  // its feature extractor and tokenizer, so checking `transformers` first would
+  // label it as the PyTorch pipeline and hand the browser the wrong audio path.
+  if (requires.includes('onnxruntime')) return 'onnx';
   if (requires.includes('transformers')) return 'transformers';
   return undefined;
 }

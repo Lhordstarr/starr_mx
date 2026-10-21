@@ -62,17 +62,22 @@ export interface ManagedProcess {
 /**
  * What each runner actually imports.
  *
- * Read off the scripts rather than guessed: whisper_ct2.py uses
+ * Read off the scripts rather than guessed. `whisper_ct2.py` uses
  * faster_whisper + ctranslate2 and deliberately never touches torch, which is
- * the whole reason it exists (40MB of runtime instead of 529MB). The other
- * three all build on torch. onnxruntime is absent on purpose — no bundled
- * runner uses it, and listing it would offer a "stop" for a process that can
- * never appear.
+ * the whole reason it exists (40 MB of runtime instead of 529 MB). The
+ * transformers and Kokoro runners build on torch; the ONNX Whisper runner uses
+ * ONNX Runtime plus transformers for its feature extractor and tokenizer, and
+ * the ONNX Kokoro runner adds the ONNX graph to the Kokoro environment. Leaving
+ * a new script out of this table makes its process row claim it uses nothing,
+ * which is the same kind of lie as naming the wrong runtime.
  */
 export const SCRIPT_RUNTIMES: Record<string, string[]> = {
   'whisper_ct2.py': ['faster-whisper'],
   'transcribe.py': ['torch', 'transformers'],
+  'transcribe_onnx.py': ['onnxruntime', 'transformers'],
   'speak.py': ['torch', 'kokoro'],
+  'speak_hf.py': ['torch', 'transformers'],
+  'speak_onnx.py': ['onnxruntime', 'kokoro'],
   'generate.py': ['torch', 'diffusers'],
   'llama-server': ['llama-cpp'],
   'whisper-cli': ['whisper-cpp'],

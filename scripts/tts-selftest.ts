@@ -236,7 +236,7 @@ console.log('\nAn environment whose PyTorch is a CPU-only build must be repairab
   }
 }
 
-console.log('\nSpeech is two runners now, and the weights must choose between them');
+console.log('\nSpeech has more than one runner, and the weights must choose between them');
 {
   // Kokoro is a styletts2 checkpoint that only the `kokoro` package loads;
   // every other speech model the app offers is a transformers pipeline. The two

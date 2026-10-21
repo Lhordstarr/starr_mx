@@ -1273,8 +1273,8 @@ app.post('/api/runtimes/remove-group', async (req, res) => {
  *    an hour and there was previously no way to stop one from the UI.
  *
  * A model shows the runtimes its script imports rather than pretending each
- * runtime is its own service: PyTorch is a library inside a process, and
- * ONNX Runtime is not used by any bundled runner, so it never appears at all.
+ * runtime is its own service: PyTorch and ONNX Runtime are libraries inside a
+ * process, not daemons with a pid of their own.
  */
 app.get('/api/processes', async (_req, res) => {
   let ollama: { ok: boolean; models: unknown[]; detail: string } = {

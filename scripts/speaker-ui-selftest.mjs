@@ -46,7 +46,15 @@ try {
   const res = await fetch(new URL('/api/runnable?task=tts', APP_URL), {
     signal: AbortSignal.timeout(15000),
   });
-  ttsModel = ((await res.json())?.tts ?? []).find((m) => m.ready) ?? null;
+  const data = await res.json();
+  // The Speak button uses the model Settings assigned, not whichever runnable
+  // row happens to be first. Before ONNX Kokoro existed those were the same
+  // row, so the shortcut passed by coincidence; follow the assignment now.
+  const assigned = String(data?.assigned?.tts ?? '').replace(/^local:/, '');
+  ttsModel =
+    (data?.tts ?? []).find((m) => m.repo === assigned) ??
+    (data?.tts ?? []).find((m) => m.ready) ??
+    null;
 } catch {
   console.log(`SKIP — app not reachable at ${APP_URL} (start it with npm run dev)`);
   process.exit(0);

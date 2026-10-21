@@ -13,7 +13,7 @@
  * is a large install and needs root on many distributions), and whisper.cpp is
  * the only runtime that would have to wait for another one.
  *
- * The two Python runners are left alone. They bring their own audio libraries
+ * The Python runners are left alone. They bring their own audio libraries
  * and take the original bytes, and re-encoding for them would be a slower,
  * lossier round trip for nothing.
  */

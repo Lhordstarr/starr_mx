@@ -296,7 +296,7 @@ console.log('\nThe browser half: webm/opus to 16 kHz WAV');
             results.pcmBytes = bytes.length - 44;
             results.frameMs = Math.round((results.dataBytes / 2 / results.rate) * 1000);
 
-            // The two Python runners must be handed the original bytes.
+            // The Python runners must be handed the original bytes.
             const passthrough = await audioForUpload(recorded, 'faster-whisper');
             results.passthroughSameSize = passthrough.size === recorded.size;
             results.passthroughType = passthrough.type;

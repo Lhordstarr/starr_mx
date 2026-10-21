@@ -174,33 +174,45 @@ Two things about it that are not obvious:
   - **A recording is decoded before it is uploaded.** `whisper-cli` opens wav,
     flac, mp3 and ogg — and every browser recording is webm/opus or m4a. So for
     a whisper.cpp model the audio is decoded to 16 kHz mono WAV in the browser
-    first. The two Python runners take the original bytes untouched. This costs
+    first. The Python runners take the original bytes untouched. This costs
     a re-encode and no extra install, which is the trade against ffmpeg.
 
 Upstream publishes no GPU build for Linux, so this one runs on the CPU. The
 Windows archive does have CUDA variants, and the installer picks them up if a
 future build publishes one for Linux.
 
-### Speech, and the two runners behind it
+### Speech, and the runners behind it
 
-Kokoro is not the only text-to-speech model this app can run. The second runner
-is the transformers `text-to-speech` pipeline — **VITS** (which is what every
-MMS-TTS checkpoint is, `facebook/mms-tts-eng` among them), SpeechT5, Bark and
-FastSpeech2 — and it uses the shared Python environment, so **nothing extra is
-installed to use it**: if speech-to-text or image generation already works, so
-does this.
+Kokoro is not the only text-to-speech model this app can run, and its PyTorch
+checkpoint is not the only way to run Kokoro. There are three runners:
+
+  - **Kokoro (`.pth`)** — the `kokoro` package loads the checkpoint and its
+    `voices/` in an environment of its own. This is the path that follows the
+    GPU when there is one.
+  - **Kokoro (ONNX)** — the same front end (phonemisation, chunking and the
+    style table) with the acoustic graph run by ONNX Runtime instead of torch.
+    The catalog bundles the q4f16 graph, the `af_heart` voice and the phoneme
+    vocabulary, because the graph alone cannot pronounce anything. The Kokoro
+    environment installs the CPU ONNX Runtime wheel, so this is the CPU path.
+  - **The transformers `text-to-speech` pipeline** — **VITS** (which is what
+    every MMS-TTS checkpoint is, `facebook/mms-tts-eng` among them), SpeechT5,
+    Bark and FastSpeech2. It uses the shared Python environment, so **nothing
+    extra is installed to use it**: if speech-to-text or image generation
+    already works, so does this.
 
 Which runner answers is decided by the weights, not by the caller:
 
   - A config naming one of those architectures is the transformers pipeline.
-  - Anything else is Kokoro, which the `kokoro` package loads from a `.pth`
-    beside its `voices/`, in an environment of its own.
+  - `model_type: style_text_to_speech_2` beside an `onnx/` graph is the ONNX
+    export.
+  - Anything else is the PyTorch Kokoro checkpoint, which the `kokoro` package
+    loads from a `.pth` beside its `voices/`.
 
-Two things these models do not have, said out loud in the run log rather than
-silently ignored: **one voice per checkpoint** (the voice picker does not apply)
-and **no speed control**. Long replies are split on sentence ends before they
-reach the model, because VITS predicts a duration for its whole input at once
-and was trained on single utterances.
+The transformers models have two limitations, said out loud in the run log
+rather than silently ignored: **one voice per checkpoint** (the voice picker
+does not apply) and **no speed control**. Long replies are split on sentence
+ends before they reach the model, because VITS predicts a duration for its
+whole input at once and was trained on single utterances.
 
 The same rule as everywhere else applies to the device: it is read off the
 loaded model, never off the request, so a run that did not move cannot be
@@ -368,11 +380,14 @@ public/                   chat UI (no build step, no framework)
   CTranslate2 Whisper (`model.bin` + `config.json`), a transformers speech
   model (its `architectures`: the CTC heads behind wav2vec2, HuBERT, WavLM and
   MMS, plus Whisper, Speech2Text and Moonshine for transcription, and VITS,
-  SpeechT5, Bark and FastSpeech2 for synthesis), a diffusers pipeline
-  (`model_index.json`) — and becomes selectable as soon as the runtime it
-  needs is installed. Detection mirrors the runner that would load the model,
-  so a shape nothing can execute — GGUF diffusion weights, `.onnx` files, an
-  encoder with no speech head — is left unoffered rather than promised.
+  SpeechT5, Bark and FastSpeech2 for synthesis), an ONNX Whisper (encoder plus
+  merged decoder plus its tokenizer sidecars), an ONNX Kokoro export (graph,
+  voice and phoneme vocabulary), a diffusers pipeline (`model_index.json`) —
+  and becomes selectable as soon as the runtime it needs is installed.
+  Detection mirrors the runner that would load the model, so a shape nothing
+  can execute — GGUF diffusion weights, an ONNX decoder split into two graphs,
+  a random `.onnx` file with no matching runner, an encoder with no speech
+  head — is left unoffered rather than promised.
 - Stop button — aborts the request upstream, keeps partial output
 - **A resource manager**, opened from the Resources box on the chat page. It
   lists everything this machine is actually doing for you and lets you stop it.
@@ -395,11 +410,13 @@ public/                   chat UI (no build step, no framework)
   Each job reports the runtime it actually uses, read off the runner rather than
   guessed: `whisper_ct2.py` is CTranslate2 (`faster-whisper`) and never loads
   torch, `whisper-cli` is the native whisper.cpp build and involves no Python
-  at all, while the other three runners build on torch. ONNX Runtime
-  never appears, because no bundled runner uses it — and offering a Stop for a
-  process that cannot exist would be a lie. PyTorch and Kokoro are libraries
-  inside a job, not jobs of their own, so they are reported as what a row uses
-  rather than as separate things to stop.
+  at all, `transcribe_onnx.py` is ONNX Runtime with the transformers feature
+  extractor, and `speak_onnx.py` is ONNX Runtime inside the Kokoro environment.
+  The transformers, Kokoro and image runners build on torch. ONNX Runtime is a
+  package a job uses, not a separate process; PyTorch and Kokoro are libraries
+  inside a job too, so they are reported as what a row uses rather than as
+  separate things to stop. Offering a Stop for a process that is only a library
+  would be a lie.
 
   **Only jobs this app started can be stopped.** They are addressed by an id the
   server minted in `src/processes.ts`, never by a pid: this server has no login,

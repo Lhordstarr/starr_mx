@@ -25,6 +25,7 @@
     "test:providers": "tsx scripts/providers-selftest.ts",
     "test:speaker-ui": "node scripts/speaker-ui-selftest.mjs",
     "test:runnable": "tsx scripts/runnable-selftest.ts",
+    "test:onnx": "tsx scripts/onnx-selftest.ts",
     "test:runtimes": "tsx scripts/runtimes-selftest.ts",
     "test:whisper": "tsx scripts/whisper-selftest.ts",
     "test:tts": "tsx scripts/tts-selftest.ts",

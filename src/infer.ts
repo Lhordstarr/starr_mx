@@ -16,7 +16,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hubCacheDir, listDownloads, modelsDir } from './huggingface.js';
 import { attachChild, finishProcess, registerProcess, setProcessDevice } from './processes.js';
-import { isTransformersTts } from './runnable.js';
+import { findKokoroOnnx, isOnnxWhisper, isTransformersTts } from './runnable.js';
 import { venvPython, type Device } from './runtimes.js';
 import { WHISPER_REPO, parseWhisperJson, resolveWhisperModel, transcribeWithWhisperCpp } from './whispercpp.js';
 
@@ -28,7 +28,7 @@ const outputsDir = () => path.resolve(process.env.RUNTIME_OUT_DIR ?? './.runtime
  * Which venv a task runs in by default. The shared venv covers speech-to-text,
  * image generation, and the transformers speech pipeline; Kokoro cannot import
  * on the machine's interpreter, so its own environment answers for it — and
- * speak() overrides this per model, because "speech" is two runners.
+ * speak() overrides this per model, because speech has more than one runner.
  */
 const VENV_FOR_KIND = { stt: 'venv', image: 'venv', tts: 'venv-kokoro' } as const;
 
@@ -263,7 +263,7 @@ export async function transcribe(opts: {
   const audioPath = await resolveDownloaded(opts.repo, opts.audio);
 
   // whisper.cpp first, and by identity rather than by shape: it is the only
-  // runner that wants the single weights file, where the two Python ones want
+  // runner that wants the single weights file, where the other Python ones want
   // the directory holding them. Probing the extension alone would put a GGUF
   // Whisper — a transcribe.cpp model whisper.cpp cannot open — on this path,
   // which is the mistake that put two unloadable entries in the catalog.
@@ -273,11 +273,23 @@ export async function transcribe(opts: {
 
   // Both Python Whisper builds want the directory that holds the weights, not
   // the single file, because each loads its neighbours (config, tokenizer,
-  // vocabulary) by relative name.
-  const dir = path.dirname(modelPath);
+  // vocabulary) by relative name. An ONNX export keeps its graphs in `onnx/`
+  // but its tokenizer and config at the repo root, so the directory passed to
+  // the runner is the repo root in that case.
+  const parent = path.dirname(modelPath);
+  const dir = path.basename(parent) === 'onnx' ? path.dirname(parent) : parent;
 
   if (await isCTranslate2(dir)) {
     return run('whisper_ct2.py', [dir, audioPath, opts.device], {
+      timeoutMs: 20 * 60_000,
+      onLog: opts.onLog,
+      kind: 'stt',
+      repo: opts.repo,
+      device: opts.device,
+    });
+  }
+  if (await isOnnxWhisper(dir)) {
+    return run('transcribe_onnx.py', [dir, audioPath, opts.device], {
       timeoutMs: 20 * 60_000,
       onLog: opts.onLog,
       kind: 'stt',
@@ -345,26 +357,39 @@ export async function speak(opts: {
   onLog?: (s: string) => void;
 }): Promise<{ result: RunResult; outPath: string }> {
   const modelDir = await resolveDownloaded(opts.repo, opts.file);
-  const dir = path.dirname(modelDir);
+  // An ONNX export's weights live under `onnx/`, while its voice table and
+  // tokenizer sit at the repository root. The directory handed to the runner
+  // is the root that holds all three.
+  const parent = path.dirname(modelDir);
+  const dir = path.basename(parent) === 'onnx' ? path.dirname(parent) : parent;
   await mkdirSafe(outputsDir());
   const outPath = path.join(outputsDir(), `tts-${Date.now()}.wav`);
 
-  // Two runners, chosen by the weights rather than by the caller.
+  // Three runners, chosen by the weights rather than by the caller.
   //
   // Kokoro is a styletts2 checkpoint that only the `kokoro` package loads, from
-  // a .pth beside its voices/; every other speech model this app offers is a
-  // transformers text-to-speech pipeline. They also live in different Python
-  // environments, so this choice decides which interpreter runs: Kokoro has one
-  // of its own, the pipeline uses the shared runtime that already holds torch
-  // and transformers.
+  // a .pth beside its voices/. Its ONNX export is the same front end (G2P,
+  // chunking, voice table) with an ONNX graph in place of the torch model, and
+  // still needs the Kokoro environment. Every other speech model this app
+  // offers is a transformers text-to-speech pipeline, which runs in the shared
+  // environment.
   //
   // Chosen here and not by the caller because the caller cannot know: the Studio
   // sends the same request for both, which is the point of having one endpoint.
-  const generic = await isTransformersTts(dir);
-  const script = generic ? 'speak_hf.py' : 'speak.py';
+  const onnx = await findKokoroOnnx(dir);
+  const generic = !onnx && (await isTransformersTts(dir));
+  const script = onnx ? 'speak_onnx.py' : generic ? 'speak_hf.py' : 'speak.py';
   const result = await run(
     script,
-    [dir, opts.voice, outPath, opts.device, String(opts.speed), opts.repo],
+    [
+      dir,
+      opts.voice,
+      outPath,
+      opts.device,
+      String(opts.speed),
+      opts.repo,
+      ...(onnx ? [onnx] : []),
+    ],
     {
       stdin: opts.text,
       timeoutMs: 10 * 60_000,

@@ -2187,7 +2187,10 @@ const FORMAT_RUNTIME = [
     ext: /\.(onnx|ort)$/i,
     label: 'ONNX Runtime',
     requires: ['onnxruntime'],
-    blurb: 'ONNX weights. Runs under onnxruntime, with no PyTorch at all.',
+    blurb:
+      'ONNX weights. The app runs ONNX Whisper for transcription and the ' +
+      'Kokoro ONNX export for speech; other .onnx graphs still need a loader ' +
+      'that knows their inputs.',
   },
   {
     id: 'transformers',

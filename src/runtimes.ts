@@ -351,13 +351,15 @@ approxMB: 17,
     id: 'onnxruntime',
     probe: 'onnxruntime',
     label: 'ONNX Runtime',
-    // Deliberately empty `unlocks`: none of the bundled runners use it. The
-    // earlier claim that it unlocked TTS was wrong — speak.py imports the
-    // kokoro package and torch. Kept as a genuinely small optional extra for
-    // running ONNX exports by hand, and labelled as such rather than implying
-    // it powers something it does not.
-    blurb: 'Optional extra for running ONNX exports yourself. The bundled TTS, STT and image runners do not use it.',
-    unlocks: [],
+    // The shared environment's copy. Whisper's ONNX export needs it for
+    // speech-to-text; the Kokoro environment installs its own copy because the
+    // TTS front end lives there. Neither claims every `.onnx` file: a graph
+    // still needs a runner that knows its inputs.
+    blurb:
+      'Runs the ONNX Whisper export for speech-to-text. The Kokoro environment ' +
+      'installs its own copy for the ONNX voice model, so this row is the ' +
+      'shared-environment package and not a promise that any .onnx file will run.',
+    unlocks: ['speech-to-text'],
     pkgs: ['onnxruntime'],
     needsTorch: false,
     approxMB: 18,
@@ -430,14 +432,17 @@ approxMB: 17,
     blurb:
       'The TTS package for the Kokoro 82M voice model. It builds its own ' +
       'environment on Python 3.12 or older — nothing in its dependency tree ' +
-      'has wheels for newer interpreters, so it cannot share the main venv.',
+      'has wheels for newer interpreters, so it cannot share the main venv. ' +
+      'ONNX Runtime is installed alongside it so the ONNX export of Kokoro ' +
+      'can run in the same environment; an environment installed before that ' +
+      'runner existed needs a reinstall to add it.',
     unlocks: ['text-to-speech'],
-    pkgs: ['kokoro', 'soundfile'],
-    // Kokoro's wheel requires torch, so torch has to be in its venv first —
-    // otherwise pip resolves the default index and drags several GB of CUDA
-    // libraries onto the machine.
+    // ONNX Runtime is not optional here: the catalog's ONNX Kokoro entry runs
+    // its graph through it, and the export lives in this venv because the G2P
+    // front end does. The shared ONNX Runtime group is a separate copy for STT.
+    pkgs: ['kokoro', 'soundfile', 'onnxruntime'],
     needsTorch: true,
-    approxMB: 12,
+    approxMB: 30,
     maxPython: '<3.13',
     venv: 'venv-kokoro',
   },
