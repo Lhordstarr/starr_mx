@@ -464,30 +464,43 @@ This section exists so nobody spends the same afternoon again.
   they start.
 - `tsx watch` restarts the server on every source change, and the restart
   kills the warm engines with it (by design — see `process.on('exit')` in
-  `src/tts-engine.ts`).
+  `src/tts-engine.ts`). If the server is busy in a long request when a file
+  changes, `tsx` waits, then force-kills it ("Previous process hasn't exited
+  yet") and the request dies with it. Use `npx tsx src/server.ts` (no watch)
+  when a test or a job is going to run for minutes — that is what killed one
+  of the first image runs.
 
 ---
 
 ## 5. State of play right now
 
-- `master` is at `203b2c5` and **pushed**. Working tree clean.
-- The dev server is running in the background on port 3000
-  (`npm run dev`, log at `/tmp/opencode/dev.log`).
+- `master` is at `1343fcc` and **pushed**. Working tree clean.
+- The dev server is running in the background on port 3000. On this box it is
+  currently `npx tsx src/server.ts` (no watch, log at
+  `/tmp/opencode/dev-nowatch.log`) because image runs are long; `npm run dev`
+  (watch, log at `/tmp/opencode/dev.log`) is the normal one.
 - Models downloaded on this box: Kokoro `.pth`, Kokoro ONNX, ONNX Whisper,
   MMS-TTS, wav2vec2, whisper-small, faster-whisper-tiny, whisper.cpp models,
-  SmolLM2 GGUF, sd-turbo, bert-tiny.
+  `HuggingFaceTB/SmolLM2-135M-Instruct`, sd-turbo, bert-tiny. The SmolLM2
+  **GGUF** is no longer in `models/`, so llama.cpp reports "not configured"
+  and the two GGUF checks in `test:models-ui` skip — nothing is broken, there
+  is simply no GGUF on disk to load.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
 - **The live box at `/kaggle/working/starr_mx` is behind.** It only has
   through `7f1a231`; it needs a pull and a restart to get the ONNX and warm
-  engine work. The Cloudflare URL in the notes is stale.
+  engine work, the tools switch, and the image fixes. The Cloudflare URL in
+  the notes is stale.
 
 ### Questions that are still open, and are the user's to answer
 
 1. **Speaking bar thickness** — the bar is slim and pinned at the top. No
    verdict yet on whether that is the right weight.
-2. **Stable Diffusion** — image generation was reported as failing. The
-   model name and the exact error are still needed before it can be fixed.
+2. ~~**Stable Diffusion**~~ — reproduced and fixed: it was the CPU dtype
+   (bfloat16 on a CPU without bf16 kernels) and the guidance default on a
+   distilled model. Verified here with sd-turbo at 512x512, 4 steps. The
+   **GPU path is the one branch this laptop cannot test** — worth confirming
+   on the box with the card, where fp16 runs.
 3. **Ollama shows "Installed" but does not work.** Needs
    `command -v ollama`, `ls -la /usr/local/bin/ollama /usr/bin/ollama`, and
    the `installed` object from `/api/runtimes`.
