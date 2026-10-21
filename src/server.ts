@@ -53,6 +53,7 @@ import {
 import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGen, releaseImageGen, IMAGE_FIELD_LABELS, MAX_PROMPT_LENGTH } from './imagegen.js';
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
 import { ggufModels, llamaContextSize, llamaServerState, stopLlamaServer } from './llamacpp.js';
+import { stopTtsEngines } from './tts-engine.js';
 import { llamaCppUpgradeKind } from './runtimes.js';
 import { stopTransformersServer, transformersChatModels } from './transformers-chat.js';
 import { fileVramEstimate, vramFit } from './vram.js';
@@ -1377,11 +1378,18 @@ function withPythonLog(res: import('express').Response, onResult: (send: (e: str
   res.setHeader('content-type', 'text/event-stream');
   res.setHeader('cache-control', 'no-cache');
   res.setHeader('connection', 'keep-alive');
-  const send = (event: string, data: unknown) =>
+  const send = (event: string, data: unknown) => {
+    // The browser may have gone — the speaking bar's Stop button aborts the
+    // request while the model is still working. Writing to a closed response
+    // is an error nobody is waiting for, and it takes the run down with it.
+    if (res.writableEnded || res.destroyed) return;
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
   onResult(send)
     .catch((err: Error) => send('error', { message: err.message }))
-    .finally(() => res.end());
+    .finally(() => {
+      if (!res.writableEnded) res.end();
+    });
 }
 
 /**
@@ -2298,17 +2306,18 @@ server.listen(port, host, () => {
 // The desktop shell (desktop/main.mjs) stops this server with SIGTERM when its
 // window closes, and Ctrl+C does the same in a terminal. Either way Node would
 // exit without saying goodbye to the Python jobs this process started — a CPU
-// transcription holds a core for minutes — so they are stopped first, the way
-// the manager's Stop all button does it. The wait before exiting is for the
-// SIGKILL fallback inside stopProcess, whose timer would otherwise die with
-// this process before it ever fires.
+// transcription holds a core for minutes, and a loaded voice engine holds a
+// model in memory — so they are stopped first, the way the manager's Stop all
+// button does it. The wait before exiting is for the SIGKILL fallback inside
+// stopProcess, whose timer would otherwise die with this process before it
+// ever fires.
 //
 // The managed llama-server goes the same way, for the same reason plus one more:
 // it holds a model's weights in RAM, so leaving it behind would outlive the app
 // that started it and there would be nothing left to ask it to stop.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
-    void Promise.all([stopAllProcesses(), stopLlamaServer()]).then(([stopped]) => {
+    void Promise.all([stopAllProcesses(), stopLlamaServer(), stopTtsEngines()]).then(([stopped]) => {
       if (stopped > 0) setTimeout(() => process.exit(0), 4200);
       else process.exit(0);
     });

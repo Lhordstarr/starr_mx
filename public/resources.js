@@ -277,6 +277,21 @@ export function mountResources() {
   const TASK_LABEL = { stt: 'Transcribing', tts: 'Speaking', image: 'Generating an image' };
 
   /**
+   * How long a warm process has left before it lets go of what it is holding.
+   *
+   * Said as a countdown rather than a duration, because that is the question
+   * being asked: not "how long has it been there" but "how long can I still use
+   * it without waiting for it to load again".
+   */
+  function fmtCountdown(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return 'now';
+    const total = Math.round(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  /**
    * Where it is running. The answer to "why is my machine busy".
    *
    * `cuda` and `rocm` are the runner's own words for what it resolved to and
@@ -601,7 +616,20 @@ export function mountResources() {
         const slot = rowSlot(key);
         const rts = (j.runtimes ?? []).join(' + ') || 'python';
         const isStopping = j.state === 'stopping';
-        const parts = [{ strong: fmtElapsed(now - j.startedAt), rest: 'running' }];
+        // A warm process is not working and is not finished: it is loaded and
+        // waiting, with a deadline. Labelling it like a running job would say
+        // it had been working for as long as it has existed, which is exactly
+        // the wrong thing to say about a process that is deliberately idle.
+        const isWarm = Boolean(j.warm) && !isStopping;
+        const parts = isWarm
+          ? [
+              { strong: 'warm', rest: 'and ready' },
+              {
+                strong: fmtCountdown((j.idleUntil ?? now) - now),
+                rest: 'until it is released',
+              },
+            ]
+          : [{ strong: fmtElapsed(now - j.startedAt), rest: 'running' }];
         // What it is holding right now, which for these jobs is mostly model
         // weights. Left out for the beat where a read fails before the row
         // goes, rather than showing a zero that was never true.
@@ -621,7 +649,7 @@ export function mountResources() {
         parts.push(DEVICE_LABEL[device] ?? device, `via ${rts}`, `pid ${j.pid}`);
         fillRow(slot, {
           item: j,
-          name: `${TASK_LABEL[j.kind] ?? 'Working'} · ${j.repo ?? j.script}`,
+          name: `${isWarm ? 'Voice engine' : (TASK_LABEL[j.kind] ?? 'Working')} · ${j.repo ?? j.script}`,
           metaParts: parts,
           // Every local job gets the bar Ollama gets. A job that is holding
           // three gigabytes of weights should not be the one row in the list
@@ -638,12 +666,18 @@ export function mountResources() {
             ),
           action: isStopping
             ? null
-            : {
-                label: 'Stop',
-                danger: true,
-                title: `Stop this job (pid ${j.pid})`,
-                run: () => stopJob(slot.item),
-              },
+            : isWarm
+              ? {
+                  label: 'Unload',
+                  title: 'Let go of this voice engine and free the memory it is holding',
+                  run: () => stopJob(slot.item),
+                }
+              : {
+                  label: 'Stop',
+                  danger: true,
+                  title: `Stop this job (pid ${j.pid})`,
+                  run: () => stopJob(slot.item),
+                },
         });
         desired.push(slot.row);
       }
@@ -661,7 +695,7 @@ export function mountResources() {
       emptyMsg.textContent =
         data.ollama && !data.ollama.ok
           ? `Nothing running. ${data.ollama.detail}`
-          : 'Nothing running. Ollama keeps a model in memory for a few minutes after a reply, and local jobs appear here while they work.';
+          : 'Nothing running. Ollama keeps a model in memory for a few minutes after a reply, a voice engine stays loaded for ten, and local jobs appear here while they work.';
       desired.push(emptyMsg);
       procmanNote.textContent = '';
     } else if (jobs.some((j) => j.state === 'stopping')) {
@@ -670,8 +704,19 @@ export function mountResources() {
       // "0 models · 1 job" read as a contradiction: the count is only ever
       // *Ollama-resident* models, and a local job loads its own. Say which is
       // which instead, and say when the Ollama half could not be read at all.
+      // A warm voice engine is counted apart from the jobs that are working:
+      // it is loaded and idle, which is neither of the other two.
+      const warmJobs = jobs.filter((j) => j.warm);
+      const workingJobs = jobs.filter((j) => !j.warm);
       const bits = [];
-      if (jobs.length) bits.push(`${jobs.length} job${jobs.length === 1 ? '' : 's'} running`);
+      if (workingJobs.length) {
+        bits.push(`${workingJobs.length} job${workingJobs.length === 1 ? '' : 's'} running`);
+      }
+      if (warmJobs.length) {
+        bits.push(
+          `${warmJobs.length} voice engine${warmJobs.length === 1 ? '' : 's'} warm`,
+        );
+      }
       if (models.length) bits.push(`${models.length} Ollama model${models.length === 1 ? '' : 's'} loaded`);
       else if (data.ollama && !data.ollama.ok) bits.push('Ollama busy or not reachable');
       procmanNote.textContent = bits.join(' · ');
@@ -712,7 +757,11 @@ export function mountResources() {
         const err = (await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`;
         notifyError(err);
       } else {
-        notifySuccess(`Stopped ${TASK_LABEL[job.kind] ?? 'the job'}.`);
+        notifySuccess(
+          job.warm
+            ? 'Released the voice engine.'
+            : `Stopped ${TASK_LABEL[job.kind] ?? 'the job'}.`,
+        );
       }
     } catch {
       notifyError('Could not reach the server to stop that job.');

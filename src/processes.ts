@@ -54,6 +54,21 @@ export interface ManagedProcess {
   startedAt: number;
   endedAt?: number;
   state: ProcessState;
+  /**
+   * True for a process that is loaded and waiting rather than working: a
+   * speech engine holding a voice model between replies.
+   *
+   * It is a different thing from a running job and the manager says so — the
+   * row is not "working", it is "warm", and it has a deadline rather than an
+   * elapsed time. A job that was working and stopped is not warm: it is done.
+   */
+  warm?: boolean;
+  /**
+   * When a warm process will let go of what it is holding, in epoch
+   * milliseconds. Null while it is working, and absent when there is no
+   * deadline to publish.
+   */
+  idleUntil?: number;
   /** Why it ended, for a job the user stopped rather than one that finished. */
   stoppedByUser?: boolean;
   exitCode?: number | null;
@@ -157,6 +172,23 @@ export function attachChild(id: string, child: ChildProcess): void {
 export function setProcessDevice(id: string, device: string): void {
   const slot = live.get(id);
   if (slot && slot.entry.resolvedDevice !== device) slot.entry.resolvedDevice = device;
+}
+
+/**
+ * Marks a process as warm — loaded, and waiting — with the time it will be
+ * released at.
+ *
+ * A speech engine is the case this exists for: it is not working, but it is
+ * not finished either, and it is holding a model in memory. The deadline is
+ * published so the manager can say how long that lasts, instead of the row
+ * looking like a job that has been running for hours.
+ */
+export function setProcessWarm(id: string, warm: boolean, idleUntil?: number): void {
+  const slot = live.get(id);
+  if (!slot) return;
+  slot.entry.warm = warm;
+  if (warm && typeof idleUntil === 'number') slot.entry.idleUntil = idleUntil;
+  else delete slot.entry.idleUntil;
 }
 
 /**

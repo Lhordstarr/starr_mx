@@ -23,6 +23,7 @@ import * as path from 'node:path';
 
 import { RUNTIME_GROUPS, installRuntimes, runtimeStatus, venvPython } from '../src/runtimes.ts';
 import { speak as speakWith } from '../src/infer.ts';
+import { stopTtsEngines } from '../src/tts-engine.ts';
 
 let passed = 0;
 const failures: string[] = [];
@@ -275,12 +276,25 @@ console.log('\nSpeech has more than one runner, and the weights must choose betw
   const interpreter = (venv: string): void => {
     const py = path.join(runtimes, venv, 'bin', 'python');
     mkdirSync(path.dirname(py), { recursive: true });
+    const said = path.join(out, 'said.wav');
     writeFileSync(
       py,
       [
         '#!/bin/bash',
         `echo "$0 $*" >> ${JSON.stringify(log)}`,
-        `echo '{"path": ${JSON.stringify(path.join(out, 'said.wav'))}, "samples": 10, "seconds": 0.5, "device": "cpu"}'`,
+        // The engine protocol, so the path that is actually used — a loaded
+        // voice that stays loaded — is the one under test: say the model is
+        // loaded, then answer every request that arrives.
+        `SAID=${JSON.stringify(said)}`,
+        'if [[ "$*" == *"tts_engine.py"* ]]; then',
+        '  echo \'{"ready": true, "device": "cpu"}\'',
+        '  while IFS= read -r line; do',
+        '    id=$(printf \'%s\' "$line" | sed -n \'s/.*"id": *\\([0-9][0-9]*\\).*/\\1/p\')',
+        `    echo '{"id": '"$id"', "ok": true, "result": {"path": "'"$SAID"'", "samples": 10, "seconds": 0.5, "device": "cpu"}}'`,
+        '  done',
+        '  exit 0',
+        'fi',
+        `echo '{"path": "'"$SAID"'", "samples": 10, "seconds": 0.5, "device": "cpu"}'`,
         '',
       ].join('\n'),
     );
@@ -324,22 +338,35 @@ console.log('\nSpeech has more than one runner, and the weights must choose betw
     const vits = seen.find((l) => l.includes('Acme--vits-tts')) ?? '';
     const kokoro = seen.find((l) => l.includes('Acme--kokoro-82m')) ?? '';
 
-    report('a VITS model is spoken by the generic runner', /speak_hf\.py/.test(vits), vits || '(nothing ran)');
+    // The command line now names the runner rather than the file, because the
+    // voice is made by an engine that stays loaded and asks for one of the
+    // runners by name. What the check is about has not changed: which runner
+    // answers, and in which environment it runs.
+    report(
+      'a VITS model is spoken by the generic runner',
+      /--runner transformers/.test(vits),
+      vits || '(nothing ran)',
+    );
     report(
       'and in the shared environment, where transformers is',
       vits.includes(path.join(runtimes, 'venv', 'bin', 'python')) && !vits.includes('venv-kokoro'),
       vits || '(nothing ran)',
     );
     report(
-      'Kokoro still runs its own script in its own environment',
-      kokoro.includes(path.join(runtimes, 'venv-kokoro', 'bin', 'python')) && /speak\.py/.test(kokoro),
+      'Kokoro still runs its own runner in its own environment',
+      kokoro.includes(path.join(runtimes, 'venv-kokoro', 'bin', 'python')) && /--runner kokoro/.test(kokoro),
       kokoro || '(nothing ran)',
     );
     report(
       'the generic runner is not asked to load a Kokoro checkpoint',
-      !/speak_hf\.py/.test(kokoro) && !/speak\.py/.test(vits.replace('speak_hf.py', '')),
+      !/--runner transformers/.test(kokoro) && !/--runner kokoro/.test(vits),
       `${vits} | ${kokoro}`,
     );
+
+    // The loaded voice is let go of, so the next call starts a fresh engine —
+    // and meets the interpreter that is about to die.
+    await stopTtsEngines();
+    await new Promise((r) => setTimeout(r, 300));
 
     // A runner that dies without ever reading its input must not take the
     // process with it. The text is written to the child's stdin, and when the
@@ -390,6 +417,9 @@ console.log('\nSpeech has more than one runner, and the weights must choose betw
     }
     interpreter('venv');
   } finally {
+    // The engines hold a model in memory; a test that leaves one behind keeps
+    // the process alive after it has said everything it has to say.
+    await stopTtsEngines();
     if (saved.models === undefined) delete process.env.HF_MODELS_DIR;
     else process.env.HF_MODELS_DIR = saved.models;
     if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;

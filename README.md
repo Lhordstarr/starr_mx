@@ -218,6 +218,30 @@ The same rule as everywhere else applies to the device: it is read off the
 loaded model, never off the request, so a run that did not move cannot be
 reported as one that did.
 
+### A voice that stays loaded
+
+A speech runner used to be a process that lived for exactly as long as the
+utterance: it loaded the weights, said one thing, and exited. Every reply paid
+for the load again — seconds for Kokoro, more for the ONNX export, whose
+inference session is not cheap to build — and the resource manager showed a job
+that was gone before it could be read.
+
+The voice is an **engine** now: the same runner, kept in one process and asked
+for one utterance at a time. The first reply pays for the load; the next ones
+do not. It stays for **ten idle minutes** after the last thing it said — long
+enough that a person reading and answering is still served from memory, short
+enough that a machine nobody is talking to is not holding a model for hours.
+The resource manager says exactly that: the row is named *Voice engine*, it
+reads **warm** rather than working, and it counts down the time it has left.
+
+It can be let go of at any time from the same panel: **Unload** releases it,
+and the memory it was holding goes with it. The engines are released when the
+app closes as well.
+
+If an engine cannot be started — a model that will not load, a runtime that is
+missing — the request falls back to the one-shot runner, which is slower and
+always worked. A voice that cannot be loaded is a voice that says so.
+
 Speaking a reply is visible while it happens. The Speak button puts a slim bar
 up at the top of the window — under the topbar, out of the conversation's way,
 and above everything in the window short of a notification — from the moment the
@@ -406,6 +430,11 @@ public/                   chat UI (no build step, no framework)
     the UI. **Stop** sends `SIGTERM`, then `SIGKILL` after four seconds, so a
     runner gets a moment to clean up its own partial output. The caller is told
     plainly that it was stopped, rather than being handed an empty success.
+  - **Warm voice engines.** A speech engine that has said something and is
+    waiting for the next thing is neither of the above: it is not working, and
+    it is not finished. Its row says **warm**, counts down the time it has left
+    before it lets go of the model, and offers **Unload** rather than Stop,
+    because what is wanted is the memory back, not a kill.
 
   Each job reports the runtime it actually uses, read off the runner rather than
   guessed: `whisper_ct2.py` is CTranslate2 (`faster-whisper`) and never loads

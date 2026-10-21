@@ -11,3 +11,6 @@ models/
 *.log
 *.pem
 LocalAI
+# Python bytecode: build output, and stale copies of it are worse than none
+__pycache__/
+*.pyc

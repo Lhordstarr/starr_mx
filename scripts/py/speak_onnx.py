@@ -18,6 +18,11 @@ needed and are deliberately taken from the directory the Models page downloaded:
 The model file is found next to this script's `model_dir`; the caller may pass
 the exact repo-relative path as the seventh argument, but the fallback order
 means a directory with any of the repository's quantisations still works.
+
+Like the other two runners, this file is both a command-line runner and a
+loadable engine: `tts_engine.py` imports `build_engine` and `render` from here,
+so the ONNX session — which takes seconds to build — is paid for once rather
+than once per utterance.
 """
 import glob
 import json
@@ -53,18 +58,24 @@ def provider_label(providers):
     return "cpu"
 
 
-def local_file(repo, model_dir, rel):
+def cli_report(event):
+    """The command line's reporter: one JSON line per event."""
+    print(json.dumps(event), flush=True)
+
+
+def local_file(repo, model_dir, rel, report=None):
     """Path to ``rel`` inside ``model_dir``, fetching it there once if missing."""
+    emit = report or cli_report
     local = os.path.join(model_dir, rel)
     if os.path.isfile(local):
         return local
     try:
         from huggingface_hub import hf_hub_download
 
-        print(json.dumps({"stage": "fetching", "file": rel}), flush=True)
+        emit({"stage": "fetching", "file": rel})
         return hf_hub_download(repo_id=repo, filename=rel, local_dir=model_dir)
     except Exception as exc:
-        print(json.dumps({"stage": "fetching", "file": rel, "without": str(exc)}), flush=True)
+        emit({"stage": "fetching", "file": rel, "without": str(exc)})
         return None
 
 
@@ -90,6 +101,100 @@ def find_model(model_dir, requested):
     return found[0] if found else None
 
 
+def build_engine(model_dir, device, repo, model_file="", report=None):
+    """Load the ONNX session and the Kokoro front end. Returns the engine.
+
+    Building an inference session takes seconds — several on a cold cache — so
+    this is the half worth doing once and keeping.
+    """
+    import numpy as np  # noqa: F401
+    import onnxruntime as ort
+    import soundfile as sf  # noqa: F401
+    from kokoro import KPipeline
+
+    model_path = find_model(model_dir, model_file)
+    if not model_path:
+        raise RuntimeError("no ONNX model found beside this download")
+
+    tokenizer_path = os.path.join(model_dir, "tokenizer.json")
+    if not os.path.isfile(tokenizer_path):
+        raise RuntimeError("tokenizer.json is missing — download the whole set")
+    with open(tokenizer_path, "r", encoding="utf-8") as fh:
+        vocab = json.load(fh).get("model", {}).get("vocab", {})
+    if not vocab:
+        raise RuntimeError("tokenizer.json carries no phoneme vocabulary")
+
+    providers = pick_providers(device)
+    sess = ort.InferenceSession(model_path, providers=providers)
+    landed = provider_label(sess.get_providers())
+
+    # model=False asks only for the front end: G2P, sentence chunking and
+    # the 510-phoneme limit. It never constructs a torch model, so this
+    # path needs the kokoro package's text code but no checkpoint.
+    pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M", model=False)
+
+    # A caller may hand us the PyTorch repository id by mistake; the voice and
+    # the graph only exist in the ONNX repository, so use the export's id for
+    # any on-demand voice fetch either way.
+    voice_repo = repo if "ONNX" in repo.upper() or "onnx" in repo else "onnx-community/Kokoro-82M-v1.0-ONNX"
+    return {
+        "sess": sess,
+        "landed": landed,
+        "vocab": vocab,
+        "pipeline": pipeline,
+        "model_dir": model_dir,
+        "voice_repo": voice_repo,
+    }
+
+
+def render(engine, text, out_path, voice, speed, report=None):
+    """Say one thing with a loaded engine. Returns the result object."""
+    import numpy as np
+    import soundfile as sf
+
+    emit = report or cli_report
+    voice_path = local_file(engine["voice_repo"], engine["model_dir"], f"voices/{voice}.bin", report)
+    if not voice_path:
+        raise RuntimeError(f"voice {voice} is not downloaded")
+    voices = np.fromfile(voice_path, dtype=np.float32)
+    if voices.size % 256:
+        raise RuntimeError("voice file is not a float32 style table")
+    voices = voices.reshape(-1, 1, 256)
+
+    vocab = engine["vocab"]
+    chunks = []
+    for result in engine["pipeline"](text, voice=None, speed=speed):
+        phonemes = result.phonemes
+        if not phonemes:
+            continue
+        ids = [vocab[p] for p in phonemes if p != "$" and p in vocab]
+        if not ids:
+            continue
+        if len(phonemes) >= voices.shape[0]:
+            raise RuntimeError(f"phoneme chunk too long ({len(phonemes)}); no style row")
+        style = voices[len(phonemes)]
+        audio = engine["sess"].run(
+            None,
+            {
+                "input_ids": np.array([[0, *ids, 0]], dtype=np.int64),
+                "style": style.astype(np.float32),
+                "speed": np.array([speed], dtype=np.float32),
+            },
+        )[0]
+        chunks.append(np.asarray(audio).reshape(-1))
+
+    if not chunks:
+        raise RuntimeError("Kokoro produced no audio")
+    merged = np.concatenate(chunks)
+    sf.write(out_path, merged, 24000)
+    return {
+        "path": out_path,
+        "samples": int(merged.shape[0]),
+        "seconds": round(merged.shape[0] / 24000, 2),
+        "device": engine["landed"],
+    }
+
+
 def main() -> int:
     if len(sys.argv) < 5:
         print(
@@ -108,113 +213,23 @@ def main() -> int:
         print(json.dumps({"error": "no text supplied"}))
         return 1
 
-    # A caller may hand us the PyTorch repository id by mistake; the voice and
-    # the graph only exist in the ONNX repository, so use the export's id for
-    # any on-demand voice fetch either way.
-    voice_repo = repo if "ONNX" in repo.upper() or "onnx" in repo else "onnx-community/Kokoro-82M-v1.0-ONNX"
-    voice = os.path.basename(str(voice)).removesuffix(".pt").removesuffix(".bin")
-
     print(json.dumps({"stage": "loading"}), flush=True)
     try:
-        import numpy as np
-        import onnxruntime as ort
-        import soundfile as sf
-        from kokoro import KPipeline
+        import numpy as np  # noqa: F401
+        import onnxruntime as ort  # noqa: F401
+        import soundfile as sf  # noqa: F401
+        from kokoro import KPipeline  # noqa: F401
     except ImportError as exc:
-        if exc.name == "onnxruntime":
-            print(
-                json.dumps(
-                    {
-                        "error": (
-                            "onnxruntime is missing from the Kokoro environment — "
-                            "reinstall Kokoro in Settings → Runtimes"
-                        )
-                    }
-                )
-            )
-        else:
-            print(json.dumps({"error": f"missing dependency: {exc.name}"}))
+        print(json.dumps({"error": f"missing dependency: {exc.name}"}))
         return 1
 
     try:
-        model_path = find_model(model_dir, requested)
-        if not model_path:
-            print(json.dumps({"error": "no ONNX model found beside this download"}))
-            return 1
-
-        tokenizer_path = os.path.join(model_dir, "tokenizer.json")
-        if not os.path.isfile(tokenizer_path):
-            print(json.dumps({"error": "tokenizer.json is missing — download the whole set"}))
-            return 1
-        with open(tokenizer_path, "r", encoding="utf-8") as fh:
-            vocab = json.load(fh).get("model", {}).get("vocab", {})
-        if not vocab:
-            print(json.dumps({"error": "tokenizer.json carries no phoneme vocabulary"}))
-            return 1
-
-        voice_path = local_file(voice_repo, model_dir, f"voices/{voice}.bin")
-        if not voice_path:
-            print(json.dumps({"error": f"voice {voice} is not downloaded"}))
-            return 1
-        voices = np.fromfile(voice_path, dtype=np.float32)
-        if voices.size % 256:
-            print(json.dumps({"error": "voice file is not a float32 style table"}))
-            return 1
-        voices = voices.reshape(-1, 1, 256)
-
-        providers = pick_providers(device)
-        sess = ort.InferenceSession(model_path, providers=providers)
-        landed = provider_label(sess.get_providers())
+        engine = build_engine(model_dir, device, repo, requested)
+        landed = engine["landed"]
         print(json.dumps({"device": landed}), flush=True)
-
-        # model=False asks only for the front end: G2P, sentence chunking and
-        # the 510-phoneme limit. It never constructs a torch model, so this
-        # path needs the kokoro package's text code but no checkpoint.
-        pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M", model=False)
         print(json.dumps({"stage": "synthesising"}), flush=True)
-
-        chunks = []
-        for result in pipeline(text, voice=None, speed=speed):
-            phonemes = result.phonemes
-            if not phonemes:
-                continue
-            ids = [vocab[p] for p in phonemes if p != "$" and p in vocab]
-            if not ids:
-                continue
-            if len(phonemes) >= voices.shape[0]:
-                print(
-                    json.dumps(
-                        {"error": f"phoneme chunk too long ({len(phonemes)}); no style row"}
-                    )
-                )
-                return 1
-            style = voices[len(phonemes)]
-            audio = sess.run(
-                None,
-                {
-                    "input_ids": np.array([[0, *ids, 0]], dtype=np.int64),
-                    "style": style.astype(np.float32),
-                    "speed": np.array([speed], dtype=np.float32),
-                },
-            )[0]
-            chunks.append(np.asarray(audio).reshape(-1))
-
-        if not chunks:
-            print(json.dumps({"error": "Kokoro produced no audio"}))
-            return 1
-        merged = np.concatenate(chunks)
-        sf.write(out_path, merged, 24000)
-        print(
-            json.dumps(
-                {
-                    "path": out_path,
-                    "samples": int(merged.shape[0]),
-                    "seconds": round(merged.shape[0] / 24000, 2),
-                    "device": landed,
-                }
-            ),
-            flush=True,
-        )
+        result = render(engine, text, out_path, voice, speed)
+        print(json.dumps(result), flush=True)
     except Exception as exc:
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
         return 1

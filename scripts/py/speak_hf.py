@@ -7,8 +7,8 @@ notes go to stderr, which the server streams into the run log.
 The argument list is the same as speak.py's, so the server can call either
 runner the same way. What differs is the model: speak.py is Kokoro, a styletts2
 checkpoint the `kokoro` package loads from a .pth beside its voices/, while this
-one runs anything the transformers text-to-speech pipeline loads — VITS (which is
-what the MMS-TTS checkpoints are), SpeechT5, Bark, FastSpeech2.
+one runs anything the transformers text-to-speech pipeline loads — VITS (which
+is what every MMS-TTS checkpoint is), SpeechT5, Bark, FastSpeech2.
 
 `voice` and `speed` are accepted and ignored: these checkpoints carry one voice
 and the pipeline has no speed control. That is said out loud on stderr rather
@@ -20,6 +20,10 @@ works but can never be reached.
 The weights come from <model_dir> itself — the copy the Models page downloaded —
 never from the hub cache, so the directory stays the single source of truth for
 what is installed.
+
+Like speak.py, this file is both a command-line runner and a loadable engine:
+`tts_engine.py` imports `build_engine` and `render` from here, so a pipeline
+that is loaded once can speak many times without reloading the weights.
 """
 import json
 import os
@@ -60,6 +64,11 @@ def vendor_name():
         return "rocm" if os.environ.get("ROCM_HOME") or "rocm" in getattr(torch.version, "hip", "") else "cuda"
     except Exception:
         return "cuda"
+
+
+def cli_report(event):
+    """The command line's reporter: one JSON line per event."""
+    print(json.dumps(event), flush=True)
 
 
 def split_text(text, limit=400):
@@ -108,6 +117,73 @@ def write_wav(path, samples, rate):
     return int(pcm.shape[0])
 
 
+def build_engine(model_dir, device, report=None):
+    """Load the pipeline. Returns the engine.
+
+    The expensive half, and the one worth not repeating: reading the weights
+    and building the pipeline around them. The engine holds the pipeline, so
+    the next utterance does not pay this again.
+    """
+    import numpy as np  # noqa: F401
+    import torch  # noqa: F401
+    from transformers import pipeline
+
+    kind, _index = pick_device(device)
+    use_gpu = kind != "cpu"
+    pipe = pipeline("text-to-speech", model=model_dir, device=f"cuda:{_index}" if use_gpu else "cpu")
+
+    # Where the weights actually ended up, read off the model rather than off
+    # the request.
+    landed = next(pipe.model.parameters()).device.type
+    return {"pipe": pipe, "landed": landed, "kind": kind}
+
+
+def render(engine, text, out_path, voice, speed, report=None):
+    """Say one thing with a loaded engine. Returns the result object."""
+    import numpy as np
+
+    emit = report or cli_report
+    if voice or speed != 1.0:
+        print(
+            "This model has a single voice and no speed control — "
+            f"the voice ({voice or 'default'}) and speed ({speed:g}) settings do not apply.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    pieces = split_text(text)
+    emit({"stage": "synthesising", "chunks": len(pieces)})
+
+    rate = None
+    rendered = []
+    for i, piece in enumerate(pieces):
+        out = engine["pipe"](piece)
+        if not isinstance(out, dict) or "audio" not in out:
+            raise RuntimeError(f"the pipeline returned {type(out).__name__}, not audio")
+        if rate is None:
+            rate = int(out.get("sampling_rate") or 16000)
+        elif int(out.get("sampling_rate") or rate) != rate:
+            # Mixing rates in one file would be a pitch shift partway
+            # through, which is worse than refusing.
+            raise RuntimeError(
+                f"the pipeline changed sample rate mid-run ({rate} → {out['sampling_rate']})"
+            )
+        rendered.append(np.asarray(out["audio"], dtype=np.float32).reshape(-1))
+        print(f"chunk {i + 1}/{len(pieces)}", file=sys.stderr, flush=True)
+
+    if not rendered:
+        raise RuntimeError("no text survived splitting")
+
+    merged = np.concatenate(rendered)
+    samples = write_wav(out_path, merged, rate)
+    return {
+        "path": out_path,
+        "samples": samples,
+        "seconds": round(samples / rate, 2),
+        "device": engine["landed"],
+    }
+
+
 def main() -> int:
     if len(sys.argv) < 5:
         print("usage: speak_hf.py <model_dir> <voice> <out.wav> <device> [speed] [repo]", file=sys.stderr)
@@ -122,71 +198,19 @@ def main() -> int:
 
     print(json.dumps({"stage": "loading"}), flush=True)
     try:
-        import numpy as np
-        import torch
-        from transformers import pipeline
+        import numpy as np  # noqa: F401
+        import torch  # noqa: F401
+        from transformers import pipeline  # noqa: F401
     except ImportError as exc:
         print(json.dumps({"error": f"missing dependency: {exc.name}"}))
         return 1
 
-    kind, _index = pick_device(device)
-    use_gpu = kind != "cpu"
     try:
-        if voice or speed != 1.0:
-            print(
-                "This model has a single voice and no speed control — "
-                f"the voice ({voice or 'default'}) and speed ({speed:g}) settings do not apply.",
-                file=sys.stderr,
-                flush=True,
-            )
-
-        # One pipeline for the whole run: loading it per chunk would re-read the
-        # weights for every sentence.
-        pipe = pipeline("text-to-speech", model=model_dir, device=f"cuda:{_index}" if use_gpu else "cpu")
-
-        # Where the weights actually ended up, read off the model rather than off
-        # the request, and printed before the first chunk — the resource manager
-        # shows this, and a request is not an answer.
-        landed = next(pipe.model.parameters()).device.type
+        engine = build_engine(model_dir, device)
+        landed = engine["landed"]
         print(json.dumps({"device": landed}), flush=True)
-
-        pieces = split_text(text)
-        print(json.dumps({"stage": "synthesising", "chunks": len(pieces)}), flush=True)
-
-        rate = None
-        rendered = []
-        for i, piece in enumerate(pieces):
-            out = pipe(piece)
-            if not isinstance(out, dict) or "audio" not in out:
-                print(json.dumps({"error": f"the pipeline returned {type(out).__name__}, not audio"}))
-                return 1
-            if rate is None:
-                rate = int(out.get("sampling_rate") or 16000)
-            elif int(out.get("sampling_rate") or rate) != rate:
-                # Mixing rates in one file would be a pitch shift partway
-                # through, which is worse than refusing.
-                print(json.dumps({"error": f"the pipeline changed sample rate mid-run ({rate} → {out['sampling_rate']})"}))
-                return 1
-            rendered.append(np.asarray(out["audio"], dtype=np.float32).reshape(-1))
-            print(f"chunk {i + 1}/{len(pieces)}", file=sys.stderr, flush=True)
-
-        if not rendered:
-            print(json.dumps({"error": "no text survived splitting"}))
-            return 1
-
-        merged = np.concatenate(rendered)
-        samples = write_wav(out_path, merged, rate)
-        print(
-            json.dumps(
-                {
-                    "path": out_path,
-                    "samples": samples,
-                    "seconds": round(samples / rate, 2),
-                    "device": landed,
-                }
-            ),
-            flush=True,
-        )
+        result = render(engine, text, out_path, voice, speed)
+        print(json.dumps(result), flush=True)
     except Exception as exc:
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
         return 1

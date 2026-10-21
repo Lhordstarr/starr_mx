@@ -18,6 +18,7 @@ import { hubCacheDir, listDownloads, modelsDir } from './huggingface.js';
 import { attachChild, finishProcess, registerProcess, setProcessDevice } from './processes.js';
 import { findKokoroOnnx, isOnnxWhisper, isTransformersTts } from './runnable.js';
 import { venvPython, type Device } from './runtimes.js';
+import { speakViaEngine } from './tts-engine.js';
 import { WHISPER_REPO, parseWhisperJson, resolveWhisperModel, transcribeWithWhisperCpp } from './whispercpp.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -379,6 +380,42 @@ export async function speak(opts: {
   const onnx = await findKokoroOnnx(dir);
   const generic = !onnx && (await isTransformersTts(dir));
   const script = onnx ? 'speak_onnx.py' : generic ? 'speak_hf.py' : 'speak.py';
+  const venv = generic ? 'venv' : 'venv-kokoro';
+
+  // The loaded engine first.
+  //
+  // It is the same runner in the same environment; what it adds is that the
+  // model stays loaded between replies, so the second reply does not pay for
+  // the weights again and the voice is still there when it is wanted. It also
+  // is a process the resource manager can show and release, rather than one
+  // that is gone before it can be read.
+  const warm = await speakViaEngine(
+    {
+      runner: onnx ? 'kokoro-onnx' : generic ? 'transformers' : 'kokoro',
+      dir,
+      device: opts.device,
+      repo: opts.repo,
+      modelFile: onnx ?? undefined,
+      venv,
+      script,
+    },
+    {
+      text: opts.text,
+      voice: opts.voice,
+      speed: opts.speed,
+      outPath,
+      onLog: opts.onLog,
+    },
+  );
+  if (warm) {
+    return {
+      result: { ok: warm.ok, data: warm.data, log: warm.log },
+      outPath,
+    };
+  }
+
+  // The one-shot runner, which is what the engine falls back to when it cannot
+  // be started at all. Slower, and it always worked.
   const result = await run(
     script,
     [
@@ -397,7 +434,7 @@ export async function speak(opts: {
       kind: 'tts',
       repo: opts.repo,
       device: opts.device,
-      venv: generic ? 'venv' : 'venv-kokoro',
+      venv,
     },
   );
   return { result, outPath };
