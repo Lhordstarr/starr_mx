@@ -183,14 +183,16 @@ try {
   report('the resource manager opens', opened);
 
   // The engine row: named as an engine, not as a job that is working.
-  const row = await waitFor(
-    `[...document.querySelectorAll('.procman__row')].find((r) => /Voice engine/.test(r.textContent))?.textContent ?? ''`,
-    20000,
-  ).then(async () =>
-    evalJs(
-      `[...document.querySelectorAll('.procman__row')].find((r) => /Voice engine/.test(r.textContent))?.textContent ?? ''`,
-    ),
-  );
+  //
+  // It is found by the model it speaks, not by "the first engine on the
+  // page": this machine may well have another voice warm from an earlier
+  // reply, and a test that unloads somebody else's engine is not a test.
+  const rowFor = `(() => {
+    const r = [...document.querySelectorAll('.procman__row')].find((r) => /Voice engine/.test(r.textContent) && r.textContent.includes(${JSON.stringify(model.repo)}));
+    return r ? r.textContent : '';
+  })()`;
+  const hasRow = await waitFor(`${rowFor}.length > 0`, 20000);
+  const row = hasRow ? await evalJs(rowFor) : '';
   report('the engine is listed as a voice engine, not as a working job', /Voice engine/.test(String(row)), String(row));
   report('and it says it is warm', /warm/.test(String(row)), String(row));
   report('and it says how long it will stay', /until it is released/.test(String(row)), String(row));
@@ -201,16 +203,16 @@ try {
   );
 
   const button = await evalJs(
-    `(() => { const r = [...document.querySelectorAll('.procman__row')].find((r) => /Voice engine/.test(r.textContent)); const b = r?.querySelector('button'); return b ? b.textContent : ''; })()`,
+    `(() => { const r = [...document.querySelectorAll('.procman__row')].find((r) => /Voice engine/.test(r.textContent) && r.textContent.includes(${JSON.stringify(model.repo)})); const b = r?.querySelector('button'); return b ? b.textContent : ''; })()`,
   );
   report('and it can be let go of from the panel', button === 'Unload', `the button said "${button}"`);
 
   // And letting go of it really does let go of it.
   await evalJs(
-    `(() => { const r = [...document.querySelectorAll('.procman__row')].find((r) => /Voice engine/.test(r.textContent)); r?.querySelector('button')?.click(); return true; })()`,
+    `(() => { const r = [...document.querySelectorAll('.procman__row')].find((r) => /Voice engine/.test(r.textContent) && r.textContent.includes(${JSON.stringify(model.repo)})); r?.querySelector('button')?.click(); return true; })()`,
   );
   const gone = await waitFor(
-    `![...document.querySelectorAll('.procman__row')].some((r) => /Voice engine/.test(r.textContent))`,
+    `![...document.querySelectorAll('.procman__row')].some((r) => /Voice engine/.test(r.textContent) && r.textContent.includes(${JSON.stringify(model.repo)}))`,
     20000,
   );
   report('the engine is gone once it is released', gone);
