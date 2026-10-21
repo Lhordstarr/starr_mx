@@ -491,6 +491,17 @@ public/                   chat UI (no build step, no framework)
   separate things to stop. Offering a Stop for a process that is only a library
   would be a lie.
 
+  **Image generation picks the arithmetic the machine can actually run.** The
+  diffusers runner loads in fp16 on the card; on a CPU it loads in fp32 unless
+  the chip has native bf16 (AVX512-BF16 or AMX), because PyTorch's fallback
+  for bf16 on older CPUs measured 170x slower than fp32 — one step became
+  minutes. A machine under 7 GB of total RAM keeps the bf16 build, which is
+  the only one that fits; the dtype and the reason are printed on the job's
+  `device` line in the resource manager. The text encoder is released once the
+  prompt has been encoded, and distilled "turbo" models run without
+  classifier-free guidance (`guidance_scale=0`), which is how they were
+  trained — with the pipeline's default the output is coloured noise.
+
   **Only jobs this app started can be stopped.** They are addressed by an id the
   server minted in `src/processes.ts`, never by a pid: this server has no login,
   so a route accepting an arbitrary pid from the browser would be an

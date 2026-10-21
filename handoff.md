@@ -300,6 +300,41 @@ switch that mattered was on the page you were not looking at.
 - `8f35d23` also removed the committed Python `__pycache__` bytecode from
   version control and ignored it.
 
+### 3.8 Stable Diffusion did not work — the dtype and the guidance
+
+Two bugs, both in `scripts/py/generate.py`, and together they read as "local
+image generation is broken": the runner produced coloured noise on a fast
+machine and appeared to hang on a slow one.
+
+- **bfloat16 on a CPU that cannot run it.** The runner loaded every CPU
+  pipeline in bf16 to save memory. PyTorch has real bf16 kernels only where
+  the chip has AVX512-BF16 or AMX; everywhere else it converts to fp32 for
+  every operation. Measured on the dev box (i5-6200U, AVX2 only): **0.3
+  GFLOPS for bf16 against 55 for fp32**, a 170x gap. One 64x64 step took
+  **267 s**, and a 256x256 one-step image was still running after twenty
+  minutes. The choice is now made from the machine: fp16 on the card; on a
+  CPU, bf16 only where it is native or where total RAM is under 7 GB (fp32
+  weights are about 4.5 GB, so on a small laptop the smaller build is the
+  only one that loads); fp32 otherwise. The dtype and the reason are printed
+  on the `{"device": ...}` line the resource manager already reads.
+- **Guidance 7.5 on a distilled model.** sd-turbo and sdxl-turbo are trained
+  without classifier-free guidance — their cards ask for `guidance_scale=0`.
+  The pipeline default is 7.5, so the unconditional half was being built from
+  a model that was never taught to use it, and at one step the output was
+  noise. The runner now reads the tree's name (`...-turbo`) and passes 0.
+- **The text encoder is released after the prompt is encoded.** It runs once;
+  its weights are ~1.2 GB of dead weight for the denoiser. Both embedding
+  halves are built up front when guidance is on, because the pipeline would
+  otherwise reach for the encoder again — after it has been dropped — and
+  only one of `prompt`/`prompt_embeds` is forwarded, which the pipeline
+  insists on (it raises `Cannot forward both ...` otherwise).
+
+After the fix, on the same box: `512x512`, 4 steps, one image in **about two
+minutes** including the 67 s load, and it is a clean "red apple on a wooden
+table". A dtype suite (`npm run test:image-dtype`, 4 checks) asks the runner
+for its policy and compares it with the machine facts read independently, so
+a future edit that hard-codes one dtype fails.
+
 ---
 
 ## 4. Methods that were tried and did **not** work
