@@ -520,8 +520,9 @@ This section exists so nobody spends the same afternoon again.
   is simply no GGUF on disk to load.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
-- **The live box at `/content/starr_mx` is current.** The Cloudflare URL in
-  the notes is stale; the working one is
+- **The live box at `/content/starr_mx` is current through the image fix.**
+  The Ollama listing fix in §3.9 came after it and needs one more pull and
+  restart. The Cloudflare URL in the notes is stale; the working one is
   `https://sites-madonna-imaging-looks.trycloudflare.com`. Verified through
   it: `/tools` redirects to `/#tools` (the tools-tab removal is there),
   `torch 2.11.0+cu128` on a Tesla T4, sd-turbo ready, and a 512x512 / 4-step
