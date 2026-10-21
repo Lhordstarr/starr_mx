@@ -1491,6 +1491,82 @@ a.icon-btn {
 
 /* ---------- Tool selection (/tool picker + chips) ---------- */
 
+/* The composer's tools control: a button that opens the picker and a switch
+   that says whether the chosen tools stay armed.
+
+   Two controls rather than one, because they answer two different questions:
+   *which* tools the model may use, and *when* it may use them. Folding them
+   into one would mean a click that both chose and armed, which is the kind of
+   thing a person stops trusting. */
+.tool-switch {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.tool-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: color var(--speed) var(--ease), border-color var(--speed) var(--ease);
+}
+
+.tool-pick:hover {
+  color: var(--text);
+  border-color: var(--prov-border);
+}
+
+.tool-pick svg {
+  flex: none;
+}
+
+/* The button says something is armed, so it says so in the same greys the
+   chips use rather than in a colour of its own. */
+.tool-pick[data-armed="1"] {
+  color: var(--text);
+  border-color: var(--prov-border);
+  background: var(--prov-soft);
+}
+
+/* The switch itself is the shared .tool-toggle; only its size differs, so it
+   can sit in a row of composer controls without shouting. */
+.tool-switch .tool-toggle {
+  width: 34px;
+  height: 20px;
+}
+
+.tool-switch .tool-toggle::after {
+  width: 14px;
+  height: 14px;
+  top: 2px;
+  left: 2px;
+}
+
+.tool-switch .tool-toggle[data-on="1"]::after {
+  left: 16px;
+}
+
+/* Says the tools are not just for this message. */
+.tools-always {
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--prov-border);
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 /* Indicator strip above the textarea, matching .attach-box's rhythm. */
 .tools-box {
   padding: 9px 0 2px;
@@ -2307,7 +2383,21 @@ a.icon-btn {
     display: none;
   }
   .model-trigger {
-    max-width: 42vw;
+    max-width: 30vw;
+  }
+  /* The tools control took the room the model name had: the switch has to
+     stay reachable, so the model name gives up the width instead. */
+  .composer-row {
+    gap: 6px;
+  }
+  /* The tools control keeps its switch — that is the one that has to be
+     reachable — and drops the words beside it. "3 tools" is the first thing
+     to go: the chips above the text field already say what is armed. */
+  .tool-pick__label {
+    display: none;
+  }
+  .tool-pick {
+    padding: 5px 8px;
   }
   /* The full Send pill costs ~90px the text field needs more. Collapse it to
      a round icon button anchored at the row end: the text label hides

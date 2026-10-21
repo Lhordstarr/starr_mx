@@ -56,6 +56,9 @@ const els = {
   attachList: document.getElementById('attach-list'),
   toolsBox: document.getElementById('tools-box'),
   toolsList: document.getElementById('tools-list'),
+  toolsPick: document.getElementById('tools-pick'),
+  toolsPickLabel: document.getElementById('tools-pick-label'),
+  toolsAlways: document.getElementById('tools-always'),
   toolMenu: document.getElementById('tool-menu'),
   toolMenuList: document.getElementById('tool-menu-list'),
   toolMenuHint: document.getElementById('tool-menu-hint'),
@@ -1396,6 +1399,13 @@ async function send(text, { isRetry = false } = {}) {
 
   // Tools are per-message: snapshot the current selection so a mid-stream
   // change to the chips can't alter this request's permissions.
+  //
+  // The listing is read first when tools are armed and it has not been read
+  // yet: a selection saved yesterday may name a tool that has since been
+  // turned off in Settings, and the server refuses a message that names one.
+  if (selectedTools.length && !toolsMeta) {
+    await toolsList();
+  }
   const requestTools = selectedTools.slice();
   const payload = {
     provider: provider.id,
@@ -2157,8 +2167,26 @@ function addSpeakButton(actions, text) {
 /* ---------------- Tool selection (/tool) ---------------- */
 
 /** Tools picked for the next send, by registry id. Per-message: a finished
- *  reply clears them, and a failed one keeps them so Retry can reuse them. */
+ *  reply clears them, and a failed one keeps them so Retry can reuse them —
+ *  unless the switch below says they are to stay. */
 let selectedTools = [];
+
+/**
+ * Whether the chosen tools stay armed.
+ *
+ * The tools used to be armed for one message and nothing else: the reply
+ * finished and the chips went, so the next message had to go through the
+ * picker again. That is the whole complaint this switch answers — picking the
+ * tools once and then having them for every message, until it is turned off.
+ *
+ * It is remembered across a reload, because "until you turn it back off"
+ * means until you turn it back off, not until the page is closed.
+ */
+let toolsAlways = false;
+
+/** Where the two states are kept between visits. */
+const TOOLS_ALWAYS_KEY = 'llm-tools-always';
+const TOOLS_SELECTION_KEY = 'llm-tools-selection';
 
 /** Last /api/tools listing (id, label, icon, description, enabled) and when
  *  it was fetched — reused for reopen-and-pick and for activity-line labels. */
@@ -2177,12 +2205,36 @@ async function toolsList() {
       if (Array.isArray(tools)) {
         toolsMeta = tools;
         toolsMetaAt = now;
+        pruneDisabledTools();
+        // The chips are painted with the registry's labels, and the labels
+        // only arrive with the listing. A chip drawn before that reads as
+        // `web_search` — the registry's id, not the name a person knows it
+        // by — so they are painted again now that there is something to say.
+        renderToolChips();
       }
     }
   } catch {
     /* keep whatever we had; the picker explains when there is nothing */
   }
   return toolsMeta;
+}
+
+/**
+ * Drops armed tools that are turned off in Settings.
+ *
+ * The selection is remembered between visits, so a tool that was enabled when
+ * it was saved may be off now. Sending it anyway makes the server refuse the
+ * whole message with "Tool not enabled" — over a tool the person cannot see,
+ * because the chip they would remove is not there to remove.
+ */
+function pruneDisabledTools() {
+  if (!toolsMeta) return;
+  const enabled = new Set(toolsMeta.filter((t) => t.enabled).map((t) => t.name));
+  const kept = selectedTools.filter((name) => enabled.has(name));
+  if (kept.length === selectedTools.length) return;
+  selectedTools = kept;
+  renderToolChips();
+  persistTools();
 }
 
 /** Inline SVGs for registry icon ids, in the same hand-inlined stroke style
@@ -2217,6 +2269,14 @@ function toolMeta(name) {
 function renderToolChips() {
   els.toolsBox.hidden = selectedTools.length === 0;
   els.toolsList.innerHTML = '';
+  // The marker first, so it reads as a statement about the chips beside it
+  // rather than as another chip that could be removed.
+  if (toolsAlways && selectedTools.length) {
+    const mark = document.createElement('span');
+    mark.className = 'tools-always';
+    mark.textContent = 'on for every message';
+    els.toolsList.append(mark);
+  }
   for (const name of selectedTools) {
     const meta = toolMeta(name);
     const chip = document.createElement('span');
@@ -2236,6 +2296,66 @@ function renderToolChips() {
     chip.appendChild(rm);
     els.toolsList.appendChild(chip);
   }
+  renderToolSwitch();
+}
+
+/**
+ * Paints the switch and the button beside it.
+ *
+ * The button says what is armed, the switch says whether it stays armed. They
+ * are kept apart so neither has to guess what the other means.
+ */
+function renderToolSwitch() {
+  if (!els.toolsAlways) return;
+  els.toolsAlways.dataset.on = toolsAlways ? '1' : '';
+  els.toolsAlways.setAttribute('aria-checked', String(toolsAlways));
+  els.toolsAlways.setAttribute(
+    'aria-label',
+    toolsAlways
+      ? 'Stop using the chosen tools on every message'
+      : 'Keep the chosen tools armed for every message',
+  );
+  els.toolsAlways.title = toolsAlways
+    ? 'These tools are armed for every message. Click to stop.'
+    : 'Keep the chosen tools armed for every message, not just the next one';
+  if (els.toolsPick) {
+    els.toolsPick.dataset.armed = selectedTools.length ? '1' : '';
+    const label = els.toolsPickLabel;
+    if (label) {
+      if (!selectedTools.length) label.textContent = 'Tools';
+      else if (selectedTools.length === 1) label.textContent = toolMeta(selectedTools[0]).label;
+      else label.textContent = `${selectedTools.length} tools`;
+    }
+  }
+}
+
+/** Keeps the two states between visits. */
+function persistTools() {
+  try {
+    localStorage.setItem(TOOLS_ALWAYS_KEY, toolsAlways ? '1' : '0');
+    localStorage.setItem(TOOLS_SELECTION_KEY, JSON.stringify(selectedTools));
+  } catch {
+    /* a private window, or a full disk: the tools still work for this visit */
+  }
+}
+
+/** Reads the two states back. */
+function restoreTools() {
+  try {
+    const always = localStorage.getItem(TOOLS_ALWAYS_KEY);
+    if (always === '1' || always === '0') toolsAlways = always === '1';
+    const saved = JSON.parse(localStorage.getItem(TOOLS_SELECTION_KEY) ?? '[]');
+    if (Array.isArray(saved)) {
+      selectedTools = saved.filter((name) => typeof name === 'string');
+    }
+  } catch {
+    /* nothing saved, or nothing readable: start with no tools */
+  }
+  renderToolChips();
+  // The labels come with the registry listing. A restored selection has to
+  // wait for it, or the chips read as `web_search` — the registry's id, not
+  // the name a person knows the tool by.
+  if (selectedTools.length) void toolsList();
 }
 
 /** Adds or removes a tool for the next send. Idempotent per id, so selecting
@@ -2246,6 +2366,7 @@ function toggleTool(name) {
     : [...selectedTools, name];
   renderToolChips();
   syncToolRows();
+  persistTools();
 }
 
 /** Flips the selected marks on the rows already on screen. Rebuilding the
@@ -2298,10 +2419,12 @@ function renderToolRows() {
 function openToolMenu() {
   renderToolRows();
   els.toolMenu.hidden = false;
+  els.toolsPick?.setAttribute('aria-expanded', 'true');
 }
 
 function closeToolMenu() {
   els.toolMenu.hidden = true;
+  els.toolsPick?.setAttribute('aria-expanded', 'false');
 }
 
 /** "/tool" was typed: fetch the listing, then open the picker. */
@@ -2309,6 +2432,41 @@ async function openToolPicker() {
   await toolsList();
   openToolMenu();
 }
+
+/**
+ * The switch: the tools stay armed, for every message, until it is turned off.
+ *
+ * Turning it on with nothing chosen arms everything the registry has enabled,
+ * because the point of the switch is to be the one click that lets the model
+ * reach for the web — the alternative is that it does nothing at all and the
+ * person has to find the picker as well.
+ */
+els.toolsAlways?.addEventListener('click', async () => {
+  const next = !toolsAlways;
+  if (next && !selectedTools.length) {
+    const listing = await toolsList();
+    selectedTools = (listing ?? []).filter((t) => t.enabled).map((t) => t.name);
+  }
+  toolsAlways = next;
+  renderToolChips();
+  syncToolRows();
+  persistTools();
+  if (next && selectedTools.length) {
+    notifySuccess(
+      `Tools are armed for every message: ${selectedTools.map((t) => toolMeta(t).label).join(', ')}`,
+    );
+  }
+});
+
+/** The button beside the switch: the picker, without typing /tool. */
+els.toolsPick?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!els.toolMenu.hidden) {
+    closeToolMenu();
+    return;
+  }
+  void openToolPicker();
+});
 
 /** Per-message selection, cleared once the reply finishes — unless the user
  *  already picked tools again mid-stream, whose newer choice stands. A failed
@@ -2318,8 +2476,14 @@ function releaseTools(requestTools) {
     selectedTools.length === requestTools.length &&
     requestTools.every((t, i) => selectedTools[i] === t);
   if (!unchanged) return;
+  // The switch changes that: when the tools are armed for every message, a
+  // finished reply does not clear them. That is the whole point of the
+  // switch, and clearing them here would undo it after every single reply —
+  // which is exactly the loop the switch exists to end.
+  if (toolsAlways) return;
   selectedTools = [];
   renderToolChips();
+  persistTools();
 }
 
 els.toolMenuList.addEventListener('click', (e) => {
@@ -2822,6 +2986,12 @@ renderConversation();
 // Wires the picker, paste and drop handlers. The capability probe runs from
 // applyProvider() once a provider is actually chosen.
 attachments.init();
+
+// The tools that were armed last time, and whether they were armed for every
+// message. Restored before anything is drawn, so the switch is already in the
+// right position when the page appears — a switch that pops on after the
+// first paint reads as a change nobody made.
+restoreTools();
 
 // Click-to-enlarge + download for images in the transcript (attachments now,
 // anything added later via the observer).

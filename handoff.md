@@ -208,7 +208,27 @@ it had.
     where they are. A GPU that will not start falls back to the CPU and says
     so, rather than failing the run.
 
-### 3.4 Smaller things, from the recent history
+### 3.5 The tools stay armed — a switch beside the picker
+
+The tools were armed for one message and nothing else: a reply finished, the
+chips went, and the next message had to go through the picker again. The
+composer now carries a **Tools** button (which opens the picker, and says what
+is armed) and a **switch** beside it (which says whether it stays armed).
+
+  - **Switch off** — the old behaviour, unchanged: per-message, cleared when a
+    reply lands, kept when a send fails so Retry can reuse it.
+  - **Switch on** — the tools stay armed for every message, and the chips say
+    so ("on for every message"). Turning it on with nothing chosen arms every
+    tool the registry has enabled, because the point of a switch is to be the
+    one click that does the thing.
+  - Both the switch and the selection are remembered between visits, so
+    "until you turn it back off" survives a reload.
+  - A tool that has since been turned off in Settings is dropped from a saved
+    selection, rather than making every message fail with "Tool not enabled".
+  - The shared on/off switch moved from `settings.css` to `theme.css`, which
+    both pages load, so the two switches are the same switch.
+
+### 3.6 Smaller things, from the recent history
 
 - `d228929` — a bare date question is answered from the clock, before the
   model is even prepared, instead of being sent to Wikipedia.
@@ -282,6 +302,28 @@ This section exists so nobody spends the same afternoon again.
 - **Reporting the request instead of the answer.** A runner that was asked
   for CUDA and got the CPU has to say *cpu*. The provider reported is read
   off the session (`sess.get_providers()`), never off the request.
+
+### The always-on tools switch
+
+- **Clearing the selection in `releaseTools()` regardless of the switch.** The
+  switch was added and the clearing was left in place, so the tools were
+  disarmed after every reply and the switch did nothing. The clearing is now
+  conditional on the switch being off.
+- **Painting the chips before the registry listing arrives.** The labels come
+  from `/api/tools`; a chip drawn before that reads as `web_search` — the
+  registry's id, not the name a person knows it by. The chips are painted
+  again when the listing lands, and a restored selection asks for it.
+- **Persisting the selection without pruning it.** The server refuses a
+  message that names a tool which is not enabled, so a selection saved before
+  a tool was turned off in Settings made every message fail. The selection is
+  pruned against the listing.
+- **One control doing two things.** Choosing *which* tools and deciding
+  *when* they may be used are two questions, and a click that did both is the
+  kind of thing a person stops trusting. They are two controls in one group.
+- **Putting the switch in the composer row without giving the model name its
+  width back.** On a 390px screen the row overflowed and the Send button went
+  off the edge. The model trigger gives up the width on narrow screens
+  (30vw) and the tools button drops its label.
 
 ### The warm engine
 

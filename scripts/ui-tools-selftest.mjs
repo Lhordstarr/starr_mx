@@ -369,6 +369,129 @@ try {
     ),
   );
 
+  /* ---- the always-on switch ----
+
+     The complaint it answers: the tools were armed for one message and then
+     gone, so every reply had to go through the picker again. The switch is
+     the one control that says "not this time" — the model may reach for the
+     tools on every message, until it is turned off. */
+  report(
+    'the composer carries a switch for it',
+    await evalJs(
+      `!!document.getElementById('tools-always') && document.getElementById('tools-always').getAttribute('role') === 'switch'`,
+    ),
+  );
+  report(
+    'and it starts off, like the tools themselves',
+    await evalJs(
+      `document.getElementById('tools-always').dataset.on !== '1' &&
+       document.getElementById('tools-always').getAttribute('aria-checked') === 'false'`,
+    ),
+  );
+
+  // A successful reply, so the "the selection is released when the reply
+  // finishes" path is the one being exercised.
+  await evalJs(`(() => {
+    window.__bodies = [];
+    const orig = window.fetch;
+    window.__origFetch = orig;
+    window.fetch = (...args) => {
+      if (String(args[0]).includes('/api/chat')) {
+        window.__bodies.push(args[1].body);
+        const body = ${JSON.stringify('event: delta\ndata: {"text":"ok"}\n\nevent: done\ndata: {}\n\n')};
+        return Promise.resolve(new Response(new ReadableStream({
+          start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); },
+        }), { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+      }
+      return orig(...args);
+    };
+  })()`);
+
+  await evalJs(`document.getElementById('tools-always').click()`);
+  report(
+    'turning it on arms the tools the registry has',
+    await waitFor(`document.querySelectorAll('.tool-chip').length === 3`, 8000),
+    String(await evalJs(`document.querySelectorAll('.tool-chip').length`)),
+  );
+  report(
+    'and the switch says it is on',
+    await evalJs(
+      `document.getElementById('tools-always').dataset.on === '1' &&
+       document.getElementById('tools-always').getAttribute('aria-checked') === 'true'`,
+    ),
+  );
+  report(
+    'and the chips say they are not just for this message',
+    await evalJs(
+      `!!document.querySelector('.tools-always') &&
+       /every message/i.test(document.querySelector('.tools-always').textContent)`,
+    ),
+  );
+  report(
+    'and the button says what is armed',
+    await evalJs(`/3 tools/.test(document.getElementById('tools-pick-label').textContent)`),
+    String(await evalJs(`document.getElementById('tools-pick-label').textContent`)),
+  );
+
+  // Now a message, and a reply that finishes: the tools must still be armed.
+  await evalJs(`(() => {
+    const i = document.getElementById('input');
+    i.value = 'hello there';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('composer').requestSubmit();
+  })()`);
+  await waitFor(`window.__bodies.length > 0`, 8000);
+  await sleep(600);
+  report(
+    'the message carries the armed tools',
+    (await evalJs(`(() => {
+      if (!window.__bodies.length) return 'no body captured';
+      const body = JSON.parse(window.__bodies.at(-1));
+      return JSON.stringify(body.tools);
+    })()`)) ===
+      JSON.stringify(['web_search', 'fetch_page', 'wikipedia']),
+  );
+  report(
+    'and they are still armed after the reply finished',
+    await evalJs(`document.querySelectorAll('.tool-chip').length === 3`),
+    String(await evalJs(`document.querySelectorAll('.tool-chip').length`)),
+  );
+
+  // A reload must not quietly disarm them: "until you turn it back off".
+  await cdp('Page.navigate', { url: APP_URL });
+  await waitFor(`document.readyState === 'complete' && !!document.getElementById('tools-always')`);
+  report(
+    'the switch is still on after a reload',
+    await waitFor(`document.getElementById('tools-always').dataset.on === '1'`, 8000),
+  );
+  report(
+    'and the tools are still armed',
+    await waitFor(`document.querySelectorAll('.tool-chip').length === 3`, 8000),
+    String(await evalJs(`document.querySelectorAll('.tool-chip').length`)),
+  );
+  report(
+    'and the restored chips carry the tool names, not the registry ids',
+    await waitFor(
+      `[...document.querySelectorAll('.tool-chip .tc-name')].map(n => n.textContent).join(',') === 'Web Search,Fetch Page,Wikipedia'`,
+      8000,
+    ),
+    String(
+      await evalJs(`[...document.querySelectorAll('.tool-chip .tc-name')].map(n => n.textContent).join(',')`),
+    ),
+  );
+
+  // Turning it off gives the old per-message behaviour back.
+  await evalJs(`document.getElementById('tools-always').click()`);
+  await waitFor(`document.getElementById('tools-always').dataset.on !== '1'`);
+  report(
+    'turning it off stops the tools being armed for every message',
+    await evalJs(`document.getElementById('tools-always').getAttribute('aria-checked') === 'false'`),
+  );
+  report(
+    'and the chips no longer claim to be always on',
+    await evalJs(`!document.querySelector('.tools-always')`),
+  );
+
   /* Narrow screens: the picker stays inside the viewport. */
   await cdp('Emulation.setDeviceMetricsOverride', {
     width: 390,
@@ -399,6 +522,7 @@ try {
   await cdp('Page.navigate', { url: new URL('settings#tools', APP_URL).href });
   const gotToggle = await waitFor(
     `document.readyState === 'complete' && document.querySelectorAll('.tool-toggle').length > 0`,
+    15000,
   );
   report('the settings page renders tool switches', gotToggle, 'no .tool-toggle found');
 

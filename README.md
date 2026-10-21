@@ -486,14 +486,24 @@ public/                   chat UI (no build step, no framework)
   Everything else on the machine is out of scope and cannot be touched from here.
 - Copy and retry on any assistant reply; est. tokens and elapsed time per reply
 - Agent tools on the Settings → Tools tab (wrench icon in the topbar): `web_search`,
-  `fetch_page` and `wikipedia`, all keyless. Type `/tool` in the message box to
-  open the picker and arm tools for the next message; each pick gets a chip
-  ("🌐 Web Search ✕") above the input, removable one by one (the chips reuse the
-  app's own inline globe/file/book SVGs). The selection is per-message and
-  enforced on the server: the request names the exact subset, only those
-  definitions go on the wire, anything else the model invents back is refused
-  with "not enabled for this request", and the chips clear once a reply lands
-  (a failed send keeps them so Retry reuses them). The model calls tools only
+  `fetch_page` and `wikipedia`, all keyless. The composer carries a **Tools**
+  button and a **switch** beside it. The button opens the picker (the same one
+  `/tool` opens) and says what is armed; the switch says whether it stays
+  armed. Each pick gets a chip ("🌐 Web Search ✕") above the input, removable
+  one by one (the chips reuse the app's own inline globe/file/book SVGs).
+  **With the switch off** the selection is per-message, as it always was: the
+  chips clear once a reply lands (a failed send keeps them so Retry reuses
+  them). **With the switch on** the tools stay armed for every message —
+  there is no picking them again after each reply — and the chips say so
+  ("on for every message"). Turning it on with nothing chosen arms every tool
+  the registry has enabled, and both the switch and the selection are
+  remembered between visits, so "until you turn it back off" means exactly
+  that. The selection is enforced on the server either way: the request names
+  the exact subset, only those definitions go on the wire, anything else the
+  model invents back is refused with "not enabled for this request", and a
+  tool that has since been turned off in Settings is dropped from a saved
+  selection rather than making every message fail.
+  The model calls tools only
   when the question needs them, and each call streams into the transcript as a
   small activity line ("Web Search — query ✓ completed" / "✗ failed — …") under
   the reply; repeated identical calls reuse the first result instead of hitting
