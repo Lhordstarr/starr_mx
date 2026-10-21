@@ -2221,7 +2221,7 @@ async function toolsList() {
 }
 
 /**
- * Drops armed tools that are turned off in Settings.
+ * Drops armed tools that are turned off in the picker.
  *
  * The selection is remembered between visits, so a tool that was enabled when
  * it was saved may be off now. Sending it anyway makes the server refuse the
@@ -2379,8 +2379,18 @@ function syncToolRows() {
   }
 }
 
-/** Rebuilds the picker from the last listing. Tools turned off in Settings
- *  show greyed with the reason, so their absence is never a mystery. */
+/**
+ * Rebuilds the picker from the last listing.
+ *
+ * Each row carries two controls, because they answer two different questions:
+ * the row itself says "offer this for this message", and the switch beside it
+ * says "let the model use this at all". They used to live in two places — the
+ * switch on a Settings tab and the arming here — and a person had to know
+ * that the switch existed somewhere else to turn a tool off.
+ *
+ * A tool that is turned off cannot be armed, and its row says so, so its
+ * absence is never a mystery.
+ */
 function renderToolRows() {
   els.toolMenuList.innerHTML = '';
   const tools = toolsMeta;
@@ -2392,15 +2402,18 @@ function renderToolRows() {
     return;
   }
   for (const t of tools) {
+    const wrap = document.createElement('div');
+    wrap.className = 'tm-item';
+
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'tm-row';
     row.dataset.name = t.name;
     row.setAttribute('role', 'option');
     row.setAttribute('aria-selected', selectedTools.includes(t.name) ? 'true' : 'false');
+    row.title = t.enabled ? t.description : 'The model may not use this tool';
     if (!t.enabled) {
       row.disabled = true;
-      row.title = 'Turned off in Settings → Tools';
     }
     row.innerHTML =
       toolIconSvg(t.icon) +
@@ -2409,12 +2422,69 @@ function renderToolRows() {
     row.querySelector('.tm-name').textContent = t.label || t.name;
     row.querySelector('.tm-desc').textContent = t.enabled
       ? t.description
-      : 'Turned off in Settings → Tools';
-    els.toolMenuList.appendChild(row);
+      : 'The model may not use this tool';
+    wrap.append(row);
+
+    // The switch: whether the model may use this tool at all. Turning it off
+    // also unarms it — a tool the model is not allowed to use cannot be
+    // offered to it.
+    const sw = document.createElement('button');
+    sw.type = 'button';
+    sw.className = 'tool-toggle tm-item__switch';
+    sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-checked', String(t.enabled));
+    sw.dataset.on = t.enabled ? '1' : '';
+    sw.setAttribute(
+      'aria-label',
+      `${t.enabled ? 'Stop the model using' : 'Let the model use'} ${t.label || t.name}`,
+    );
+    sw.title = sw.getAttribute('aria-label');
+    sw.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const next = !t.enabled;
+      sw.disabled = true;
+      try {
+        const res = await fetch(`/api/tools/${encodeURIComponent(t.name)}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ enabled: next }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        t.enabled = data.tool?.enabled ?? next;
+        if (!t.enabled && selectedTools.includes(t.name)) {
+          selectedTools = selectedTools.filter((x) => x !== t.name);
+          renderToolChips();
+          persistTools();
+        }
+        renderToolRows();
+        notifySuccess(
+          `The model may ${t.enabled ? 'use' : 'not use'} ${t.label || t.name}.`,
+        );
+      } catch (err) {
+        notifyError(err instanceof Error ? err.message : String(err));
+        sw.disabled = false;
+      }
+    });
+    wrap.append(sw);
+
+    els.toolMenuList.appendChild(wrap);
   }
+
+  // What the picker says under the list: what is turned off, and where tool
+  // calls work at all. The second sentence used to live on a Settings tab of
+  // its own; it belongs next to the tools it is about.
   const off = tools.filter((t) => !t.enabled).length;
-  els.toolMenuHint.hidden = off === 0;
-  els.toolMenuHint.textContent = `${off} tool${off === 1 ? ' is' : 's are'} turned off in Settings → Tools.`;
+  const capable = (providers ?? []).filter((p) => p.supportsTools).map((p) => p.label);
+  const bits = [];
+  if (off) bits.push(`${off} tool${off === 1 ? ' is' : 's are'} turned off.`);
+  if (capable.length) {
+    bits.push(`Tool calls work with: ${capable.join(', ')}.`);
+  } else if (providers?.length) {
+    bits.push('No configured provider supports tool calls right now.');
+  }
+  els.toolMenuHint.hidden = bits.length === 0;
+  els.toolMenuHint.textContent = bits.join(' ');
 }
 
 function openToolMenu() {
@@ -3007,6 +3077,19 @@ restoreTools();
 initImageViewer();
 
 await loadProviders(saved);
+
+// /tools used to be a Settings tab; the server still redirects a bookmarked
+// link here, and this opens the picker that replaced it. The hash is dropped
+// as it is honoured, so a reload resumes the chat instead of re-opening the
+// picker, and the listener catches a same-page link too — navigating to a
+// hash on the page you are already on does not reload it.
+function openToolsFromHash() {
+  if (location.hash !== '#tools') return;
+  history.replaceState(null, '', location.pathname);
+  void openToolPicker();
+}
+openToolsFromHash();
+window.addEventListener('hashchange', openToolsFromHash);
 
 autosize();
 els.input.focus();

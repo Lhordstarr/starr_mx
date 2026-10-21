@@ -497,11 +497,17 @@ public/                   chat UI (no build step, no framework)
   arbitrary-process killer reachable by anything that can talk to the port.
   Everything else on the machine is out of scope and cannot be touched from here.
 - Copy and retry on any assistant reply; est. tokens and elapsed time per reply
-- Agent tools on the Settings → Tools tab (wrench icon in the topbar): `web_search`,
+- Agent tools (wrench icon in the topbar): `web_search`,
   `fetch_page` and `wikipedia`, all keyless. The composer carries a **Tools**
   button and a **switch** beside it. The button opens the picker (the same one
   `/tool` opens) and says what is armed; the switch says whether it stays
-  armed. The picker has a close button in its corner, so it can be dismissed
+  armed. Each row in the picker carries a small switch of its own: the row
+  arms the tool for this message, the switch decides whether the model may use
+  it at all — turning one off unarms it and greys the row, so a tool the model
+  cannot use is never silently missing. (Those switches used to be a Settings
+  tab of their own, which meant knowing that they existed somewhere else to
+  turn a tool off.) The picker has a close button in its corner, so it can be
+  dismissed
   without clicking away from it — clicking away closes it too, but that click
   lands on whatever was underneath. Each pick gets a chip ("🌐 Web Search ✕")
   above the input, removable
@@ -516,7 +522,7 @@ public/                   chat UI (no build step, no framework)
   that. The selection is enforced on the server either way: the request names
   the exact subset, only those definitions go on the wire, anything else the
   model invents back is refused with "not enabled for this request", and a
-  tool that has since been turned off in Settings is dropped from a saved
+  tool that has since been turned off in the picker is dropped from a saved
   selection rather than making every message fail.
   The model calls tools only
   when the question needs them, and each call streams into the transcript as a

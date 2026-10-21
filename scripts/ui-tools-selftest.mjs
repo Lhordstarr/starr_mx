@@ -560,22 +560,27 @@ try {
   );
   await cdp('Emulation.clearDeviceMetricsOverride');
 
-  /* ---- settings: the on-state track is a live gradient ---- */
+  /* ---- the on-state track is a live gradient ----
 
+     The switches that decide whether the model may use a tool at all used to
+     live on a Settings tab of their own. They are in the picker now, beside
+     the tools they are about, so the check follows them. */
   await cdp('Emulation.setEmulatedMedia', {
     features: [{ name: 'prefers-color-scheme', value: 'dark' }],
   });
-  await cdp('Page.navigate', { url: new URL('settings#tools', APP_URL).href });
-  const gotToggle = await waitFor(
-    `document.readyState === 'complete' && document.querySelectorAll('.tool-toggle').length > 0`,
+  await cdp('Page.navigate', { url: APP_URL });
+  await waitFor(
+    `document.readyState === 'complete' && !!document.getElementById('tools-pick')`,
     15000,
   );
-  report('the settings page renders tool switches', gotToggle, 'no .tool-toggle found');
+  await evalJs(`document.getElementById('tools-pick').click(); true`);
+  const gotToggle = await waitFor(`document.querySelectorAll('.tm-item__switch').length > 0`, 15000);
+  report('the picker carries the per-tool switches', gotToggle, 'no .tm-item__switch found');
 
   if (gotToggle) {
     const readToggle = () =>
       evalJs(`(() => {
-        const t = document.querySelector('.tool-toggle');
+        const t = document.querySelector('.tm-item__switch');
         const track = getComputedStyle(t, '::before');
         const knob = getComputedStyle(t, '::after');
         return {
@@ -590,8 +595,8 @@ try {
 
     const start = await readToggle();
     if (!start.on) {
-      await evalJs(`document.querySelector('.tool-toggle').click()`);
-      await waitFor(`document.querySelector('.tool-toggle').dataset.on === '1'`);
+      await evalJs(`document.querySelector('.tm-item__switch').click(); true`);
+      await waitFor(`document.querySelector('.tm-item__switch').dataset.on === '1'`, 8000);
     }
     const on = await readToggle();
     report(
@@ -602,7 +607,7 @@ try {
         on.image.includes('linear-gradient'),
       JSON.stringify(on),
     );
-    report('the knob sits at the right end when on', on.knobLeft === '20px', on.knobLeft);
+    report('the knob sits at the right end when on', on.knobLeft === '16px', on.knobLeft);
 
     /* The accessibility path keeps the gradient but stops the movement. */
     await cdp('Emulation.setEmulatedMedia', {
@@ -615,18 +620,19 @@ try {
     report(
       'reduced motion freezes the stream instead of dropping the state',
       await evalJs(
-        `getComputedStyle(document.querySelector('.tool-toggle'), '::before').animationName === 'none'`,
+        `getComputedStyle(document.querySelector('.tm-item__switch'), '::before').animationName === 'none'`,
       ),
     );
+
     await cdp('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-color-scheme', value: 'dark' }],
     });
+    await sleep(150);
 
-    await evalJs(`document.querySelector('.tool-toggle').click()`);
-    await waitFor(`document.querySelector('.tool-toggle').dataset.on === ''`);
-    await waitFor(
-      `getComputedStyle(document.querySelector('.tool-toggle'), '::before').opacity === '0'`,
-    );
+    /* Turning a tool off has to do more than look different: the model may
+       not use it, so it cannot be armed either. */
+    await evalJs(`document.querySelector('.tm-item__switch').click(); true`);
+    await waitFor(`document.querySelector('.tm-item__switch').dataset.on !== '1'`, 8000);
     const off = await readToggle();
     report(
       'a switch that is off fades the stream out and pauses it',
@@ -634,13 +640,40 @@ try {
       JSON.stringify(off),
     );
     report('the knob returns to the left when off', off.knobLeft === '2px', off.knobLeft);
+    report(
+      'and the tool it belongs to can no longer be armed',
+      await evalJs(
+        `document.querySelector('.tm-row')?.disabled === true &&
+         /may not use/.test(document.querySelector('.tm-row .tm-desc')?.textContent ?? '')`,
+      ),
+      String(await evalJs(`document.querySelector('.tm-row .tm-desc')?.textContent`)),
+    );
 
-    // Leave the setting exactly as it was found.
-    if (start.on) {
-      await evalJs(`document.querySelector('.tool-toggle').click()`);
-      await waitFor(`document.querySelector('.tool-toggle').dataset.on === '1'`);
-    }
+    /* And back on, so the machine is left as it was found. */
+    await evalJs(`document.querySelector('.tm-item__switch').click(); true`);
+    await waitFor(`document.querySelector('.tm-item__switch').dataset.on === '1'`, 8000);
+    report(
+      'the tool is available again',
+      await evalJs(`document.querySelector('.tm-row')?.disabled === false`),
+    );
+    await evalJs(`document.getElementById('tool-menu-close')?.click(); true`);
   }
+
+  /* A bookmark from when the tools had a tab of their own: the route still
+     answers, and the page opens the picker it was pointing at. */
+  const redirect = await fetch(new URL('/tools', APP_URL), { redirect: 'manual' });
+  report(
+    '/tools still lands somewhere useful',
+    redirect.status === 302 && (redirect.headers.get('location') ?? '').endsWith('/#tools'),
+    `${redirect.status} ${redirect.headers.get('location')}`,
+  );
+  await cdp('Page.navigate', { url: new URL('/#tools', APP_URL).href });
+  const hashOpens = await waitFor(
+    `document.readyState === 'complete' && !!document.getElementById('tool-menu') &&
+       !document.getElementById('tool-menu').hidden`,
+    15000,
+  );
+  report('and the hash opens the picker that replaced the tab', hashOpens);
 
   ws.close();
 } finally {

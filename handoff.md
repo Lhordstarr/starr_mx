@@ -249,7 +249,7 @@ is armed) and a **switch** beside it (which says whether it stays armed).
     one click that does the thing.
   - Both the switch and the selection are remembered between visits, so
     "until you turn it back off" survives a reload.
-  - A tool that has since been turned off in Settings is dropped from a saved
+  - A tool that has since been turned off in the picker is dropped from a saved
     selection, rather than making every message fail with "Tool not enabled".
   - The shared on/off switch moved from `settings.css` to `theme.css`, which
     both pages load, so the two switches are the same switch.
@@ -259,7 +259,32 @@ is armed) and a **switch** beside it (which says whether it stays armed).
     clicked. The close button puts the focus back in the input, the way
     Escape does.
 
-### 3.6 Smaller things, from the recent history
+### 3.6 The Settings → Tools tab is gone — the switches moved into the picker
+
+The Settings page had a **Tools** tab whose only content was one switch per
+tool: whether the model may use that tool at all. The composer then grew its
+own Tools button and switch, which answer a different question (what is armed
+for this message). Two places to turn a tool off, in two vocabularies, and the
+switch that mattered was on the page you were not looking at.
+
+  - The tab's switches are now a small switch on each row of the picker, beside
+    the tool they are about. The row still arms the tool for this message; the
+    switch says whether the model may use it at all. Turning it off unarms the
+    tool and greys the row, so a tool the model cannot use is never silently
+    missing.
+  - The picker's hint line now carries both sentences the tab used to own: how
+    many tools are turned off, and which configured providers support tool
+    calls.
+  - `TABS` is `['keys', 'models']`; an old `#tools` hash falls back to the keys
+    tab the same way any unknown hash does. The `/tools` route redirects to
+    `/#tools` and the chat page opens the picker on that hash, so a bookmark
+    made when the tab existed still lands on the thing it named.
+  - The server's "No tools enabled" notice points at the Tools button instead
+    of a Settings tab.
+  - `settings.css` lost the `.tool-card` block that only the tab used; the
+    chat page kept its own `.tm-*` row styles.
+
+### 3.7 Smaller things, from the recent history
 
 - `d228929` — a bare date question is answered from the clock, before the
   model is even prepared, instead of being sent to Wikipedia.

@@ -28,7 +28,7 @@ themeBtn.addEventListener('click', () => {
 
 /* ---------------- Tabs (API Keys / Tools / Models) ---------------- */
 
-const TABS = ['keys', 'tools', 'models'];
+const TABS = ['keys', 'models'];
 /** Sub-views of the models tab, mirrored in the URL as "#models/<subview>". */
 const SUBVIEWS = ['local', 'catalog', 'downloads', 'browse', 'runtimes'];
 const tabBtns = Object.fromEntries(TABS.map((n) => [n, document.getElementById(`tab-${n}`)]));
@@ -63,7 +63,6 @@ async function selectTab(name, push = true) {
     await refreshHfFiles();
   } else if (!loadedTabs.has(name)) {
     loadedTabs.add(name);
-    if (name === 'tools') await refreshTools();
   }
 }
 
@@ -870,127 +869,6 @@ pullForm.addEventListener('submit', async (e) => {
     pullSubmit.disabled = false;
   }
 });
-
-/* ---------------- Agent tools (moved from the old /tools page) ---------------- */
-
-const toolsListEl = document.getElementById('tools-list');
-const toolsProvidersNote = document.getElementById('tools-providers');
-
-/** One-line summary of a tool's arguments for the details block. */
-function toolParamsSummary(tool) {
-  const props = tool.parameters?.properties ?? {};
-  const required = new Set(tool.parameters?.required ?? []);
-  return Object.entries(props).map(([name, p]) => {
-    const bits = [p.type];
-    if (required.has(name)) bits.push('required');
-    if (p.description) bits.push(p.description);
-    const li = document.createElement('li');
-    const code = document.createElement('code');
-    code.textContent = name;
-    li.append(code, ` — ${bits.join(' · ')}`);
-    return li;
-  });
-}
-
-function renderTool(tool) {
-  const card = document.createElement('div');
-  card.className = 'tool-card';
-
-  const head = document.createElement('div');
-  head.className = 'tool-head';
-
-  const name = document.createElement('span');
-  name.className = 'tool-name';
-  name.textContent = tool.name;
-
-  const badges = document.createElement('span');
-  badges.className = 'tool-badges';
-  if (tool.keyless) {
-    const b = document.createElement('span');
-    b.className = 'badge ok';
-    b.textContent = 'keyless';
-    badges.append(b);
-  }
-
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'tool-toggle';
-  toggle.setAttribute('role', 'switch');
-  toggle.setAttribute('aria-checked', String(tool.enabled));
-  toggle.setAttribute('aria-label', `Enable ${tool.name}`);
-  toggle.dataset.on = tool.enabled ? '1' : '';
-  toggle.addEventListener('click', async () => {
-    const next = !tool.enabled;
-    toggle.disabled = true;
-    try {
-      const res = await fetch(`/api/tools/${encodeURIComponent(tool.name)}`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ enabled: next }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      tool.enabled = data.tool?.enabled ?? next;
-      toggle.dataset.on = tool.enabled ? '1' : '';
-      toggle.setAttribute('aria-checked', String(tool.enabled));
-      toggle.setAttribute('aria-label', `${tool.enabled ? 'Disable' : 'Enable'} ${tool.name}`);
-      notifySuccess(`${tool.name} ${tool.enabled ? 'enabled' : 'disabled'}`);
-    } catch (err) {
-      notifyError(err instanceof Error ? err.message : String(err));
-    } finally {
-      toggle.disabled = false;
-    }
-  });
-
-  head.append(name, badges, toggle);
-
-  const desc = document.createElement('p');
-  desc.className = 'tool-desc';
-  desc.textContent = tool.description;
-
-  const details = document.createElement('details');
-  details.className = 'tool-args';
-  const summary = document.createElement('summary');
-  summary.textContent = 'Arguments';
-  const ul = document.createElement('ul');
-  for (const li of toolParamsSummary(tool)) ul.append(li);
-  details.append(summary, ul);
-
-  card.append(head, desc, details);
-  return card;
-}
-
-async function refreshTools() {
-  let tools = null;
-  try {
-    const res = await fetch('/api/tools');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    ({ tools } = await res.json());
-  } catch {
-    tools = null;
-  }
-  toolsListEl.innerHTML = '';
-  if (!tools?.length) {
-    const p = document.createElement('p');
-    p.className = 'section-sub';
-    p.textContent = 'Could not load tools. Is the server running?';
-    toolsListEl.append(p);
-  } else {
-    for (const tool of tools) toolsListEl.append(renderTool(tool));
-  }
-
-  try {
-    const res = await fetch('/api/providers');
-    if (!res.ok) throw new Error();
-    const { providers } = await res.json();
-    const capable = (providers ?? []).filter((p) => p.supportsTools).map((p) => p.label);
-    toolsProvidersNote.textContent = capable.length
-      ? `Tool calls work with: ${capable.join(', ')}. Anywhere else the chat answers directly.`
-      : 'No configured provider supports tool calls right now.';
-  } catch {
-    toolsProvidersNote.textContent = 'Could not load provider support.';
-  }
-}
 
 /* ---------------- Optional local runtimes ---------------- */
 

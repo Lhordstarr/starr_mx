@@ -25,6 +25,7 @@
  */
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
 import { listProcesses, stopProcess } from '../src/processes.ts';
@@ -180,10 +181,13 @@ if (!haveWeights) {
   });
 
   await check('a model that cannot be loaded falls back to the one-shot runner', async () => {
-    // A directory with no weights in it: the engine cannot start, so the
-    // request has to be served another way rather than lost.
+    // A directory with no weights in it, outside the models folder: the
+    // engine cannot start, so the request has to be served another way rather
+    // than lost. (Outside, because an engine that reaches for a missing file
+    // creates the folder it was going to look in, and the models folder is
+    // not the place for a test's leftovers.)
     const broken = await speakViaEngine(
-      { ...spec, dir: path.resolve('models/does-not-exist'), repo: 'nobody/nothing' },
+      { ...spec, dir: path.join(tmpdir(), 'starr-no-such-model'), repo: 'nobody/nothing' },
       {
         text: 'This one cannot be loaded.',
         voice: 'af_heart',

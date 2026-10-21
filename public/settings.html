@@ -17,7 +17,8 @@
     <header>
       <div>
         <h1>Settings</h1>
-        <p class="sub">API keys, agent tools, and models — each its own tab below.</p>
+        <p class="sub">API keys and models — each its own tab below. The agent
+          tools live in the chat page, beside the message box.</p>
       </div>
       <div class="header-actions">
         <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
@@ -33,8 +34,6 @@
     <nav class="tabs" role="tablist" aria-label="Settings sections">
       <button type="button" role="tab" id="tab-keys" aria-controls="panel-keys"
               aria-selected="true">API Keys</button>
-      <button type="button" role="tab" id="tab-tools" aria-controls="panel-tools"
-              aria-selected="false" tabindex="-1">Tools</button>
       <button type="button" role="tab" id="tab-models" aria-controls="panel-models"
               aria-selected="false" tabindex="-1">Models</button>
     </nav>
@@ -120,27 +119,6 @@
       <p>
         A key set in <code>.env</code> stays in effect if you remove it here. Saving a key
         here applies immediately; no restart needed.
-      </p>
-    </section>
-    </div>
-
-    <div id="panel-tools" role="tabpanel" aria-labelledby="tab-tools" tabindex="0" hidden>
-    <section class="panel-section">
-      <h2>Available tools</h2>
-      <p class="section-sub" id="tools-sub">
-        Enabled tools are offered to the model on every message; it calls them
-        only when the question needs them.
-      </p>
-      <div id="tools-list" class="tools-list" aria-live="off"></div>
-    </section>
-
-    <section class="panel-section">
-      <h2>Where tools work</h2>
-      <p class="section-sub" id="tools-providers">Loading provider support…</p>
-      <p class="section-sub">
-        Tool calls stream into the transcript as small activity lines under the
-        reply. Only the final answer is saved — the calls themselves are not
-        stored.
       </p>
     </section>
     </div>

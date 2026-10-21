@@ -1702,6 +1702,37 @@ a.icon-btn {
   overflow-y: auto;
 }
 
+/* A row and the switch beside it: the row arms the tool for this message,
+   the switch decides whether the model may use it at all. */
+.tm-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tm-item > .tm-row {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The switch is the shared one, sized for a pop-up row. */
+.tm-item__switch {
+  width: 34px;
+  height: 20px;
+  flex: none;
+}
+
+.tm-item__switch::after {
+  width: 14px;
+  height: 14px;
+  top: 2px;
+  left: 2px;
+}
+
+.tm-item__switch[data-on='1']::after {
+  left: 16px;
+}
+
 .tm-row {
   display: flex;
   align-items: center;
@@ -1715,7 +1746,6 @@ a.icon-btn {
   text-align: left;
   cursor: pointer;
 }
-
 .tm-row:hover:not(:disabled),
 .tm-row:focus-visible {
   background: var(--panel-2);

@@ -184,9 +184,10 @@ app.use(express.static(publicDir, { extensions: ['html'] }));
  */
 app.get(['/image', '/imagestudio'], (_req, res) => res.redirect(302, '/studio'));
 
-// The standalone Tools page merged into the settings hub; old links land on
-// the Tools tab instead of 404ing.
-app.get('/tools', (_req, res) => res.redirect('/settings#tools'));
+// The standalone Tools page merged into the settings hub, then moved out
+// again: the tools now live in the chat page's picker, so a bookmark made when
+// they had a page or a tab of their own still lands on them.
+app.get('/tools', (_req, res) => res.redirect('/#tools'));
 
 /**
  * Blocks cross-site state changes. There's no session cookie to rely on, so this
@@ -2180,7 +2181,7 @@ app.post('/api/chat', async (req, res) => {
       if (!provider.info.local) {
         send('notice', {
           message: !tools.length
-            ? 'No tools enabled — answering directly (see Settings → Tools).'
+            ? 'No tools enabled — answering directly (pick one under the Tools button).'
             : `${provider.info.label} doesn't support tool calls yet — answering directly.`,
         });
       }
