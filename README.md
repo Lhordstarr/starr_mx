@@ -489,7 +489,10 @@ public/                   chat UI (no build step, no framework)
   `fetch_page` and `wikipedia`, all keyless. The composer carries a **Tools**
   button and a **switch** beside it. The button opens the picker (the same one
   `/tool` opens) and says what is armed; the switch says whether it stays
-  armed. Each pick gets a chip ("🌐 Web Search ✕") above the input, removable
+  armed. The picker has a close button in its corner, so it can be dismissed
+  without clicking away from it — clicking away closes it too, but that click
+  lands on whatever was underneath. Each pick gets a chip ("🌐 Web Search ✕")
+  above the input, removable
   one by one (the chips reuse the app's own inline globe/file/book SVGs).
   **With the switch off** the selection is per-message, as it always was: the
   chips clear once a reply lands (a failed send keeps them so Retry reuses

@@ -207,10 +207,20 @@
             </button>
           </div>
         </div>
-        <!-- Opened by typing "/tool" in the input. Lists the registry with its
-             stored on/off state; picks here scope the next send only. -->
+        <!-- Opened by typing "/tool" in the input, or by the Tools button.
+             Lists the registry with its stored on/off state; picks here scope
+             the next send, or every send when the switch is on. -->
         <div class="tool-menu" id="tool-menu" hidden>
-          <div class="tm-head">Available tools</div>
+          <div class="tm-head">
+            <span>Available tools</span>
+            <button type="button" id="tool-menu-close" class="tm-close"
+                    aria-label="Close the tools list" title="Close">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
           <div class="tm-list" id="tool-menu-list" role="listbox" aria-multiselectable="true"
                aria-label="Available tools"></div>
           <div class="tm-hint" id="tool-menu-hint" hidden></div>

@@ -1639,12 +1639,58 @@ a.icon-btn {
 }
 
 .tm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-soft);
   font-size: 0.66rem;
   text-transform: uppercase;
   letter-spacing: 0.09em;
   color: var(--text-faint);
+}
+
+/* The close control, in the same hand as the app's other icon buttons and
+   sized for a pop-up rather than a top bar. It is here because a pop-up that
+   can only be dismissed by clicking away from it is a pop-up that traps the
+   pointer: the person who opened it cannot close it without losing the
+   position of the thing they were aiming at. */
+.tm-close {
+  margin-left: auto;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  line-height: 0;
+  cursor: pointer;
+  transition:
+    color var(--speed) var(--ease),
+    background var(--speed) var(--ease),
+    border-color var(--speed) var(--ease);
+}
+
+.tm-close:hover {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+.tm-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.tm-close svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+  margin: 0 auto;
 }
 
 .tm-list {

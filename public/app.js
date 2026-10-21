@@ -62,6 +62,7 @@ const els = {
   toolMenu: document.getElementById('tool-menu'),
   toolMenuList: document.getElementById('tool-menu-list'),
   toolMenuHint: document.getElementById('tool-menu-hint'),
+  toolMenuClose: document.getElementById('tool-menu-close'),
 };
 
 /** @type {{id:string,label:string,models:string[],sttModels:string[],stt:boolean,configured:boolean,hint?:string}[]} */
@@ -2466,6 +2467,14 @@ els.toolsPick?.addEventListener('click', (e) => {
     return;
   }
   void openToolPicker();
+});
+
+/** The picker's own close button. Focus goes back to the input, the way it
+ *  does when the picker is dismissed with Escape. */
+els.toolMenuClose?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  closeToolMenu();
+  els.input.focus();
 });
 
 /** Per-message selection, cleared once the reply finishes — unless the user

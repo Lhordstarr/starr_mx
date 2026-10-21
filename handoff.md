@@ -227,6 +227,11 @@ is armed) and a **switch** beside it (which says whether it stays armed).
     selection, rather than making every message fail with "Tool not enabled".
   - The shared on/off switch moved from `settings.css` to `theme.css`, which
     both pages load, so the two switches are the same switch.
+  - The picker has a **close button** in its corner. It could always be
+    dismissed by clicking away, but that click lands on whatever was
+    underneath, so the thing the person was aiming at is the thing that gets
+    clicked. The close button puts the focus back in the input, the way
+    Escape does.
 
 ### 3.6 Smaller things, from the recent history
 

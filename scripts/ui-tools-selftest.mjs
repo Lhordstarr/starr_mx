@@ -292,7 +292,53 @@ try {
   })()`);
   await waitFor(`document.getElementById('tool-menu').hidden === false`);
   await evalJs(`document.body.click()`);
-  report('clicking outside closes the picker', await evalJs(`document.getElementById('tool-menu').hidden`));
+  report(
+    'clicking outside closes the picker',
+    await evalJs(`document.getElementById('tool-menu').hidden`),
+  );
+
+  /* The picker has to be closable by the person who opened it. Clicking away
+     from a pop-up is not a way to close it: the click lands on whatever was
+     under it, so the thing they were aiming at is the thing that gets
+     clicked. */
+  await evalJs(`(() => {
+    const i = document.getElementById('input');
+    i.value = '/tool';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(`document.getElementById('tool-menu').hidden === false`);
+  report(
+    'the picker has a close button',
+    await evalJs(
+      `!!document.getElementById('tool-menu-close') &&
+       document.getElementById('tool-menu-close').getAttribute('aria-label') === 'Close the tools list'`,
+    ),
+  );
+  report(
+    'and it sits at the top of the pop-up, beside its title',
+    await evalJs(`(() => {
+      const head = document.querySelector('.tm-head');
+      const btn = document.getElementById('tool-menu-close');
+      if (!head || !btn) return false;
+      const h = head.getBoundingClientRect();
+      const b = btn.getBoundingClientRect();
+      return b.top >= h.top && b.bottom <= h.bottom + 1 && b.right <= h.right + 1;
+    })()`),
+  );
+  await evalJs(`document.getElementById('tool-menu-close').click()`);
+  report(
+    'clicking it closes the picker',
+    await evalJs(`document.getElementById('tool-menu').hidden`),
+  );
+  report(
+    'and the focus goes back to the input, the way Escape does',
+    await evalJs(`document.activeElement?.id === 'input'`),
+  );
+  report(
+    'without losing what was picked',
+    await evalJs(`document.querySelectorAll('.tool-chip').length === 1`),
+    String(await evalJs(`document.querySelectorAll('.tool-chip').length`)),
+  );
 
   /* Keyboard: arrows focus rows, Enter picks, Escape returns to the input. */
   await evalJs(`(() => {
