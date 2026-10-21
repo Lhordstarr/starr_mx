@@ -44,6 +44,20 @@ const POLL_LIMITS: Record<string, number> = {
   // stopped updating, which reads as the pop-out hanging. It is the same
   // endpoint /api/transfers was given room for.
   '/api/processes': 240,
+  // The models page reads this for its hub, and it re-reads it on every
+  // download tick — so the page that lists your models was the one page
+  // whose list emptied itself. The answer was a 429, and an empty list and a
+  // refused request look exactly the same to the browser: both say "there is
+  // nothing on disk". It is a poll, like the three above, and it gets the
+  // same room.
+  '/api/hf/files': 240,
+  // The settings page asks for the runtime inventory on every tab switch and
+  // again after every install step, and the server caches the answer, so the
+  // requests are cheap — but the page makes more than thirty of them in a
+  // minute of ordinary clicking. The thirty-a-minute ceiling answered one of
+  // them with "Rate limit exceeded", and the Runtimes panel showed that
+  // instead of the runtimes.
+  '/api/runtimes': 120,
 };
 
 /**

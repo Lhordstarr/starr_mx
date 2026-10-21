@@ -698,6 +698,28 @@ app.get('/api/image/file/:name', (req, res) => {
 const downloadControllers = new Map<string, AbortController>();
 
 /**
+ * Why a download was stopped, and what is left of it.
+ *
+ * `paused` keeps the partial file, so the next attempt continues from it;
+ * `cancelled` discards it, so the next attempt starts over. The browser needs
+ * the difference to label the button it offers next — "Resume" and "Retry" are
+ * different promises, and an abort message alone cannot tell them apart.
+ */
+const downloadStops = new Map<string, 'paused' | 'cancelled'>();
+
+/**
+ * Why a download was stopped, if it was stopped by hand.
+ *
+ * The transfer's error text is where the browser reads it: "paused" means the
+ * partial file is still there and the row can offer a Resume, "cancelled"
+ * means it is gone and the row has to offer a Retry. An abort message on its
+ * own cannot tell those apart.
+ */
+function stopReason(repo: string): string | null {
+  return downloadStops.get(repo) ?? null;
+}
+
+/**
  * Cancels an in-flight model download.
  *
  * The work is server-owned, so leaving the page never stops it — which is the
@@ -714,8 +736,13 @@ app.post('/api/hf/download/cancel', async (req, res) => {
   if (!controller) {
     return res.json({ cancelled: false, reason: 'not running' });
   }
+  // The caller says whether the partial file is being kept. Pause keeps it;
+  // Cancel discards it, and says so here so the row can offer "Retry"
+  // rather than a "Resume" that would start from nothing.
+  const discard = req.body?.discard === true;
+  downloadStops.set(repo, discard ? 'cancelled' : 'paused');
   controller.abort();
-  res.json({ cancelled: true });
+  res.json({ cancelled: true, kept: !discard });
 });
 
 /**
@@ -1934,11 +1961,12 @@ app.post('/api/hf/download-repo', async (req, res) => {
         done += 1;
         send('file-done', { path: f.path, ...fileDone });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const stopped = stopReason(repo);
+        const message = stopped ?? (err instanceof Error ? err.message : String(err));
         finishTransfer(id, 'error', message);
         failed.push(f.path);
         send('file-failed', { path: f.path, message });
-        if (!clientGone) console.error('[hf-download-repo]', message);
+        if (!clientGone && !stopped) console.error('[hf-download-repo]', message);
       } finally {
         releaseDownload(`${repo}/${f.path}`);
       }
@@ -1951,6 +1979,7 @@ app.post('/api/hf/download-repo', async (req, res) => {
     send('error', { message: (err as Error).message });
   } finally {
     downloadControllers.delete(repo);
+    downloadStops.delete(repo);
     if (!clientGone) res.end();
   }
 });
@@ -2006,13 +2035,15 @@ app.post('/api/hf/download', async (req, res) => {
     finishTransfer(id, 'done');
     send('done', done);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const stopped = stopReason(repo);
+    const message = stopped ?? (err instanceof Error ? err.message : String(err));
     // A dead socket is not a failed download.
-    if (!clientGone) console.error('[hf-download]', message);
+    if (!clientGone && !stopped) console.error('[hf-download]', message);
     finishTransfer(id, 'error', message);
     send('error', { message });
   } finally {
     downloadControllers.delete(repo);
+    downloadStops.delete(repo);
     if (!clientGone) res.end();
     releaseDownload(`${repo}/${file}`);
     void transfer;

@@ -421,6 +421,18 @@ public/                   chat UI (no build step, no framework)
   dictation support — no restart, no code change
 - Local model management on the settings page: pull Ollama models by name
   with live progress, or delete ones you no longer want
+- **A download that fits its card.** The progress label on a model card is
+  cut rather than allowed to push the button out through the card's edge, and
+  the details that do not fit — the byte counts, the digest — are in the
+  button's tooltip. A finished download offers **Delete** and nothing else:
+  there is no "Resume" on a model that is already whole, and a paused one
+  offers **Resume** (its partial file is kept) while a failed one offers
+  **Retry**.
+- **One button for the runtimes the models are waiting on.** The Models page
+  groups what is on disk by the runtime that can run it, and says what each
+  group is waiting on. When several runtimes are missing there is one button
+  that installs them all, not one per group — they all opened the same page
+  anyway.
 - Hugging Face browser on the settings page: trending on open, search with
   sizes, every model with a generated tile — open one for a pop-up with every
   file, its extension and byte size, and per-file downloads (gated repos use

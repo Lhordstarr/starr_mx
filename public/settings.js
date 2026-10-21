@@ -752,6 +752,21 @@ function describePull(p) {
 }
 
 /**
+ * The pull's label for a button.
+ *
+ * The percentage is the part that changes and the part a person watches; the
+ * byte counts and the digest are the part they read once. A card is 330px
+ * wide, and a button holding the whole line is a button that hangs out of
+ * the card. So the button gets the number and the tooltip gets the rest.
+ */
+function pullButtonLabel(p) {
+  if (typeof p.total === 'number' && p.total > 0 && typeof p.completed === 'number') {
+    return `Downloading… ${Math.min(100, (p.completed / p.total) * 100).toFixed(0)}%`;
+  }
+  return describePull(p);
+}
+
+/**
  * Reads a named-event SSE body, the shape both the Ollama pull and the Hub
  * download streams use (event:/data: fields, blank-line framed). One parser for
  * both, rather than a second copy of the frame splitting next to the first.
@@ -2670,7 +2685,14 @@ function renderDownloads() {
     } else if (errored) {
       const first = g.files.find((t) => t.state === 'error');
       const msg = first?.error ?? 'failed';
-      status.textContent = /abort/i.test(msg) ? 'cancelled' : msg;
+      // The server names a deliberate stop: "paused" (the partial file is
+      // kept and the download can continue) or "cancelled" (it is gone). An
+      // abort from a lost connection still arrives as an abort message.
+      status.textContent = /paused/i.test(msg)
+        ? 'paused'
+        : /cancelled/i.test(msg) || /abort/i.test(msg)
+          ? 'cancelled'
+          : msg;
     } else {
       const total = g.files.reduce((a, t) => a + (t.total ?? t.received ?? 0), 0);
       status.textContent = total ? fmtSize(total) : 'done';
@@ -2709,7 +2731,8 @@ function renderDownloads() {
       });
       top.append(pause);
 
-      // Cancel discards the partial file as well.
+      // Cancel discards the partial file as well — so the row offers a Retry
+      // afterwards, not a Resume: there is nothing left to continue from.
       const cancel = document.createElement('button');
       cancel.type = 'button';
       cancel.className = 'btn-ghost btn-tiny';
@@ -2721,7 +2744,7 @@ function renderDownloads() {
         try {
           await api('/api/hf/download/cancel', {
             method: 'POST',
-            body: JSON.stringify({ repo: g.repo }),
+            body: JSON.stringify({ repo: g.repo, discard: true }),
           });
           await api('/api/hf/download/discard', {
             method: 'POST',
@@ -2742,12 +2765,24 @@ function renderDownloads() {
 
     // Resume (and retry) for a paused or failed download: re-running the
     // download skips files already on disk and resumes partials via Range.
-    if (g.kind === 'download' && !running && g.repo) {
+    //
+    // Not for a download that finished. There is nothing to resume, and a
+    // "Resume" button on a complete model reads as an invitation to do
+    // something that does nothing.
+    const finished = g.files.every((t) => t.state === 'done');
+    const paused = errored && g.files.some((t) => /paused/i.test(t.error ?? ''));
+    if (g.kind === 'download' && !running && g.repo && !finished) {
       const resume = document.createElement('button');
       resume.type = 'button';
       resume.className = 'btn-primary btn-tiny';
-      resume.title = errored ? 'Retry this download' : 'Resume this download';
-      resume.textContent = errored ? 'Retry' : 'Resume';
+      // "Resume" continues a paused download from its partial file; "Retry"
+      // starts a failed one over. A cancelled download has nothing left to
+      // continue from, so it is a Retry even though the stop was deliberate.
+      const label = paused ? 'Resume' : 'Retry';
+      resume.title = paused
+        ? 'Continue this download from where it stopped'
+        : 'Try this download again from the start';
+      resume.textContent = label;
       resume.addEventListener('click', async () => {
         resume.disabled = true;
         hfActionInFlight = true;
@@ -2772,7 +2807,7 @@ function renderDownloads() {
         } finally {
           hfActionInFlight = false;
           resume.disabled = false;
-          resume.textContent = errored ? 'Retry' : 'Resume';
+          resume.textContent = label;
           renderDownloads();
         }
       });
@@ -2852,6 +2887,9 @@ function jobRepos() {
   return jobReposPromise;
 }
 
+/** The last good answer from /api/hf/files, so a refused one is not an empty page. */
+let hubFiles = [];
+
 /**
  * The hub: Ollama models, then one section per runtime listing the weights on
  * disk that runtime can run. A runtime that is missing but has models waiting
@@ -2865,17 +2903,24 @@ async function refreshHub() {
   // One request for runtimes, not two: /api/runtimes carries both the installed
   // map and the group table, and it costs a Python probe on the server.
   const runtimesFetch = fetch('/api/runtimes')
-    .then((r) => r.json())
+    .then((r) => (r.ok ? r.json() : null))
     .catch(() => null);
   const [runtimesRes, filesRes, usableRepos] = await Promise.all([
     runtimesFetch,
-    fetch('/api/hf/files').then((r) => r.json()).catch(() => null),
+    fetch('/api/hf/files')
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
     jobRepos(),
   ]);
 
   const installed = runtimesRes?.runtimes?.installed ?? {};
   const groups = runtimesRes?.groups ?? [];
-  const files = filesRes?.files ?? [];
+  // The last good file list, kept so a refused answer does not empty the
+  // page. The hub is a view of what is on disk, and "the server said slow
+  // down" is not the same thing as "there is nothing there" — but to the
+  // browser they are the same empty list.
+  if (filesRes?.files) hubFiles = filesRes.files;
+  const files = filesRes?.files ?? hubFiles;
 
   hubRuntimesEl.innerHTML = '';
 
@@ -3018,21 +3063,65 @@ async function refreshHub() {
     return;
   }
 
-  for (const [runtimeId, { entry, files: groupFiles }] of groupsWithModels) {
+  // What each group needs, worked out once. The extension map's requirements,
+  // plus the catalog entry's: a bundle has no extension-based runtime at all,
+  // so reading only the former reported an installed faster-whisper as missing.
+  const groupInfo = groupsWithModels.map(([runtimeId, { entry, files: groupFiles }]) => {
     const group = groups.find((g) => g.id === runtimeId);
     const inferred = byRuntime.get(runtimeId)?.inferred ?? null;
     const external = Boolean(inferred?.external);
-    // What this group needs to run: the extension map's requirements, plus the
-    // catalog entry's. A bundle has no extension-based runtime at all, so
-    // reading only the former reported an installed faster-whisper as missing.
     const requires = inferred?.requires ?? [];
     const catalogRequires = groupFiles.flatMap((f) => f.entry?.run?.requires ?? []);
     const allRequires = [...new Set([...requires, ...catalogRequires])];
     const isIn = external
       ? false
       : allRequires.length > 0 && allRequires.every((g) => Boolean(installed[g]));
-    const needed = new Set(allRequires);
+    return {
+      runtimeId,
+      group,
+      inferred,
+      external,
+      groupFiles,
+      allRequires,
+      isIn,
+      needed: new Set(allRequires),
+    };
+  });
 
+  // One install button, not one per group.
+  //
+  // Three models waiting on three different runtimes produced three buttons
+  // that all did the same thing — they opened the Runtimes tab — and a page
+  // of buttons reads as a page of decisions when there is only one decision
+  // to make. The groups still say what each of them is waiting on; the
+  // button that acts on all of them is here, once.
+  const missingGroups = new Set();
+  for (const info of groupInfo) {
+    if (info.external) continue;
+    for (const g of info.needed) if (!installed[g]) missingGroups.add(g);
+  }
+  if (missingGroups.size) {
+    const bar = document.createElement('div');
+    bar.className = 'hub-group__actions hub-group__actions--install';
+    const note = document.createElement('span');
+    note.className = 'hub-group__note';
+    note.textContent = `${missingGroups.size} runtime${missingGroups.size === 1 ? '' : 's'} missing for the models below.`;
+    bar.append(note);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-primary';
+    btn.textContent = `Install ${[...missingGroups].join(' + ')}`;
+    btn.title = 'Opens the Runtimes tab with these ticked';
+    btn.addEventListener('click', () => {
+      for (const g of missingGroups) rtPicked.add(g);
+      setSubview('runtimes');
+      loadRuntimes();
+    });
+    bar.append(btn);
+    hubRuntimesEl.append(bar);
+  }
+
+  for (const { runtimeId, group, inferred, external, groupFiles, allRequires, isIn, needed } of groupInfo) {
     const section = document.createElement('section');
     section.className = `hub-group${isIn ? '' : ' is-missing'}`;
 
@@ -3074,8 +3163,10 @@ async function refreshHub() {
       bar.append(note);
       section.append(bar);
     } else if (!isIn) {
-      // The exact thing that is missing, with the button to fetch it. This is
-      // what grouping by runtime buys: the gap and its fix are adjacent.
+      // The exact thing that is missing. This is what grouping by runtime
+      // buys: the gap and its fix are adjacent. The fix itself is the one
+      // button above, so three groups missing three runtimes do not put
+      // three identical buttons on the page.
       const missing = [...needed].filter((g) => !installed[g]);
       const bar = document.createElement('div');
       bar.className = 'hub-group__actions';
@@ -3083,16 +3174,6 @@ async function refreshHub() {
       note.className = 'hub-group__note';
       note.textContent = `${groupFiles.length} model${groupFiles.length === 1 ? '' : 's'} waiting on ${missing.join(' + ') || runtimeId}.`;
       bar.append(note);
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'btn-primary';
-      btn.textContent = `Install ${missing.join(' + ') || runtimeId}`;
-      btn.addEventListener('click', () => {
-        for (const g of missing) rtPicked.add(g);
-        setSubview('runtimes');
-        loadRuntimes();
-      });
-      bar.append(btn);
       section.append(bar);
     }
 
@@ -3262,7 +3343,14 @@ function renderCatalogEntry(entry) {
         let pulled = null;
         await sseStream(res.body, async (event, parsed) => {
           if (event === 'error') throw new Error(parsed.message);
-          if (event === 'progress') pull.textContent = describePull(parsed);
+          if (event === 'progress') {
+            // The button carries the percentage — the part that changes and
+            // the part you watch. The byte counts and the digest go in the
+            // tooltip: a card is 330px wide, and a button that holds the
+            // whole line is a button that hangs out of the card.
+            pull.textContent = pullButtonLabel(parsed);
+            pull.title = describePull(parsed);
+          }
           if (event === 'done') pulled = parsed.model ?? entry.ollamaTag;
         });
         await refreshLocalModels();

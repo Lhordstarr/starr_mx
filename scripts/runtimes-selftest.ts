@@ -41,6 +41,22 @@ import {
   venvPython,
 } from '../src/runtimes.ts';
 
+/**
+ * The runtime status, read with a retry.
+ *
+ * The page under test asks for this endpoint on every tab switch, and a test
+ * that reads it as well can find the endpoint answering "slow down" — which
+ * is the limiter doing its job and says nothing about the page.
+ */
+async function readStatus(): Promise<any> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const res = await fetch(`${APP_URL}/api/runtimes`, { signal: AbortSignal.timeout(60000) });
+    if (res.ok) return await res.json();
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error('the runtime status could not be read');
+}
+
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const PORT = Number(process.env.CDP_PORT ?? 9381);
 
@@ -1214,9 +1230,7 @@ if (!browser) {
   // that does not have it — the situation the pre-ticked box was actually seen
   // in. On a machine where it *is* installed the row is disabled and unchecked
   // already, so the check would pass without ever reaching the bug.
-  const realStatus = await (
-    await fetch(`${APP_URL}/api/runtimes`, { signal: AbortSignal.timeout(60000) })
-  ).json();
+  const realStatus = await readStatus();
   const doctoredRuntimes = Buffer.from(
     JSON.stringify(
       (() => {
@@ -1226,6 +1240,7 @@ if (!browser) {
       })(),
     ),
   ).toString('base64');
+
   const chrome = spawn(
     browser,
     [
@@ -2110,7 +2125,13 @@ if (browser && serverUp) {
     await call('Page.navigate', { url: 'about:blank' });
     await sleep3(400);
     await call('Page.navigate', { url: `${APP_URL}/` });
-    await sleep3(3000);
+    // Wait for the button rather than for a fixed time: on a loaded machine
+    // the page can take longer than three seconds to be ready, and a check
+    // that fires into a half-loaded document fails for a reason that has
+    // nothing to do with what it is checking.
+    if (!(await until(`!!document.getElementById('open-procman')`, 25000))) {
+      throw new Error('the chat page did not load');
+    }
     await run(`document.getElementById('open-procman').click(); true`);
     if (!(await until(`document.querySelectorAll('.procman__row').length >= 5`, 25000))) {
       throw new Error('the process rows did not render');
@@ -2250,13 +2271,25 @@ if (browser && serverUp) {
   const PROFILE4 = join(tmpdir(), `starr-anchor-${process.pid}`);
   rmSync(PROFILE4, { recursive: true, force: true });
   const GIB4 = 1024 ** 3;
-  const real4 = await (await fetch(`${APP_URL}/api/runtimes`, { signal: AbortSignal.timeout(60000) })).json();
-  const status4 = Buffer.from(
+  const real4 = await readStatus();
+  /* The status the page is given. Mutable, because the models-page check
+     below needs a different one: a machine with nothing installed, so
+     several runtime groups are missing at once. */
+  let status4 = Buffer.from(
     JSON.stringify({
       ...real4,
       runtimes: { ...real4.runtimes, installed: { ...real4.runtimes.installed, onnxruntime: null } },
     }),
   ).toString('base64');
+  const nothingInstalled4 = {
+    ...real4,
+    runtimes: {
+      ...real4.runtimes,
+      installed: Object.fromEntries(
+        Object.keys(real4.runtimes?.installed ?? {}).map((k) => [k, null]),
+      ),
+    },
+  };
   const LINES4 = [
     'Collecting',
     'Using cached pip wheel for onnxruntime on this platform',
@@ -2381,7 +2414,12 @@ if (browser && serverUp) {
 
     await call('Page.enable');
     await call('Runtime.enable');
-    await call('Fetch.enable', { patterns: [{ urlPattern: `${APP_URL}/api/*` }] });
+    await call('Fetch.enable', {
+      patterns: [
+        { urlPattern: `${APP_URL}/api/runtimes*` },
+        { urlPattern: `${APP_URL}/api/transfers*` },
+      ],
+    });
     await call('Emulation.setDeviceMetricsOverride', { width: 1000, height: 1000, deviceScaleFactor: 1, mobile: false });
     await call('Page.navigate', { url: 'about:blank' });
     await sleep4(400);
@@ -2431,10 +2469,12 @@ if (browser && serverUp) {
     );
     report('the indicator comes up during an install and goes down after', live.visible > 0 && live.endsHidden, JSON.stringify(live));
     // A log that re-lays itself out once per line locks the tab. Measured side
-    // by side: 3 ticks in 6s with the per-line layout read, 91 without. The
-    // threshold sits between the two with room on each side — this is here to
-    // catch the regression, not to benchmark headless timers.
-    report('the page is not blocked while a long install streams', live.ticks > 40, `${live.ticks} ticks in 6s`);
+    // by side: 3 ticks in 6s with the per-line layout read, 91 without, and
+    // 32 on a busy machine where the runtimes panel is also re-rendering.
+    // The threshold sits between the broken number and the busy one with room
+    // on each side — this is here to catch the regression, not to benchmark
+    // headless timers on a machine that is already busy.
+    report('the page is not blocked while a long install streams', live.ticks > 15, `${live.ticks} ticks in 6s`);
     report('and the bar sits against the panel edge throughout', live.gap !== null && live.gap <= 1, JSON.stringify(live));
 
     // Whether the bar moves is a layout question about the heading, not about
@@ -2506,6 +2546,80 @@ if (browser && serverUp) {
     report('no download row spills its text past the card', rows.every((r: any) => r.over <= 1), JSON.stringify(rows));
     report('and nothing scrolls sideways inside one', rows.every((r: any) => r.scrollOver <= 0), JSON.stringify(rows));
     report('while the full text stays reachable on hover', rows.every((r: any) => r.titled), JSON.stringify(rows));
+
+    /* The models page: one button for the runtimes the models are waiting on,
+       not one per group. Three models waiting on three different runtimes
+       used to put three buttons on the page, and all three did the same
+       thing — they opened the Runtimes tab. */
+    console.log('\nBrowser: one button for the runtimes the models are waiting on');
+    {
+      await call('Page.navigate', { url: 'about:blank' });
+      await sleep4(400);
+      await call('Page.navigate', { url: `${APP_URL}/settings#models/local` });
+      if (!(await until(`!!document.getElementById('hub-runtimes')`, 30000))) {
+        throw new Error('the settings page did not load');
+      }
+      /* The status the page is given: nothing installed, so several runtime
+         groups are missing at once. Stubbed inside the page rather than
+         through the CDP Fetch domain — that pauses every matching request,
+         and the hub's own file list came back empty on the runs where it was
+         armed for the whole API. */
+      await run(`(() => {
+        const body = ${JSON.stringify(JSON.stringify(nothingInstalled4))};
+        const orig = window.fetch;
+        window.fetch = (...args) => {
+          if (String(args[0]).includes('/api/runtimes')) {
+            return Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+          }
+          return orig(...args);
+        };
+        return true;
+      })()`);
+      /* Re-open the subview, so the hub is read again with the stub in place.
+         The click is what re-reads it — the panel is a view, and a view is
+         re-read when it is shown. */
+      await run(`(() => { const b = [...document.querySelectorAll('[data-subview]')].find(x => x.dataset.subview === 'local'); b?.click(); return true; })()`);
+      /* Wait for the hub itself, not for the first paint of it. The hub's
+         first render can land before the file list has arrived, and that
+         render says "no downloaded weights yet" — which is a true thing to
+         say at that moment and not what this check is about. */
+      const rendered = await until(
+        `document.querySelectorAll('#hub-runtimes .hub-group').length > 0 || document.querySelectorAll('#hub-runtimes .hub-group__actions button').length > 0`,
+        45000,
+      );
+      if (!rendered) {
+        const where = String(
+          await run(`JSON.stringify({
+            url: location.href,
+            panels: [...document.querySelectorAll('[data-subpanel]')].map(p => p.dataset.subpanel + ':' + (p.hidden ? 'hidden' : 'shown')),
+            hub: (document.getElementById('hub-runtimes')?.textContent ?? '').slice(0, 200),
+          })`),
+        );
+        throw new Error(`the hub did not render — ${where}`);
+      }
+      await sleep4(600);
+      const hub = JSON.parse(
+        String(
+          await run(`JSON.stringify({
+            groups: document.querySelectorAll('#hub-runtimes .hub-group').length,
+            missing: document.querySelectorAll('#hub-runtimes .hub-group.is-missing').length,
+            installButtons: document.querySelectorAll('#hub-runtimes .hub-group__actions button').length,
+            notes: [...document.querySelectorAll('#hub-runtimes .hub-group__note')].map(n => n.textContent),
+          })`),
+        ),
+      );
+      report(
+        'the models page shows one button, not one per runtime group',
+        hub.installButtons === 1,
+        JSON.stringify(hub),
+      );
+      report('even when several runtimes are missing at once', hub.missing >= 2, JSON.stringify(hub));
+      report(
+        'and each group still says what it is waiting on',
+        hub.notes.filter((n: string) => /waiting on/.test(n)).length >= 2,
+        JSON.stringify(hub.notes),
+      );
+    }
 
     await call('Fetch.disable');
     sock.close();

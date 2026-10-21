@@ -1309,6 +1309,16 @@ body.modal-open {
 .cat-entry__actions button {
   font-size: 0.75rem;
   padding: 6px 11px;
+  /* A button may not be wider than the card it sits in. A flex item's
+     `min-width: auto` stops it shrinking below its text, so a long label
+     (a pull's progress line, a download's byte counts) pushed the button
+     straight out through the card's edge and left it hanging over the
+     page. The label is cut rather than the layout broken; the full text is
+     in the button's tooltip. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cat-entry__none {

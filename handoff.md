@@ -208,6 +208,32 @@ it had.
     where they are. A GPU that will not start falls back to the CPU and says
     so, rather than failing the run.
 
+### 3.4 The models page and the downloads
+
+Three things on the Models page, all reported at once:
+
+  - **A download label no longer pushes its button out of the card.** The pull
+    progress line ("Downloading 9a1c3f77e2b0 — 45.9% — 2.2 GB / 4.9 GB") was
+    wider than a 330px card, and a flex item's `min-width: auto` stops it
+    shrinking — so the button hung 30px out through the card's edge. The
+    button now carries the percentage and the tooltip carries the rest, and
+    the CSS refuses to let any button in that row exceed its card.
+  - **A finished download offers no Resume.** The button was shown for every
+    download that was not running, which included the ones that had
+    finished. A paused download (the partial file is kept) says **Resume**; a
+    failed one says **Retry**; the server now says which happened
+    ("paused" / "cancelled") so the label can be honest.
+  - **One install button for the runtimes the models are waiting on.** Three
+    models waiting on three different runtimes produced three buttons that
+    all opened the same page. There is one now, and each group still says
+    what it is waiting on.
+  - **`/api/hf/files` is a poll, and it is now allowed to be one.** The Models
+    page re-reads it on every download tick, and the general limit of 30 a
+    minute answered it with "Rate limit exceeded" — which the browser reads
+    as an empty file list, so the page that lists your models emptied itself.
+    It has the same room as the other poll endpoints, and the page keeps the
+    last good list rather than showing nothing.
+
 ### 3.5 The tools stay armed — a switch beside the picker
 
 The tools were armed for one message and nothing else: a reply finished, the
