@@ -440,6 +440,28 @@ sizes and picked model, clicks Generate against a done event that carries only
 `path`, and waits for the appended image. Eight checks; the size and image
 checks fail on the old client.
 
+### 3.13 "Install all" never showed its total, and the total missed PyTorch
+
+The button selected every installable group and started the install without
+repainting `#rt-total`, so the one line that answers "how big is this?" stayed on
+"Nothing selected" for the whole run. The estimate also summed only the ticked
+rows:
+
+- torch was never added to the byte total — the line merely said "includes
+  PyTorch";
+- Kokoro has its own venv, so selecting it with a shared-venv runtime fetches
+  torch **twice**. The old total counted it zero times, or one time once the
+  selection included the torch row.
+
+`estimateRuntimeDownload()` now resolves the device-sized groups the server
+returned, counts torch once per venv that needs it and does not yet have it
+(using `runtimes.torches`), and `Install all` repaints the total before the
+request starts. The install log opens with
+`Estimated download: ≈ N MB — PyTorch in 2 environments` so the second wheel is
+not a surprise halfway down the log. `npm run test:runtimes-total-ui` stubs the
+catalog and holds the install request open, then checks the total and log before
+the first package; six checks, four fail on the old page.
+
 ---
 
 ## 4. Methods that were tried and did **not** work

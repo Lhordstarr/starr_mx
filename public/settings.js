@@ -1291,6 +1291,10 @@ let rtDevice = 'cpu';
 let rtPicked = new Set();
 /** The groups from the last loadRuntimes, so "Install all" can select them. */
 let rtCurrentGroups = [];
+/** Torch as each venv actually has it, from the last runtime read. The total
+ *  estimate uses this to count a wheel that will be fetched, not one that is
+ *  already there — and not merely once when two environments need it. */
+let rtTorches = [];
 /** True once the user has clicked a device, so auto-detection stops second-guessing them. */
 let rtDeviceChosen = false;
 
@@ -1599,14 +1603,48 @@ function streamPost(url, body, { onLog, onDone, onError }) {
     .catch((err) => onError(err instanceof Error ? err.message : String(err)));
 }
 
+/**
+ * Approximate download for a runtime selection.
+ *
+ * The server's group sizes are per-machine (the ONNX wheel changes with the
+ * card), but torch is not in them: it is installed into every venv that needs
+ * it. Kokoro has its own venv, so selecting it beside a shared-venv runtime
+ * fetches torch twice. Counting the selected rows alone — or counting torch
+ * once — is why "≈ 53 MB" could sit above a log that downloaded several
+ * hundred MB.
+ */
+function estimateRuntimeDownload(groups, ids) {
+  const chosen = [...new Set(ids)]
+    .map((id) => groups.find((g) => g.id === id))
+    .filter(Boolean);
+  // Vendor installers carry their complete size. Torch is counted per venv
+  // below, rather than as one selected row, so Kokoro's environment is real.
+  const mb = chosen
+    .filter((g) => g.installer || g.id !== 'torch')
+    .reduce((sum, g) => sum + (g.approxMB ?? 0), 0);
+
+  const pip = chosen.filter((g) => !g.installer);
+  const venvs = new Set(pip.map((g) => g.venv ?? 'venv'));
+  const torchVenvs = [];
+  for (const venv of venvs) {
+    const needsTorch = pip.some(
+      (g) => (g.venv ?? 'venv') === venv && (g.id === 'torch' || g.needsTorch),
+    );
+    if (!needsTorch) continue;
+    // A torch that is already importable there is not a download.
+    if (rtTorches.some((t) => t.venv === venv)) continue;
+    torchVenvs.push(venv);
+  }
+  const torch = groups.find((g) => g.id === 'torch');
+  const total = mb + torchVenvs.length * (torch?.approxMB ?? 0);
+  return { chosen, mb: total, torchVenvs };
+}
+
 function updateRuntimeTotal(groups) {
   // Only count what will genuinely be fetched. A stale entry here is what made
   // the counter look stuck at "1 selected" that could not be cleared.
   const pick = [...rtPicked].filter((id) => groups.some((g) => g.id === id));
-  const needTorch = pick.some(
-    (id) => id === 'torch' || groups.find((g) => g.id === id)?.needsTorch,
-  );
-  const mb = pick.reduce((sum, id) => sum + (groups.find((x) => x.id === id)?.approxMB ?? 0), 0);
+  const estimate = estimateRuntimeDownload(groups, pick);
 
   if (!pick.length) {
     // "0 selected · ≈ 0 MB" reads like a broken counter. Say what is true.
@@ -1615,10 +1653,17 @@ function updateRuntimeTotal(groups) {
     );
     rtTotal.textContent = anyInstallable ? 'Nothing selected' : 'Everything available is already installed';
   } else {
-    const parts = [`${pick.length} selected`, `≈ ${mb} MB`];
+    const parts = [`${pick.length} selected`, `≈ ${estimate.mb} MB`];
     // torch comes along as a dependency of another group, so it counts toward
-    // the download without being a separate tick.
-    if (needTorch && !pick.includes('torch')) parts.push('includes PyTorch');
+    // the download without being a separate tick. Two environments means two
+    // wheels, and saying so avoids a total that looks too high for no reason.
+    if (estimate.torchVenvs.length) {
+      parts.push(
+        estimate.torchVenvs.length === 1
+          ? 'includes PyTorch'
+          : `includes PyTorch ×${estimate.torchVenvs.length}`,
+      );
+    }
     rtTotal.textContent = parts.join(' · ');
   }
 
@@ -1727,6 +1772,7 @@ async function loadRuntimes({ force = false } = {}) {
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     if (rtLoadInFlight !== token) return;   // superseded
     const r = data.runtimes;
+    rtTorches = r?.torches ?? [];
 
     // The install-time warning, plus a second one that only applies once the
     // user picks GPU. Those are different moments and they are separate
@@ -1910,6 +1956,10 @@ rtInstallAll?.addEventListener('click', () => {
     notifyWarning('Everything installable is already installed');
     return;
   }
+  // The button used to select the groups and start the install without
+  // repainting the total, so the one number that answers "how big is this?"
+  // stayed on "Nothing selected" for the whole run.
+  updateRuntimeTotal(rtCurrentGroups);
   void runRuntimeInstall();
 });
 
@@ -1968,6 +2018,16 @@ async function runRuntimeInstall(password) {
   rtLog.hidden = false;
   logWorking(password ? 'Retrying with your password…' : 'starting the install…');
   logAppend(rtLogBody, password ? 'Retrying with your password…\n' : '');
+  if (!password) {
+    // Say the whole bill before the first pip line scrolls past. The total
+    // includes torch in each venv that needs it, so Kokoro's second copy is
+    // not a surprise later in the log.
+    const estimate = estimateRuntimeDownload(rtCurrentGroups, groups);
+    const torchNote = estimate.torchVenvs.length
+      ? ` — PyTorch in ${estimate.torchVenvs.length} environment${estimate.torchVenvs.length === 1 ? '' : 's'}`
+      : '';
+    logAppend(rtLogBody, `Estimated download: ≈ ${estimate.mb} MB${torchNote}.\n`);
+  }
   rtLog.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
   // Set only after the server asks. A second ask means the password was
