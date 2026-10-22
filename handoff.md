@@ -719,8 +719,13 @@ This section exists so nobody spends the same afternoon again.
   sent through `/api/chat` returned a non-empty scene description
   ("urn of water with a red roof, surrounded by trees and buildings, with a
   city skyline in the background") — small-model quality, but the image was
-  read, not ignored. The download itself took more than the ten-minute idle
-  window and finished, which is the live confirmation of §3.17.
+  read, not ignored. A synthetic red canvas with a blue circle through the
+  same `/api/chat` route returned a correct description of both shapes and
+  colors. Short one-word VQA prompts are unreliable on this 1B model, so it is
+  best used for captions and descriptions; a larger VLM is the upgrade path if
+  direct question answering matters. The download itself took more than the
+  ten-minute idle window and finished, which is the live confirmation of
+  §3.17.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
 - **The last live box was `https://income-wedding-hat-infections.trycloudflare.com`**
