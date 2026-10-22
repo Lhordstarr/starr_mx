@@ -120,6 +120,9 @@ export const ollama: Provider = {
     }
 
     for await (const event of parseNDJSON(res.body!)) {
+      // A long generation is still use. Without this, a reply that runs past
+      // the daemon's idle window gets its process stopped mid-stream.
+      noteOllamaUsed();
       if (event.error) throw new Error(`Ollama: ${event.error}`);
       // Thinking models put the scratchpad in `message.thinking`; it belongs
       // in the transcript's thinking pane, not in the answer.

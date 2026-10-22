@@ -524,6 +524,42 @@ pass after the change: `test:ui-tools` 50/50, `test:reasoning-ui` 18/18,
 `test:studio-image-ui` 8/8, `test:models-ui` 5/5 and
 `test:runtimes-total-ui` 6/6.
 
+### 3.16 A model pull is longer than a request timeout
+
+`daemonFetch()` wrapped every Ollama request in `AbortSignal.timeout(30_000)`,
+which is correct for `/api/tags` and `/api/show` but wrong for `/api/pull`: a
+model download is an NDJSON stream that legitimately stays open for minutes.
+The timer aborted the vision-model pull at 36 MB of 828 MB with "The operation
+was aborted due to timeout", even though the daemon was healthy.
+
+`daemonFetch()` now takes an optional `timeoutMs`. Ordinary calls keep the
+30-second limit; `pullModel()` passes `0`, so the stream is bounded only by the
+caller's signal (or by nothing when no signal is supplied). The timeout error
+message also derives its seconds from the limit instead of hardcoding 30.
+
+`npm run test:ollama-models` now includes a stub daemon that holds a pull stream
+open past a shortened timer. It passes with the fix and fails against the old
+`daemonFetch()` (9 passed, 1 failed), which is the regression this covers.
+
+### 3.17 An active pull is not an idle daemon
+
+The daemon is stopped after `OLLAMA_IDLE_MS` (ten minutes by default). The pull
+route touched that timer when it started the daemon, then never again. A real
+vision-model download ran past ten minutes and was killed at about 175 MB with
+`"terminated"` — the same shape as a network failure, but caused by the app's
+own idle stop.
+
+The pull route now calls `noteOllamaUsed()` for every progress line. The Ollama
+chat stream does the same for every event, so a generation that runs longer than
+the idle window is not stopped mid-reply either. This is not a permanent
+exemption: the normal idle timer starts again as soon as the stream is quiet.
+
+`npm run test:ollama-pull-keepalive` starts a real app server against a fake
+daemon with a 2-second idle window and a 4-second pull. It asserts the pull
+finishes, the daemon is still alive, and the ordinary idle stop follows. Against
+the old `server.ts` the same test fails at `completed: 12` with `"terminated"`
+and an `[ollama] idle — stopping the daemon` line, which is the actual failure.
+
 ---
 
 ## 4. Methods that were tried and did **not** work
@@ -663,18 +699,28 @@ This section exists so nobody spends the same afternoon again.
 
 ## 5. State of play right now
 
-- `master` includes the provider/model icon pass in §3.15 and is **pushed**;
-  the working tree is clean.
+- `master` includes the provider/model icon pass in §3.15 and the Ollama pull
+  fixes in §3.16–3.17; the working tree is clean and both are **pushed**.
 - The dev server is running in the background on port 3000. On this box it is
   currently `npx tsx src/server.ts` (no watch, log at
-  `/tmp/opencode/dev-nowatch.log`) because image runs are long; `npm run dev`
-  (watch, log at `/tmp/opencode/dev.log`) is the normal one.
+  `/tmp/opencode/dev-nowatch.log`) because downloads and image runs are long;
+  `npm run dev` (watch, log at `/tmp/opencode/dev.log`) is the normal one.
 - Models downloaded on this box: Kokoro `.pth`, Kokoro ONNX, ONNX Whisper,
   MMS-TTS, wav2vec2, whisper-small, faster-whisper-tiny, whisper.cpp models,
   `HuggingFaceTB/SmolLM2-135M-Instruct`, sd-turbo, bert-tiny. The SmolLM2
   **GGUF** is no longer in `models/`, so llama.cpp reports "not configured"
   and the two GGUF checks in `test:models-ui` skip — nothing is broken, there
   is simply no GGUF on disk to load.
+- Ollama models on this box: `moondream:latest` (1.62 GB, vision),
+  `Llama-3.2-1B:latest`, `qwen2.5-0.05b:latest`, `qwen-n:latest`,
+  `smollm2:135m`, `qwen-gpu:latest`, `qwen2.5-coder:1.5b` and
+  `qwen2.5-coder:3b`. `/api/vision?provider=ollama` reports
+  `moondream:latest` as the only vision-capable model. A red-lit city image
+  sent through `/api/chat` returned a non-empty scene description
+  ("urn of water with a red roof, surrounded by trees and buildings, with a
+  city skyline in the background") — small-model quality, but the image was
+  read, not ignored. The download itself took more than the ten-minute idle
+  window and finished, which is the live confirmation of §3.17.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
 - **The last live box was `https://income-wedding-hat-infections.trycloudflare.com`**

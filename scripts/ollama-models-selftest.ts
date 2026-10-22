@@ -184,6 +184,46 @@ await check('one pull at a time', () => {
   releasePull();
 });
 
+await check('a long pull stream is not killed by the 30-second request timeout', async () => {
+  // A real model pull is an NDJSON response kept open for minutes. `daemonFetch`
+  // used to wrap the whole fetch in `AbortSignal.timeout(30_000)`, which aborts
+  // the body mid-download even though the daemon is healthy. Shorten that timer
+  // and hold the stream open past it: the pull must not create the timer at all.
+  const { createServer: cs } = await import('node:http');
+  const slow = cs((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      if (req.url !== '/api/pull') {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'no such endpoint' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      res.write(JSON.stringify({ status: 'pulling manifest' }) + '\n');
+      setTimeout(() => {
+        res.write(JSON.stringify({ status: 'downloading', total: 100, completed: 50 }) + '\n');
+        res.end(JSON.stringify({ status: 'success' }) + '\n');
+      }, 250);
+    });
+  });
+  await new Promise<void>((resolve) => slow.listen(0, '127.0.0.1', () => resolve()));
+  const addr = slow.address() as AddressInfo;
+  process.env.OLLAMA_BASE_URL = `http://127.0.0.1:${addr.port}`;
+
+  const realTimeout = AbortSignal.timeout;
+  (AbortSignal as any).timeout = (ms: number) => realTimeout(Math.min(ms, 80));
+  try {
+    const events: string[] = [];
+    for await (const progress of pullModel('slow:latest')) events.push(progress.status);
+    assert.deepEqual(events, ['pulling manifest', 'downloading', 'success']);
+  } finally {
+    (AbortSignal as any).timeout = realTimeout;
+    process.env.OLLAMA_BASE_URL = stub.base;
+    await new Promise<void>((resolve) => slow.close(() => resolve()));
+  }
+});
+
 console.log('\n=== a dead daemon is not an empty library ===');
 
 // Ollama's own store, laid out the way the daemon leaves it: one model in the

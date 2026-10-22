@@ -18,6 +18,7 @@
     "test:reasoning-ui": "node scripts/reasoning-ui-selftest.mjs",
     "test:ui-tools": "node scripts/ui-tools-selftest.mjs",
     "test:ollama-models": "tsx scripts/ollama-models-selftest.ts",
+    "test:ollama-pull-keepalive": "node scripts/ollama-pull-keepalive-selftest.mjs",
     "test:processes": "tsx scripts/processes-selftest.ts",
     "test:process-poll": "node scripts/process-poll-selftest.mjs",
     "test:vram": "tsx scripts/vram-selftest.ts",

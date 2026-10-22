@@ -30,7 +30,7 @@ import {
   unloadModel,
   validateModelName,
 } from './ollama-models.js';
-import { ensureOllamaRunning, hookOllamaExit, ollamaReachable } from './ollama-server.js';
+import { ensureOllamaRunning, hookOllamaExit, noteOllamaUsed, ollamaReachable } from './ollama-server.js';
 import { listProcesses, processMemoryBytes, processVramBytes, stopAllProcesses, stopProcess } from './processes.js';
 import {
   acquireDownload,
@@ -956,6 +956,10 @@ app.post('/api/ollama/pull', async (req, res) => {
   try {
     let latest = 0;
     for await (const progress of pullModel(name, controller.signal)) {
+      // A pull can outlast the daemon's ten-minute idle window. Every progress
+      // line is proof the daemon is in use, so reset the timer before handling
+      // it; otherwise the idle stop kills the download halfway through.
+      noteOllamaUsed();
       if (clientGone) continue;
       // Ollama reports completed/total bytes per layer; the largest denominator
       // seen so far is the best estimate of the whole pull.

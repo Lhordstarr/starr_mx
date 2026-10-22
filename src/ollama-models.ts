@@ -31,10 +31,23 @@ export interface PullProgress {
   completed?: number;
 }
 
-/** Fetch that reports a dead daemon plainly instead of a bare TypeError. */
-async function daemonFetch(path: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
-  const timeout = AbortSignal.timeout(30_000);
-  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+/**
+ * Fetch that reports a dead daemon plainly instead of a bare TypeError.
+ *
+ * `timeoutMs` covers ordinary JSON calls, where a daemon that never answers is
+ * a dead end. A model pull is an NDJSON stream that can legitimately stay open
+ * for many minutes; applying the 30-second timer to it aborts the download
+ * halfway through. Pull therefore passes `0`, so the stream is bounded only by
+ * the caller's signal — or by nothing when the caller does not supply one.
+ */
+async function daemonFetch(
+  path: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+  timeoutMs = 30_000,
+): Promise<Response> {
+  const timeout = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null;
+  const combined = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
   try {
     return await fetch(`${defaultBaseUrl()}${path}`, { ...init, signal: combined });
   } catch (err) {
@@ -44,8 +57,10 @@ async function daemonFetch(path: string, init: RequestInit, signal?: AbortSignal
     // this, and "not reachable" would send the user to restart a daemon that
     // is working perfectly.
     if (signal?.aborted) throw err;
-    if (err instanceof Error && err.name === 'TimeoutError') {
-      throw new Error('Ollama did not answer within 30s — it is busy loading or replying.');
+    if (timeoutMs > 0 && err instanceof Error && err.name === 'TimeoutError') {
+      throw new Error(
+        `Ollama did not answer within ${Math.round(timeoutMs / 1000)}s — it is busy loading or replying.`,
+      );
     }
     throw new Error(`Ollama is not reachable at ${defaultBaseUrl()}. Is the daemon running?`);
   }
@@ -245,6 +260,7 @@ export async function* pullModel(
       body: JSON.stringify({ name, stream: true }),
     },
     signal,
+    0, // a pull is a long-lived stream, not a request/response call
   );
   if (!res.ok) throw daemonError(res, await res.text());
   for await (const event of parseNDJSON(res.body!)) {
