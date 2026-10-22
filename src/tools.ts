@@ -601,9 +601,10 @@ const BUILTINS: BuiltinSpec[] = [
     label: 'Web Search',
     icon: 'globe',
     description:
-      'Searches the web for current information: news, docs, prices, recent events. ' +
-      'Use when the question needs anything newer than training data or outside it. ' +
-      'Returns numbered titles, URLs, and snippets.',
+      'Searches the public web for current information. Call it for recent events, ' +
+      'prices, schedules, documentation, or to find a URL. Do not use it for stable ' +
+      "facts you already know or for today's date. Returns numbered titles, URLs, and " +
+      'snippets; snippets are not the full page, so call fetch_page to read one.',
     schema: z.object({
       query: z.string().max(300).describe('The search query.'),
       count: z.number().int().min(1).max(10).describe('How many results (1-10).').optional(),
@@ -615,8 +616,10 @@ const BUILTINS: BuiltinSpec[] = [
     label: 'Fetch Page',
     icon: 'file-text',
     description:
-      'Reads a web page as plain text: follow up on a search result, read docs, ' +
-      'check a price. Public http(s) pages only; oversized pages are truncated.',
+      'Reads one public http(s) page as plain text. Use it after web_search when a ' +
+      'snippet is not enough, or when the user gives a URL. Do not guess URLs; if a ' +
+      'page cannot be read, report that rather than inventing its contents. ' +
+      'Oversized pages are truncated.',
     schema: z.object({
       url: z.string().max(2000).describe('The page URL.'),
       max_chars: z
@@ -636,8 +639,8 @@ const BUILTINS: BuiltinSpec[] = [
     description:
       'Looks up a topic on Wikipedia and returns the lead summary. Best for ' +
       'stable facts about people, places, concepts and history. Pass a short ' +
-      'topic name, not a question; this is not a source for today\'s date or ' +
-      'breaking news.',
+      "topic name, not a question; this is not a source for today's date, " +
+      'breaking news, or other current events.',
     schema: z.object({
       query: z.string().max(200).describe('The topic to look up.'),
       sentences: z.number().int().min(1).max(10).describe('Summary sentences (1-10).').optional(),
