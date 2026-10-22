@@ -1191,6 +1191,11 @@ body.modal-open {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 12px;
+  /* Each card is as tall as its own content. Without this, the grid stretches
+     every card to the tallest one in the row: a short entry such as the Kokoro
+     pth checkpoint sat beside a long ONNX description and rendered as a tall
+     empty box. */
+  align-items: start;
 }
 
 .cat-entry {

@@ -23,11 +23,28 @@ export interface ImagePart {
   mimeType: string;
 }
 
-export type ContentPart = TextPart | ImagePart;
+/**
+ * A short video attached to a user turn.
+ *
+ * No chat API this app speaks accepts a video part directly, and Ollama's
+ * `images` array is images only. Video is therefore media for the *assigned
+ * vision model*: the server samples frames with ffmpeg and describes them, so
+ * the active chat model receives text. Keeping the part typed lets the server
+ * reject video honestly when no vision model is assigned instead of silently
+ * dropping it.
+ */
+export interface VideoPart {
+  type: 'video';
+  /** Base64-encoded video bytes, no data: prefix. */
+  data: string;
+  mimeType: string;
+}
+
+export type ContentPart = TextPart | ImagePart | VideoPart;
 
 /**
- * What a message body may carry. Most turns are a plain string; only a turn
- * with an image needs the structured form.
+ * What a message body may carry. Most turns are a plain string; turns with
+ * media need the structured form.
  */
 export type MessageContent = string | ContentPart[];
 

@@ -134,8 +134,9 @@
     <div data-subpanel="runtimes" hidden>
     <section class="panel-section" style="margin-top:0;padding-top:4px;">
       <p class="section-sub" style="margin-top:0;">
-        Optional. Only needed for speech-to-text, speech and image generation —
-        Ollama already covers chat. Nothing touches your system Python.
+        Optional. Needed for speech-to-text, speech, image generation and
+        stable-diffusion.cpp. Ollama already covers chat and the vision models.
+        Nothing touches your system Python.
       </p>
       <div class="rt-device">
         <span class="rt-device__label">Compute</span>
@@ -308,7 +309,9 @@
     <section class="panel-section">
       <h3 class="hub-title">What each job uses</h3>
       <p class="section-sub">
-        Pick the model for speech-to-text, speech and image generation. Only
+        Pick the model for vision, speech-to-text, speech and image generation.
+        The vision model turns images and sampled video frames into text for
+        whichever chat model is active; audio belongs to speech-to-text. Only
         models this machine can actually run are offered; the rest say why.
         The message bar and the Studio use whatever you choose here.
       </p>

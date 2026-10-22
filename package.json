@@ -13,6 +13,8 @@
     "test:stt": "tsx scripts/stt-selftest.ts",
     "test:stt-local": "tsx scripts/stt-local-selftest.ts",
     "test:attachments": "tsx scripts/attachments-selftest.ts",
+    "test:vision": "tsx scripts/vision-selftest.ts",
+    "test:download-groups": "node scripts/download-groups-selftest.mjs",
     "test:tools": "tsx scripts/tools-selftest.ts",
     "test:reasoning": "tsx scripts/reasoning-selftest.ts",
     "test:reasoning-ui": "node scripts/reasoning-ui-selftest.mjs",

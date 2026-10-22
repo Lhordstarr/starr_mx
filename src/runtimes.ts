@@ -35,7 +35,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
@@ -46,6 +46,14 @@ import {
   whisperDir,
   whisperVersion,
 } from './whispercpp.js';
+import {
+  SDCPP_BUILD,
+  sdCppAsset,
+  sdCppCliName,
+  sdCppCliPath,
+  sdCppDir,
+  sdCppInstalled,
+} from './sdcpp.js';
 
 export type Device = 'cpu' | 'nvidia' | 'amd' | 'auto';
 
@@ -297,7 +305,7 @@ function wantsOnnxGpu(device: Device, presence: GpuPresence): boolean {
 export interface RuntimeGroup {
   id: string;
   /** Group installed by a vendor installer or a pinned binary rather than pip. */
-  installer?: 'ollama' | 'llama-cpp' | 'whisper-cpp';
+  installer?: 'ollama' | 'llama-cpp' | 'whisper-cpp' | 'stable-diffusion-cpp';
   label: string;
   /** Why someone would want this, shown in the installer. */
   blurb: string;
@@ -479,6 +487,23 @@ approxMB: 17,
     needsTorch: false,
     approxMB: 10,
     installer: 'whisper-cpp',
+  },
+  {
+    id: 'stable-diffusion-cpp',
+    probe: 'sd-cli',
+    label: 'stable-diffusion.cpp',
+    blurb:
+      'Runs Stable Diffusion 3.5 Medium from GGUF-quantised weights in this ' +
+      'app’s own folder — no root, no Python, no PyTorch. The build matches ' +
+      'the machine: Vulkan where a render node and vulkaninfo are present, CPU ' +
+      'otherwise. This is the route that fits the image model into 8 GB: the ' +
+      'quantised MMDiT stays in RAM and the 2.75 GB text encoder streams from ' +
+      'disk. About 37 MB for the Vulkan build, 27 MB for CPU.',
+    unlocks: ['image-generation'],
+    pkgs: [],
+    needsTorch: false,
+    approxMB: 37,
+    installer: 'stable-diffusion-cpp',
   },
   {
     id: 'faster-whisper',
@@ -1720,6 +1745,10 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
       installed[g.id] = (await whisperCppInstalled()) ? 'installed' : null;
       continue;
     }
+    if (g.installer === 'stable-diffusion-cpp') {
+      installed[g.id] = (await sdCppInstalled()) ? 'installed' : null;
+      continue;
+    }
     if (g.id === 'torch') {
       installed[g.id] = main?.torch?.version ?? null;
       continue;
@@ -2587,13 +2616,14 @@ async function aptInstall(
  */
 /** Does this group's install go through pip, and so need a Python environment? */
 function usesPython(group: RuntimeGroup): boolean {
-  // Ollama, llama.cpp and whisper.cpp ship their own installers. None of them
-  // imports a package, none reads an interpreter, and none is blocked by a
-  // Python that cannot build a venv.
+  // Ollama, llama.cpp, whisper.cpp and stable-diffusion.cpp ship their own
+  // installers. None of them imports a package, none reads an interpreter, and
+  // none is blocked by a Python that cannot build a venv.
   return (
     group.installer !== 'ollama' &&
     group.installer !== 'llama-cpp' &&
-    group.installer !== 'whisper-cpp'
+    group.installer !== 'whisper-cpp' &&
+    group.installer !== 'stable-diffusion-cpp'
   );
 }
 
@@ -2762,6 +2792,10 @@ export async function installRuntimes({
     }
     if (g.installer === 'whisper-cpp') {
       await installWhisperCpp(onProgress);
+      continue;
+    }
+    if (g.installer === 'stable-diffusion-cpp') {
+      await installStableDiffusionCpp(onProgress);
     }
   }
 
@@ -3297,6 +3331,135 @@ async function installWhisperCpp(onProgress: (line: string) => void): Promise<vo
   );
 }
 
+/**
+ * Downloads and unpacks the pinned stable-diffusion.cpp build.
+ *
+ * Same contract as llama.cpp and whisper.cpp: app-local, no root, no Python.
+ * The release archive is flat, but the code still searches for the CLI rather
+ * than assuming that, because upstream has nested its assets before.
+ */
+async function installStableDiffusionCpp(onProgress: (line: string) => void): Promise<void> {
+  if (await sdCppInstalled()) {
+    onProgress('stable-diffusion.cpp is already installed.');
+    return;
+  }
+  const picked = sdCppAsset(hasVulkan());
+  if (!picked) {
+    throw new Error(
+      'The bundled stable-diffusion.cpp installer covers Linux and Windows ' +
+        'x64, and Apple silicon. This platform has no published archive; see ' +
+        'the project releases for a manual build.',
+    );
+  }
+
+  // A half-finished tree would otherwise be found by the status probe and win
+  // over the fresh download.
+  await rm(sdCppDir(), { recursive: true, force: true });
+  await mkdir(sdCppDir(), { recursive: true });
+
+  const kind = picked.kind === 'vulkan' ? 'Vulkan' : picked.kind === 'metal' ? 'Metal' : 'CPU';
+  onProgress(`Fetching stable-diffusion.cpp ${SDCPP_BUILD} (${kind} build)…`);
+  const url = `https://github.com/leejet/stable-diffusion.cpp/releases/download/${SDCPP_BUILD}/${picked.name}`;
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`Could not download ${picked.name} (HTTP ${res.status}).`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const archive = path.join(sdCppDir(), picked.name);
+  await writeFile(archive, bytes);
+  onProgress(`Unpacking ${(bytes.length / 1024 / 1024).toFixed(0)} MB…`);
+
+  await unpackZip(archive, sdCppDir());
+  const cli = await findFileUnder(sdCppDir(), sdCppCliName());
+  if (!cli) {
+    await rm(sdCppDir(), { recursive: true, force: true });
+    throw new Error(
+      'The build unpacked, but no sd-cli binary was found. The archive layout ' +
+        'may have changed; fetch it by hand from the stable-diffusion.cpp releases.',
+    );
+  }
+  await chmod(cli, 0o755);
+  // Shared libraries sit beside the binary and are resolved from there, so the
+  // marker records that directory rather than the archive root.
+  const cliDir = path.dirname(cli);
+  await writeFile(path.join(sdCppDir(), 'build.txt'), path.relative(runtimesDir(), cliDir));
+  await rm(archive, { force: true });
+  onProgress(
+    `stable-diffusion.cpp installed (${kind}). Stable Diffusion 3.5 Medium in ` +
+      'Get models can generate images here.',
+  );
+}
+
+/** Depth-first search for one exact file name under a directory. */
+async function findFileUnder(root: string, name: string): Promise<string | null> {
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let entries: Array<{ name: string; isFile(): boolean; isDirectory(): boolean }>;
+    try {
+      entries = (await readdir(dir, { withFileTypes: true })) as unknown as Array<{
+        name: string;
+        isFile(): boolean;
+        isDirectory(): boolean;
+      }>;
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isFile() && e.name === name) return full;
+      if (e.isDirectory()) stack.push(full);
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts a zip on every supported platform.
+ *
+ * Windows uses PowerShell as it already does for whisper.cpp. Linux and macOS
+ * have `unzip` in their base install; the Python fallback covers minimal
+ * containers where it was stripped out but the app's Python still exists.
+ */
+async function unpackZip(archive: string, dest: string): Promise<void> {
+  const attempts: Array<{ bin: string; args: string[] }> =
+    process.platform === 'win32'
+      ? [
+          {
+            bin: 'powershell',
+            args: [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              `Expand-Archive -LiteralPath ${JSON.stringify(archive)} -DestinationPath ${JSON.stringify(dest)} -Force`,
+            ],
+          },
+        ]
+      : [
+          { bin: 'unzip', args: ['-oq', archive, '-d', dest] },
+          { bin: 'python3', args: ['-m', 'zipfile', '-e', archive, dest] },
+        ];
+
+  let lastError = '';
+  for (const attempt of attempts) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(attempt.bin, attempt.args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        let err = '';
+        child.stderr.on('data', (b) => (err += String(b)));
+        child.on('error', reject);
+        child.on('close', (code) =>
+          code === 0
+            ? resolve()
+            : reject(new Error(`${attempt.bin} exited ${code}${err.trim() ? ` — ${err.trim()}` : ''}`)),
+        );
+      });
+      return;
+    } catch (err) {
+      lastError = (err as Error).message;
+    }
+  }
+  throw new Error(`Could not unpack ${path.basename(archive)}: ${lastError}`);
+}
+
 /** The file name the CLI has on this platform, exported for the status probe. */
 const whisperCliName = (): string => (process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli');
 
@@ -3424,6 +3587,17 @@ export async function removeRuntimeGroup(
     if (cli) await rm(path.dirname(cli), { recursive: true, force: true });
     await rm(whisperDir(), { recursive: true, force: true });
     onProgress('whisper.cpp removed. Its models are left in place for other runtimes.');
+    return { removed: id, label: group.label, reason: null };
+  }
+
+  if (group.installer === 'stable-diffusion-cpp') {
+    onProgress('Removing stable-diffusion.cpp…');
+    // The whole app-local tree goes: binary, shared libraries and the marker.
+    // Downloaded models are separate and stay put.
+    const cli = sdCppCliPath();
+    if (cli) await rm(path.dirname(cli), { recursive: true, force: true });
+    await rm(sdCppDir(), { recursive: true, force: true });
+    onProgress('stable-diffusion.cpp removed. Its models are left in place.');
     return { removed: id, label: group.label, reason: null };
   }
   // A group whose packages depend on the device may have installed either

@@ -28,16 +28,26 @@ import {
   ONNX_WHISPER_SIDECARS,
   catalogRepoIds,
   type CatalogEntry,
+  type CatalogFile,
   type CatalogTask,
 } from './model-catalog.js';
 import { hubCacheDir, listDownloads, modelsDir, type HFDownload } from './huggingface.js';
 import { runtimeStatus } from './runtimes.js';
 
-export type RunTask = 'stt' | 'tts' | 'image';
+export type RunTask = 'vision' | 'stt' | 'tts' | 'image';
 
 export interface RunnableModel {
   /** Catalog identity, exactly as the downloader and runners use it. */
   repo: string;
+  /**
+   * Assignment id, when it differs from `local:<repo>`.
+   *
+   * Vision models served by Ollama are addressed as `ollama:<tag>`, because
+   * the repo is a catalog label and the tag is what the daemon actually
+   * accepts. Pickers read this; code that needs the catalog repo still reads
+   * `repo`.
+   */
+  id?: string;
   label: string;
   task: RunTask;
   /** Which of the entry's files identifies the model to the runner. */
@@ -72,6 +82,7 @@ export interface RunnableModel {
  * filed under the wrong section.
  */
 const CATALOG_TASK: Record<RunTask, CatalogTask> = {
+  vision: 'vision',
   stt: 'speech-to-text',
   tts: 'text-to-speech',
   image: 'image-generation',
@@ -93,12 +104,33 @@ function requiredFiles(entry: CatalogEntry): string[] {
 }
 
 /** The file the runner is pointed at — the weights, not a sidecar. */
-function entryAnchor(entry: CatalogEntry): string {
+function entryAnchor(entry: CatalogEntry, onDisk: Set<string>): string {
   const files = entry.files ?? [];
   // The largest file is the weights in every format here (model.bin, *.safetensors,
   // *.onnx, *.ckpt), so it identifies the model reliably.
   const biggest = files.slice().sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))[0];
-  return biggest?.name ?? files[0]?.name ?? '';
+  if (!biggest) return files[0]?.name ?? '';
+  // Some components come from an auxiliary repository (SD 3.5's VAE). Presence
+  // is keyed by the repo that actually publishes the file, not the card's main
+  // repo, or the VAE would always read as missing.
+  const repo = biggest.repo ?? entry.repo;
+  // Point the runner at the file that is actually present when a slot offers
+  // alternatives. Kokoro's q4f16 export is the case that made this necessary:
+  // the catalog downloads q4, but a Browse download may only have q4f16, and
+  // handing the runner the missing primary name failed before it ever loaded.
+  if (onDisk.has(`${repo}::${biggest.name}`)) return biggest.name;
+  for (const alt of biggest.oneOf ?? []) {
+    if (onDisk.has(`${repo}::${alt}`)) return alt;
+  }
+  return biggest.name;
+}
+
+/** Actual on-disk file satisfying one catalog slot, or '' when absent. */
+function presentName(entry: CatalogEntry, file: CatalogFile, onDisk: Set<string>): string {
+  for (const name of [file.name, ...(file.oneOf ?? [])]) {
+    if (onDisk.has(`${file.repo ?? entry.repo}::${name}`)) return name;
+  }
+  return '';
 }
 
 /**
@@ -515,6 +547,14 @@ export interface RunnableDeps {
   downloads?: HFDownload[];
   /** Installed runtime versions, replacing the live probe. */
   installed?: Record<string, string | null>;
+  /**
+   * Installed Ollama models that actually report the `vision` capability.
+   *
+   * Passed in rather than discovered here so this module stays free of daemon
+   * I/O; `/api/runnable` probes once and shares the answer with every vision
+   * candidate.
+   */
+  visionModels?: string[];
 }
 
 export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Promise<RunnableModel[]> {
@@ -526,11 +566,40 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
   const onDisk = new Set(downloads.map((d) => `${d.repo}::${d.file}`));
 
   const out: RunnableModel[] = [];
+  const catalogVisionTags = new Set<string>();
   for (const entry of candidatesFor(task)) {
+    // Vision models pulled from Ollama's registry have no Hub files. Their
+    // presence is the daemon's model list, not the downloader's records.
+    if (task === 'vision' && entry.ollamaTag) {
+      const tag = entry.ollamaTag;
+      catalogVisionTags.add(tag);
+      const installedVision = deps.visionModels ?? [];
+      const present = installedVision.includes(tag);
+      out.push({
+        repo: entry.repo,
+        id: `ollama:${tag}`,
+        label: entry.label,
+        task,
+        file: '',
+        requiredFiles: [],
+        presentFiles: [],
+        runtimes: {},
+        missing: [],
+        blocked: false,
+        reason: present ? '' : 'Not pulled yet.',
+        ready: present,
+      });
+      continue;
+    }
+
     const needed = requiredFiles(entry);
     if (!needed.length) continue;
-    const present = needed.filter((f) => onDisk.has(`${entry.repo}::${f}`));
-    const missingFiles = needed.filter((f) => !onDisk.has(`${entry.repo}::${f}`));
+    const present = (entry.files ?? [])
+      .map((f) => presentName(entry, f, onDisk))
+      .filter(Boolean);
+    const missingFiles = (entry.files ?? [])
+      .filter((f) => !presentName(entry, f, onDisk))
+      .map((f) => f.name);
 
     const requires = entry.run?.requires ?? [];
     const missingRuntimes = requires.filter((g) => !installed[g]);
@@ -559,7 +628,7 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
       repo: entry.repo,
       label: entry.label,
       task,
-      file: entryAnchor(entry),
+      file: entryAnchor(entry, onDisk),
       requiredFiles: needed,
       presentFiles: present,
       runtimes,
@@ -569,6 +638,29 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
       reason,
       ready: !reason,
     });
+  }
+
+  // A vision model pulled outside the catalog still belongs in the assignment
+  // picker. The daemon's capability probe is the authority: if it says the
+  // model accepts images, it is assignable here even when no card mentions it.
+  if (task === 'vision') {
+    for (const name of deps.visionModels ?? []) {
+      if (catalogVisionTags.has(name)) continue;
+      out.push({
+        repo: name,
+        id: `ollama:${name}`,
+        label: name,
+        task,
+        file: '',
+        requiredFiles: [],
+        presentFiles: [],
+        runtimes: {},
+        missing: [],
+        blocked: false,
+        reason: '',
+        ready: true,
+      });
+    }
   }
 
   // Downloads the catalog does not carry. Grouped by repo because a model can

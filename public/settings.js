@@ -1,6 +1,7 @@
 import { modelIcon, providerIcon } from './entity-icons.js';
 import { notifySuccess, notifyError, notifyWarning } from './notify.js';
 import { initShaderBackdrop } from './shader.js';
+import { fileCandidates, groupFilesBySource, missingCatalogFiles, transferSources } from './transfer-groups.js';
 
 
 const form = document.getElementById('keys');
@@ -667,7 +668,9 @@ function renderLocalModel(m) {
         method: 'POST',
         body: JSON.stringify({ name: m.name }),
       });
-      await refreshLocalModels();
+      // Deleting a vision model must also disable its assignment row option;
+      // otherwise the picker keeps offering a model that is no longer there.
+      await syncDerived();
     } catch (err) {
       delBtn.disabled = false;
       delBtn.dataset.armed = '';
@@ -854,7 +857,7 @@ pullForm.addEventListener('submit', async (e) => {
         pullStatus.className = 'scan-result';
         pullStatus.textContent = `Pulled ${parsed.model}.`;
         pullName.value = '';
-        await refreshLocalModels();
+        await syncDerived();
       }
     });
     if (finished) return;
@@ -2317,6 +2320,11 @@ function runtimeReady(runtime, installed) {
  * result rather than asking again.
  */
 const TASK_LABELS = {
+  vision: {
+    title: 'Vision & multimedia',
+    verb: 'Describes images and video for the chat model',
+    task: 'vision',
+  },
   stt: { title: 'Speech to text', verb: 'Transcribes your dictation', task: 'stt' },
   tts: { title: 'Speech', verb: 'Reads text aloud', task: 'tts' },
   image: { title: 'Image generation', verb: 'Draws images in the Studio', task: 'image' },
@@ -2347,7 +2355,7 @@ async function renderAssignments() {
   const assigned = data.assigned ?? {};
   host.innerHTML = '';
 
-  for (const key of ['stt', 'tts', 'image']) {
+  for (const key of ['vision', 'stt', 'tts', 'image']) {
     const meta = TASK_LABELS[key];
     const models = data[key] ?? [];
     const ready = models.filter((m) => m.ready);
@@ -2380,10 +2388,14 @@ async function renderAssignments() {
 
     for (const m of models) {
       const opt = document.createElement('option');
-      opt.value = `local:${m.repo}`;
+      // Ollama-backed vision models are addressed by tag, not by their catalog
+      // repo label. The server provides `id` for exactly this; local models
+      // keep the long-standing `local:<repo>` shape.
+      const value = m.id ?? `local:${m.repo}`;
+      opt.value = value;
       opt.textContent = m.ready ? m.label : `${m.label} — ${m.reason}`;
       opt.disabled = !m.ready;
-      if (assigned[key] === `local:${m.repo}`) opt.selected = true;
+      if (assigned[key] === value) opt.selected = true;
       select.append(opt);
     }
 
@@ -2422,6 +2434,18 @@ const transfers = new Map();
 
 function transferKey(kind, repo, file) {
   return `${kind}:${repo ?? ''}::${file ?? ''}`;
+}
+
+/** Starts a server-owned transfer without consuming its progress stream. */
+async function startTransferRequest(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) return;
+  const data = await res.json().catch(() => ({}));
+  throw new Error(data.error ?? `HTTP ${res.status}`);
 }
 
 /** Creates (or refreshes) a row and returns its update function. */
@@ -2463,16 +2487,24 @@ function beginTransfer(kind, label, meta = {}) {
  */
 async function syncTransfers() {
   try {
+    // The catalog maps an auxiliary source repo (SD 3.5's VAE) back to the one
+    // card it belongs to. Without it, the first progress poll replaces a
+    // grouped row with a second, unexplained row named after the VAE repo.
+    await ensureCatalog().catch(() => {});
     const res = await fetch('/api/transfers');
     if (!res.ok) return;
     const { active: running = [], recent = [] } = await res.json();
     transfers.clear();
     for (const t of [...running, ...recent]) {
+      const card = t.kind === 'download' ? catalogEntryForRepo(t.repo) : null;
       transfers.set(t.id, {
         key: t.id,
         kind: t.kind,
         label: t.label,
-        repo: t.repo,
+        // Display under the model card that needs the file, but keep the real
+        // source repo for pause/resume/delete.
+        repo: card?.repo ?? t.repo,
+        sourceRepo: t.repo,
         file: t.file,
         state: t.state,
         percent: t.percent ?? 0,
@@ -2650,10 +2682,14 @@ function renderDownloads() {
         pause.disabled = true;
         hfActionInFlight = true;
         try {
-          await api('/api/hf/download/cancel', {
-            method: 'POST',
-            body: JSON.stringify({ repo: g.repo }),
-          });
+          // A bundle's files come from their own repos; the server's abort
+          // controller is keyed by the source repo, not the card's label.
+          for (const repo of transferSources(g).keys()) {
+            await api('/api/hf/download/cancel', {
+              method: 'POST',
+              body: JSON.stringify({ repo }),
+            });
+          }
           await syncTransfers();
           await syncDerived();
         } catch (err) {
@@ -2677,14 +2713,16 @@ function renderDownloads() {
         cancel.disabled = true;
         hfActionInFlight = true;
         try {
-          await api('/api/hf/download/cancel', {
-            method: 'POST',
-            body: JSON.stringify({ repo: g.repo, discard: true }),
-          });
-          await api('/api/hf/download/discard', {
-            method: 'POST',
-            body: JSON.stringify({ repo: g.repo }),
-          });
+          for (const repo of transferSources(g).keys()) {
+            await api('/api/hf/download/cancel', {
+              method: 'POST',
+              body: JSON.stringify({ repo, discard: true }),
+            });
+            await api('/api/hf/download/discard', {
+              method: 'POST',
+              body: JSON.stringify({ repo }),
+            });
+          }
           await syncTransfers();
           await syncDerived();
         } catch (err) {
@@ -2723,16 +2761,26 @@ function renderDownloads() {
         hfActionInFlight = true;
         resume.textContent = '…';
         try {
-          const endpoint = g.files.length === 1 ? '/api/hf/download' : '/api/hf/download-repo';
-          const body =
-            g.files.length === 1
-              ? { repo: g.repo, file: g.files[0].file }
-              : { repo: g.repo };
-          await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
-          });
+          const sources = transferSources(g);
+          const states = new Map(
+            g.files.map((t) => [
+              `${t.sourceRepo ?? t.repo ?? g.repo}::${t.file ?? ''}`,
+              t.state,
+            ]),
+          );
+          for (const [repo, files] of sources) {
+            // The main repo can be resumed as a whole, which also picks up a
+            // file the previous run never reached. Auxiliary sources are
+            // individual files on a card whose other files live elsewhere.
+            if (g.files.length > 1 && repo === g.repo) {
+              await startTransferRequest('/api/hf/download-repo', { repo });
+              continue;
+            }
+            for (const file of files) {
+              if (states.get(`${repo}::${file}`) === 'done') continue;
+              await startTransferRequest('/api/hf/download', { repo, file });
+            }
+          }
           // Give the server a moment to register the new transfer before polling.
           await new Promise((r) => setTimeout(r, 300));
           await syncTransfers();
@@ -2758,10 +2806,22 @@ function renderDownloads() {
       del.title = `Remove every file of ${g.repo} from this machine`;
       armThenDelete(del, `repo::${g.repo}`, async () => {
         try {
-          await api('/api/hf/repo/delete', {
-            method: 'POST',
-            body: JSON.stringify({ repo: g.repo }),
-          });
+          const sources = transferSources(g);
+          // Auxiliary files are deleted by name so a VAE mirror that is
+          // shared with another model is not emptied wholesale.
+          for (const [repo, files] of sources) {
+            if (repo === g.repo) continue;
+            await api('/api/hf/files/delete-many', {
+              method: 'POST',
+              body: JSON.stringify({ repo, files: [...files] }),
+            });
+          }
+          if (sources.has(g.repo)) {
+            await api('/api/hf/repo/delete', {
+              method: 'POST',
+              body: JSON.stringify({ repo: g.repo }),
+            });
+          }
           notifySuccess(`${g.repo} removed`);
           await syncDerived();
         } catch (err) {
@@ -2807,7 +2867,7 @@ function jobRepos() {
       .then((r) => r.json())
       .then((d) => {
         const repos = new Set();
-        for (const task of ['stt', 'tts', 'image']) {
+        for (const task of ['vision', 'stt', 'tts', 'image']) {
           for (const m of d[task] ?? []) repos.add(m.repo);
         }
         return repos;
@@ -2928,8 +2988,7 @@ async function refreshHub() {
     const inferred = entry?.bundle ? null : chatRuntimeFor(anchor) ?? runtimeForFile(anchor.file);
     const key = entry?.run?.requires[0] ?? inferred?.id ?? null;
     const present = members.map((m) => m.file);
-    const wanted = entry?.files?.map((f) => f.name) ?? [];
-    const missing = wanted.filter((w) => !present.includes(w));
+    const missing = missingCatalogFiles(entry?.files, present);
 
     const row = {
       ...anchor,
@@ -2941,7 +3000,14 @@ async function refreshHub() {
       // tuner, a TTS architecture nothing here speaks. The row says so
       // instead of leaving a runtime label that reads as usable. A GGUF chat
       // model is not jobless: the chat page's llama.cpp provider loads it.
-      jobless: anchor.llama || anchor.transformers ? false : usableRepos ? !usableRepos.has(anchor.repo) : false,
+      // A catalog entry is never jobless either, including an auxiliary file
+      // such as SD 3.5's VAE: the card's other files are its job.
+      jobless:
+        anchor.llama || anchor.transformers || entry
+          ? false
+          : usableRepos
+            ? !usableRepos.has(anchor.repo)
+            : false,
       entry: entry ?? null,
       // One model can span several files; the runner is pointed at the weights.
       file: anchor.file,
@@ -2967,12 +3033,11 @@ async function refreshHub() {
   // Delete still clears the whole set in one go.
   const unroutable = [...unroutableGroups.values()].map(({ entry, members, anchor }) => {
     const present = members.map((m) => m.file);
-    const wanted = entry?.files?.map((f) => f.name) ?? [];
-    const missing = wanted.filter((w) => !present.includes(w));
+    const missing = missingCatalogFiles(entry?.files, present);
     return {
       ...anchor,
       location: anchor.location ?? 'models',
-      jobless: usableRepos ? !usableRepos.has(anchor.repo) : false,
+      jobless: entry ? false : usableRepos ? !usableRepos.has(anchor.repo) : false,
       entry: entry ?? null,
       file: anchor.file,
       files: present,
@@ -3184,6 +3249,23 @@ function catalogFormats(entry) {
   return [...seen];
 }
 
+/** A catalog file's actual source repo; most live in the card's main repo. */
+const fileRepo = (entry, file) => file.repo ?? entry.repo;
+
+/**
+ * The filename on disk that satisfies a catalog slot, or null.
+ *
+ * `oneOf` exists for exports that are interchangeable to the runner, such as
+ * Kokoro's q4 and q4f16 graphs. Checking only the preferred name made a card
+ * with the accepted alternative look half-downloaded and sent its Run button
+ * after a file that was never there.
+ */
+function catalogNameOnDisk(entry, file) {
+  return fileCandidates(file).find((name) =>
+    catalogDownloaded.has(`${fileRepo(entry, file)}::${name}`),
+  ) ?? null;
+}
+
 /** One model: what it is, which runtime loads it, and what you can do now. */
 function renderCatalogEntry(entry) {
   const row = document.createElement('article');
@@ -3291,7 +3373,10 @@ function renderCatalogEntry(entry) {
           }
           if (event === 'done') pulled = parsed.model ?? entry.ollamaTag;
         });
-        await refreshLocalModels();
+        // A freshly pulled vision model has to appear in the assignment rows
+        // and turn its catalog card into a Run button. refreshLocalModels alone
+        // only redraws the Ollama list.
+        await syncDerived();
         const installed = pulled ?? entry.ollamaTag;
         pull.textContent = `${installed} pulled`;
         notifySuccess(`${installed} installed`);
@@ -3311,16 +3396,18 @@ function renderCatalogEntry(entry) {
   // last so the progress reads sensibly.
   if (entry.bundle && entry.files?.length) {
     const total = entry.files.reduce((a, f) => a + (f.bytes ?? 0), 0);
-    const have = entry.files.filter((f) => catalogDownloaded.has(`${entry.repo}::${f.name}`)).length;
+    const have = entry.files.filter((f) => catalogNameOnDisk(entry, f)).length;
     const complete = have === entry.files.length;
 
     if (complete && runIsReady(entry, catalogInstalled)) {
+      const actual = catalogNameOnDisk(entry, entry.files[0]);
+      const runFile = actual ? { ...entry.files[0], name: actual } : entry.files[0];
       const run = document.createElement('button');
       run.type = 'button';
       run.className = 'btn-primary cat-run';
       run.textContent = 'Run';
       run.title = `${runLabel(entry.run.kind)} on this machine`;
-      run.addEventListener('click', () => openRunPanel(entry, entry.files[0]));
+      run.addEventListener('click', () => openRunPanel(entry, runFile));
       actions.append(run);
     }
 
@@ -3356,7 +3443,12 @@ function renderCatalogEntry(entry) {
       try {
         for (const f of small) {
           dl.title = `Downloading ${f.name}…`;
-          await downloadHfFile(entry.repo, f.name, dl, null, {
+          // Fetch from the repository that publishes this file, but keep the
+          // Downloads row grouped under the model card the user clicked. The
+          // SD 3.5 VAE comes from stabilityai while the quants come from
+          // second-state; two rows for one card would read as two models.
+          await downloadHfFile(fileRepo(entry, f), f.name, dl, null, {
+            transferRepo: entry.repo,
             onTick: (received) => paint(doneBytes + received, f.name),
           });
           doneBytes += f.bytes ?? 0;
@@ -3377,14 +3469,14 @@ function renderCatalogEntry(entry) {
     // Run only appears once BOTH halves are real: the runtime this entry needs
     // is installed, and these exact weights are already on disk. Either half
     // missing and there is nothing to run, so no button is drawn.
-    const downloaded = catalogDownloaded.has(`${entry.repo}::${f.name}`);
-    if (downloaded && runIsReady(entry, catalogInstalled)) {
+    const actual = catalogNameOnDisk(entry, f);
+    if (actual && runIsReady(entry, catalogInstalled)) {
       const run = document.createElement('button');
       run.type = 'button';
       run.className = 'btn-primary cat-run';
       run.textContent = 'Run';
       run.title = `${runLabel(entry.run.kind)} on this machine`;
-      run.addEventListener('click', () => openRunPanel(entry, f));
+      run.addEventListener('click', () => openRunPanel(entry, { ...f, name: actual }));
       actions.append(run);
     }
 
@@ -3403,7 +3495,9 @@ function renderCatalogEntry(entry) {
     dl.addEventListener('click', async () => {
       dl.disabled = true;
       try {
-        await downloadHfFile(entry.repo, f.name, dl, status);
+        await downloadHfFile(fileRepo(entry, f), f.name, dl, status, {
+          transferRepo: entry.repo,
+        });
         notifySuccess(`${f.name} saved under ./models/`);
       } finally {
         dl.textContent = dlLabel;
@@ -3641,7 +3735,10 @@ function openRunPanel(entry, file) {
     steps.type = 'number';
     steps.min = '1';
     steps.max = '50';
-    steps.value = '4';
+    // SD 3.5 Medium needs real sampling steps; SD Turbo needs one or two. The
+    // catalog knows which model this is, so the form starts at its default
+    // rather than always at Turbo's four.
+    steps.value = String(entry.run.steps ?? 4);
     inputs.steps = add('Steps', steps);
     const size = document.createElement('input');
     size.type = 'text';
@@ -3766,7 +3863,7 @@ function renderRunResult(kind, result, out) {
   const meta = document.createElement('p');
   meta.className = 'run-meta';
   meta.textContent = [
-    result.seconds ? `${result.seconds}s audio` : null,
+    result.seconds ? `${result.seconds}s${kind === 'tts' ? ' audio' : ''}` : null,
     result.width ? `${result.width}×${result.height}` : null,
     result.device ? `on ${result.device}` : null,
   ]
@@ -4946,7 +5043,14 @@ async function downloadHfFile(repo, file, btn, sizeEl, hooks = {}) {
     if (sizeEl) sizeEl.textContent = t;
     else if (btn && !hooks.onTick) btn.textContent = t;
   };
-  const transfer = beginTransfer('download', file, { repo, file });
+  const transfer = beginTransfer('download', file, {
+    // An auxiliary file (SD 3.5's VAE) is fetched from its own repo but shown
+    // under the model card that needs it. Without this the Downloads list
+    // sprouts a second, half-explained row for the same model.
+    repo: hooks.transferRepo ?? repo,
+    sourceRepo: repo,
+    file,
+  });
   try {
     const res = await fetch('/api/hf/download', {
       method: 'POST',
@@ -5392,13 +5496,21 @@ function renderLocalDownload(d, resolved) {
         // A row is one model: delete removes every file the row shows, not just
         // its anchor. Removing the anchor alone left sidecars behind as rows
         // with nothing left to run — the junk this page was accused of. One
-        // request for the whole set: a fifty-eight-file model used to be as
-        // many round trips, which read as a hang rather than a delete.
-        const res = await api('/api/hf/files/delete-many', {
-          method: 'POST',
-          body: JSON.stringify({ repo: d.repo, files: members }),
-        });
-        const removed = res?.removed ?? 0;
+        // request per source repo: a fifty-eight-file model used to be as many
+        // round trips, which read as a hang rather than a delete.
+        //
+        // A bundle can also span repos. SD 3.5's VAE lives in a mirror while
+        // its quants live in the model repo, so deleting the row against the
+        // anchor repo alone left the VAE behind.
+        const bySource = groupFilesBySource(d.repo, members, entry?.files ?? []);
+        let removed = 0;
+        for (const [repo, files] of bySource) {
+          const res = await api('/api/hf/files/delete-many', {
+            method: 'POST',
+            body: JSON.stringify({ repo, files }),
+          });
+          removed += res?.removed ?? 0;
+        }
         notifySuccess(removed > 1 ? `${removed} files deleted` : `${d.file} deleted`);
         await syncDerived();
       } catch (err) {
@@ -5478,9 +5590,16 @@ function renderLocalDownload(d, resolved) {
 }
 
 function catalogEntryForRepo(repo) {
+  // Main repo first, so a catalog entry that also happens to be another
+  // entry's auxiliary source still resolves to itself.
   for (const section of catalogData) {
     for (const entry of section.entries) {
       if (entry.repo === repo) return entry;
+    }
+  }
+  for (const section of catalogData) {
+    for (const entry of section.entries) {
+      if ((entry.files ?? []).some((f) => f.repo === repo)) return entry;
     }
   }
   return null;

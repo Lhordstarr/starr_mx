@@ -19,7 +19,7 @@ import {
   resolveMime,
   LIMITS,
 } from '../src/attachments.js';
-import type { ImagePart, TextPart } from '../src/types.js';
+import type { ImagePart, TextPart, VideoPart } from '../src/types.js';
 
 let passed = 0;
 const failures: string[] = [];
@@ -40,6 +40,12 @@ const image = (bytes: number, mimeType = 'image/png'): ImagePart => ({
   // base64 is 4/3 the byte length, so this yields `bytes` when decoded.
   data: 'A'.repeat(Math.ceil((bytes * 4) / 3)),
   mimeType,
+});
+
+const video = (bytes: number): VideoPart => ({
+  type: 'video',
+  mimeType: 'video/mp4',
+  data: 'A'.repeat(Math.ceil((bytes * 4) / 3)),
 });
 
 const turn = (content: unknown) => [{ role: 'user' as const, content: content as never }];
@@ -86,6 +92,33 @@ check('many medium images exceeding the total cap are rejected', () => {
   assert.equal(checkAttachments(turn(Array(4).fill(image(each)))).length, 1);
 });
 
+check('a video under the cap is allowed', () => {
+  assert.deepEqual(checkAttachments(turn([video(1000)])), []);
+});
+
+check('a video over the cap is rejected', () => {
+  assert.match(checkAttachments(turn([video(LIMITS.videoBytes + 1)]))[0].reason, /video must be under 12MB/i);
+});
+
+check('only one video is accepted per message', () => {
+  assert.match(checkAttachments(turn([video(1000), video(1000)]))[0].reason, /At most 1 video/);
+});
+
+check('a video can be parsed from the wire', () => {
+  assert.deepEqual(parseContent([video(10)]), [video(10)]);
+});
+
+check('an unsupported video MIME is refused', () => {
+  assert.equal(parseContent([{ ...video(10), mimeType: 'video/avi' }]), null);
+});
+
+check('a raw video is refused by every provider wire format', () => {
+  const input = [video(10)];
+  for (const convert of [toOpenAIFormat, toOllamaMessage, toAnthropicFormat, toGeminiParts]) {
+    assert.throws(() => convert(input), /vision model/);
+  }
+});
+
 check('a plain string message produces no problems', () => {
   assert.deepEqual(checkAttachments(turn('just text')), []);
 });
@@ -106,6 +139,10 @@ check('an image counts as a flat allowance', () => {
 check('mixed content adds up', () => {
   const text: TextPart = { type: 'text', text: 'hello' };
   assert.equal(contentLength([text, image(10)]), 5 + 4_000);
+});
+
+check('a video counts as four sampled frames', () => {
+  assert.equal(contentLength([video(10)]), 16_000);
 });
 
 console.log('\n=== OpenAI wire format ===');

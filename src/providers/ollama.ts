@@ -8,7 +8,7 @@ import {
   noteOllamaUsed,
   ollamaReachable,
 } from '../ollama-server.js';
-import type { Provider, StreamOptions } from './types.js';
+import type { DescribeImagesOptions, Provider, StreamOptions } from './types.js';
 
 const baseUrl = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
 
@@ -86,6 +86,76 @@ export const ollama: Provider = {
       }
     }
     return found;
+  },
+
+  /**
+   * Describes one image for a text-only chat model.
+   *
+   * This is deliberately a separate model call, not a second `images` entry on
+   * the chat request: the assigned vision model may be a different size or even
+   * a different family, and the text it produces is what the active model
+   * receives. Ollama's non-streaming response is small enough to collect here;
+   * the image bytes never leave the machine.
+   */
+  async describeImages({ model, images, prompt, signal }: DescribeImagesOptions) {
+    await withDaemon(async () => undefined);
+
+    const askOnce = async (content: string): Promise<string> => {
+      const res = await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: 'user',
+              content,
+              images: images.map((i) => i.data),
+            },
+          ],
+          stream: false,
+          options: { temperature: 0.1, num_predict: 768 },
+          keep_alive: '5m',
+        }),
+        signal,
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        let detail = '';
+        try {
+          detail = (JSON.parse(body) as { error?: string }).error ?? '';
+        } catch {
+          /* not JSON */
+        }
+        throw new Error(
+          `Vision model ${model} failed (HTTP ${res.status})` +
+            (detail ? `: ${detail}` : '.'),
+        );
+      }
+      const data = (await res.json()) as {
+        message?: { content?: string };
+        error?: string;
+      };
+      if (data.error) throw new Error(`Vision model ${model}: ${data.error}`);
+      return data.message?.content?.trim() ?? '';
+    };
+
+    // Keep the instruction short. Moondream 2 answers this reliably, while a
+    // long set of rules ending in "do not answer the question yourself" made
+    // it return an empty message — the failure looked like the attachment was
+    // broken. The context is useful but not required, so an empty result gets
+    // one retry with the bare description instruction.
+    const describe =
+      'Describe this image in detail for someone who cannot see it. Include the ' +
+      'layout, objects, people, colours, and transcribe all visible text exactly. ' +
+      'Be factual.';
+    const context = prompt.trim()
+      ? `\n\nThe conversation is about: ${prompt.trim().slice(0, 2_000)}`
+      : '';
+    let text = await askOnce(`${describe}${context}`);
+    if (!text) text = await askOnce('Describe this image in detail.');
+    if (!text) throw new Error(`Vision model ${model} returned an empty description.`);
+    return text;
   },
 
   async *stream({ model, messages, signal, temperature }: StreamOptions) {

@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { hubCacheDir, listDownloads, modelsDir } from './huggingface.js';
 import { attachChild, finishProcess, registerProcess, setProcessDevice } from './processes.js';
 import { findKokoroOnnx, isOnnxWhisper, isTransformersTts } from './runnable.js';
+import { generateWithSdCpp, isSdCppRepo } from './sdcpp.js';
 import { venvPython, type Device } from './runtimes.js';
 import { speakViaEngine } from './tts-engine.js';
 import { WHISPER_REPO, parseWhisperJson, resolveWhisperModel, transcribeWithWhisperCpp } from './whispercpp.js';
@@ -461,6 +462,20 @@ export async function generateImageLocal(opts: {
   device: Device;
   onLog?: (s: string) => void;
 }): Promise<{ result: RunResult; outPath: string }> {
+  // SD 3.5 Medium's GGUF bundle is four model files plus a VAE, not one path
+  // the diffusers script can load. stable-diffusion.cpp owns that layout and
+  // the memory strategy, so it takes the whole request.
+  if (isSdCppRepo(opts.repo)) {
+    const { result, outPath } = await generateWithSdCpp(opts);
+    return {
+      result: {
+        ...result,
+        log: typeof result.data.log === 'string' ? result.data.log : '',
+      },
+      outPath,
+    };
+  }
+
   const modelDir = await resolveDownloaded(opts.repo, opts.file);
   // A diffusers model is a *directory tree* — model_index.json plus unet/,
   // vae/, text_encoder/, tokenizer/ — so the pipeline is loaded from the repo

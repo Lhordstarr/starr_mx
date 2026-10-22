@@ -1,4 +1,4 @@
-import type { ChatMessage } from '../types.js';
+import type { ChatMessage, ImagePart } from '../types.js';
 import type { ToolDefinition } from '../tools.js';
 
 /** Ids of the providers compiled into the app. */
@@ -131,6 +131,25 @@ export type ListVisionModelsFn = () => Promise<string[]>;
  */
 export type TranscribeFn = (opts: TranscribeOptions) => Promise<string>;
 
+/** One image handed to the assigned vision model. */
+export interface DescribeImagesOptions {
+  model: string;
+  /** One image per call: framing and OCR stay attached to the right frame. */
+  images: ImagePart[];
+  /** The user's text, used to point the description at what they asked. */
+  prompt: string;
+  signal: AbortSignal;
+}
+
+/**
+ * Turns images into a factual text description for a model that cannot see.
+ *
+ * Optional because not every provider exposes a second, vision-capable model
+ * through the same API. The chat route reads the assignment, resolves the
+ * provider named by its id, and calls this when present.
+ */
+export type DescribeImagesFn = (opts: DescribeImagesOptions) => Promise<string>;
+
 /**
  * Gets a local backend ready to answer a specific model, narrating what it is
  * doing.
@@ -171,4 +190,10 @@ export interface Provider {
    * return [] to mean "this provider tells us nothing".
    */
   listVisionModels?: ListVisionModelsFn;
+  /**
+   * Present when a vision-capable model can be invoked for another model's
+   * image. Ollama implements this; hosted providers keep their native image
+   * path and do not need the indirection.
+   */
+  describeImages?: DescribeImagesFn;
 }

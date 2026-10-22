@@ -1064,11 +1064,15 @@ export function ollamaChatTools(baseUrl: string): ChatToolsFn {
     | string
     | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> => {
     if (typeof content === 'string') return content;
-    return content.map((p) =>
-      p.type === 'image'
-        ? { type: 'image_url' as const, image_url: { url: `data:${p.mimeType};base64,${p.data}` } }
-        : { type: 'text' as const, text: p.text },
-    );
+    return content.map((p) => {
+      if (p.type === 'image') {
+        return { type: 'image_url' as const, image_url: { url: `data:${p.mimeType};base64,${p.data}` } };
+      }
+      if (p.type === 'video') {
+        throw new Error('Video must be described by the assigned vision model before tools run.');
+      }
+      return { type: 'text' as const, text: p.text };
+    });
   };
 
   const toWireTool = (d: ToolDefinition) =>

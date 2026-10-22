@@ -18,13 +18,36 @@
  *    actions are unrelated paths to the same model, never one behind the other.
  */
 
-export type CatalogTask = 'text' | 'speech-to-text' | 'text-to-speech' | 'image-generation';
+export type CatalogTask = 'text' | 'vision' | 'speech-to-text' | 'text-to-speech' | 'image-generation';
 
 export interface CatalogFile {
   /** Repo-relative path, exactly as the Hub spells it. */
   name: string;
   label: string;
   bytes: number;
+  /**
+   * Where this file lives when it is not in the entry's main repo.
+   *
+   * Some quantised pipelines are split across repositories — the diffusion
+   * weights in one, the VAE in another — and making the user download those as
+   * two unrelated cards produced two half-models. This keeps one card as the
+   * unit of "what runs", while the downloader still fetches each file from the
+   * repository that actually publishes it.
+   */
+  repo?: string;
+  /**
+   * Other file names that satisfy this slot.
+   *
+   * The Kokoro ONNX repo ships several graph exports with different precision
+   * rules. `model_q4.onnx` is the one the catalog downloads because it is safe
+   * on CUDA, but a user who fetched `model_q4f16.onnx` from Browse has a graph
+   * the runner genuinely supports. Without this list the assignment called
+   * that download "missing one file" and refused to run it.
+   *
+   * The first name remains the download choice; these are presence checks
+   * only, so a quantisation is never silently substituted on disk.
+   */
+  oneOf?: string[];
 }
 
 export interface CatalogEntry {
@@ -52,7 +75,12 @@ export interface CatalogEntry {
    * it: llama.cpp, ComfyUI and faster-whisper are external tools, and the UI
    * says so instead of offering a button that cannot work.
    */
-  run?: { kind: 'stt' | 'tts' | 'image'; requires: string[] };
+  run?: {
+    kind: 'vision' | 'stt' | 'tts' | 'image';
+    requires: string[];
+    /** Sensible starting point for the Run panel; the user can change it. */
+    steps?: number;
+  };
 }
 
 export interface CatalogSection {
@@ -180,6 +208,68 @@ export const CATALOG: CatalogSection[] = [
         runtime: 'Transformers',
         files: [{ name: 'model.safetensors', label: 'weights', bytes: 269 * MB }],
         bundle: true,
+      },
+    ],
+  },
+  {
+    task: 'vision',
+    title: 'Vision & multimedia',
+    note:
+      'Multimodal models from Ollama’s registry — no Hugging Face download and ' +
+      'no Python stack. Assign one under What each job uses; it turns images ' +
+      'and sampled video frames into text for whichever chat model is active. ' +
+      'Audio is handled by the Speech to text slot, not here. Sizes are the ' +
+      'pulled model and do not include the chat model that will also be loaded.',
+    entries: [
+      {
+        repo: 'ollama/moondream',
+        label: 'Moondream 2 (1.9B)',
+        task: 'vision',
+        blurb:
+          'The realistic choice on an 8 GB machine: 1.6 GB, fast enough on a CPU, ' +
+          'and good at describing photos, screenshots and diagrams. Images only.',
+        runtime: 'Ollama',
+        ollamaTag: 'moondream:latest',
+        files: [],
+        run: { kind: 'vision', requires: [] },
+      },
+      {
+        repo: 'ollama/granite3.2-vision',
+        label: 'Granite 3.2 Vision (2B)',
+        task: 'vision',
+        blurb:
+          '2.3 GB. IBM’s document-oriented vision model; charts, tables and dense ' +
+          'scans are its strongest case. Images only.',
+        runtime: 'Ollama',
+        ollamaTag: 'granite3.2-vision:2b',
+        files: [],
+        run: { kind: 'vision', requires: [] },
+      },
+      {
+        repo: 'ollama/qwen2.5vl',
+        label: 'Qwen2.5-VL (3B)',
+        task: 'vision',
+        blurb:
+          '3.0 GB. The strongest all-rounder here, including video understanding. ' +
+          'This app samples video into four still frames before asking, so the ' +
+          'model sees those frames rather than the original stream.',
+        runtime: 'Ollama',
+        ollamaTag: 'qwen2.5vl:3b',
+        files: [],
+        run: { kind: 'vision', requires: [] },
+      },
+      {
+        repo: 'ollama/gemma3',
+        label: 'Gemma 3 (4B)',
+        task: 'vision',
+        blurb:
+          '3.2 GB. A stronger general chat model that also sees images; useful if ' +
+          'you want one model for both roles. Tight but workable under 8 GB when ' +
+          'the chat model is unloaded first.',
+        runtime: 'Ollama',
+        ollamaTag: 'gemma3:4b',
+        files: [],
+        run: { kind: 'vision', requires: [] },
       },
     ],
   },
@@ -349,7 +439,16 @@ export const CATALOG: CatalogSection[] = [
           'pronounce anything.',
         runtime: 'onnxruntime (Kokoro)',
         files: [
-          { name: 'onnx/model_q4.onnx', label: 'q4 weights', bytes: 305215966 },
+          {
+            name: 'onnx/model_q4.onnx',
+            label: 'q4 weights',
+            bytes: 305215966,
+            // Browse downloads often land on the smaller q4f16 export. The
+            // runner accepts it on CPU (and refuses it on CUDA because that
+            // build produces silence), so presence is honest even though the
+            // catalog still prefers q4 for a fresh download.
+            oneOf: ['onnx/model_q4f16.onnx'],
+          },
           { name: 'voices/af_heart.bin', label: 'af_heart voice', bytes: 522240 },
           { name: 'tokenizer.json', label: 'phoneme vocabulary', bytes: 3497 },
           { name: 'config.json', label: 'config.json', bytes: 44 },
@@ -380,19 +479,45 @@ export const CATALOG: CatalogSection[] = [
   {
     task: 'image-generation',
     title: 'Image generation',
-    note: 'Ollama cannot run diffusion models. The diffusers builds run here once PyTorch and Diffusers are installed; the GGUF build needs ComfyUI, which this app does not install.',
+    note:
+      'Ollama cannot run diffusion models. The diffusers builds run here once ' +
+      'PyTorch and Diffusers are installed, but SD 3.5 Medium’s full pipeline ' +
+      'does not fit in 8 GB. Its GGUF build runs through stable-diffusion.cpp ' +
+      'from the Runtimes page; that is the route this machine can actually use.',
     entries: [
       {
-        repo: 'city96/stable-diffusion-3.5-medium-gguf',
+        repo: 'second-state/stable-diffusion-3.5-medium-GGUF',
         label: 'Stable Diffusion 3.5 Medium (GGUF)',
         task: 'image-generation',
         blurb:
-          'A single quantised file, so ComfyUI can load it without the whole ' +
-          'pipeline tree. Nothing in this app can run it — there is no Run ' +
-          'button, because offering one that could not work would be worse ' +
-          'than saying so here.',
-        runtime: 'ComfyUI (external — not installed by this app)',
-        files: [{ name: 'sd3.5_medium-Q4_K_M.gguf', label: 'Q4_K_M', bytes: 1704 * MB }],
+          'The whole SD 3.5 Medium pipeline at 4-bit — UNet, T5-XXL, both CLIP ' +
+          'encoders and the VAE — in 5.2 GB. stable-diffusion.cpp keeps the ' +
+          'quantised MMDiT and VAE in RAM, streams the 2.75 GB text encoders ' +
+          'from disk, and runs the UNet on the Vulkan card. That split is what ' +
+          'fits an 8 GB laptop. The VAE is not in the quantised repo, so this ' +
+          'card fetches an ungated copy of the official VAE too — no Hugging ' +
+          'Face token is required. Expect several minutes per 512×512 image ' +
+          'on this hardware.',
+        runtime: 'stable-diffusion.cpp',
+        files: [
+          { name: 'sd3.5_medium-Q4_0.gguf', label: 'UNet Q4_0', bytes: 2079836768 },
+          { name: 't5xxl-Q4_0.gguf', label: 'T5-XXL encoder Q4_0', bytes: 2752841312 },
+          { name: 'clip_g-Q4_0.gguf', label: 'CLIP-G Q4_0', bytes: 391439360 },
+          { name: 'clip_l-Q4_0.gguf', label: 'CLIP-L Q4_0', bytes: 69384832 },
+          {
+            name: 'vae/diffusion_pytorch_model.safetensors',
+            label: 'VAE (ungated mirror of the official release)',
+            bytes: 167666902,
+            // The official stabilityai repository is gated, and requiring an
+            // HF token to run a model that is otherwise downloadable would
+            // break the whole point of the local path. This mirror publishes
+            // the same 160 MB VAE file without a gate.
+            repo: 'adamo1139/stable-diffusion-3.5-medium-ungated',
+          },
+        ],
+        bundle: true,
+        bundleMB: 5208,
+        run: { kind: 'image', requires: ['stable-diffusion-cpp'], steps: 20 },
       },
 
   {
@@ -461,5 +586,17 @@ export const CATALOG: CatalogSection[] = [
 
 /** Flat index for callers that just want every repo mentioned, for validation. */
 export function catalogRepoIds(): string[] {
-  return CATALOG.flatMap((s) => s.entries.map((e) => e.repo));
+  const repos = new Set<string>();
+  for (const section of CATALOG) {
+    for (const entry of section.entries) {
+      repos.add(entry.repo);
+      // Auxiliary repositories are part of a catalog model too. Without them
+      // the hub would label the VAE download as a standalone model no job
+      // uses, while the image card fails for lack of it.
+      for (const file of entry.files ?? []) {
+        if (file.repo) repos.add(file.repo);
+      }
+    }
+  }
+  return [...repos];
 }

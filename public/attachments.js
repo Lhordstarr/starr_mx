@@ -15,11 +15,15 @@
 export const LIMITS = {
   imageBytes: 5 * 1024 * 1024,
   imagesPerMessage: 4,
+  videoBytes: 12 * 1024 * 1024,
+  videosPerMessage: 1,
+  totalMediaBytes: 18 * 1024 * 1024,
   textFileBytes: 256 * 1024,
   textFileChars: 60_000,
 };
 
 const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const VIDEO_MIME = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska']);
 
 const TEXT_EXT = new Set([
   'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'ndjson', 'yaml', 'yml',
@@ -40,6 +44,12 @@ export function createAttachments({ els, notifyWarning }) {
   let visionModels = [];
   /** Whether the provider publishes capability info at all. */
   let visionKnown = false;
+  /** The model Settings assigned to describe images and video, if any. */
+  let assignedVision = '';
+  /** False when the assignment points at a model that is no longer installed. */
+  let assignedVisionReady = false;
+  /** Audio is handled by the speech-to-text slot, not by the vision model. */
+  let assignedStt = '';
   /** Active model, so the attach hint can be recomputed on change. */
   let activeModel = '';
   /** Active provider, so the capability probe only runs when it changes. */
@@ -47,6 +57,11 @@ export function createAttachments({ els, notifyWarning }) {
   let visionToken = 0;
 
   const hasImages = () => items.some((i) => i.kind === 'image');
+  const hasVideo = () => items.some((i) => i.kind === 'video');
+  const mediaBytes = () =>
+    items
+      .filter((i) => i.kind === 'image' || i.kind === 'video')
+      .reduce((n, i) => n + (i.size ?? 0), 0);
 
   /* ---------------- Capability probe ---------------- */
 
@@ -65,18 +80,25 @@ export function createAttachments({ els, notifyWarning }) {
       if (token !== visionToken) return;
       visionModels = Array.isArray(data.visionModels) ? data.visionModels : [];
       visionKnown = Boolean(data.known);
+      assignedVision = typeof data.assigned?.vision === 'string' ? data.assigned.vision : '';
+      assignedVisionReady = Boolean(data.assigned?.visionReady);
+      assignedStt = typeof data.assigned?.stt === 'string' ? data.assigned.stt : '';
     } catch {
       if (token !== visionToken) return;
       // Probing is best-effort: an unreachable probe means "unknown", which the
       // UI shows as unverified rather than blocking the user.
       visionModels = [];
       visionKnown = false;
+      assignedVision = '';
+      assignedVisionReady = false;
+      assignedStt = '';
     }
     refresh();
   }
 
-  /** Whether the active model is known to take images, or simply unknown. */
+  /** Whether media reaches a model that can see: assignment first, then native. */
   function visionState() {
+    if (assignedVision) return assignedVisionReady ? 'assigned' : 'missing';
     if (!visionKnown) return 'unknown';
     return visionModels.includes(activeModel) ? 'yes' : 'no';
   }
@@ -101,9 +123,35 @@ export function createAttachments({ els, notifyWarning }) {
           rejected.push(`${name} (over ${kb(LIMITS.imageBytes)})`);
           continue;
         }
+        if (mediaBytes() + file.size > LIMITS.totalMediaBytes) {
+          rejected.push(`${name} (media total over ${kb(LIMITS.totalMediaBytes)})`);
+          continue;
+        }
         try {
           const data = await toBase64(file);
           items.push({ kind: 'image', name, mimeType: mime, data, size: file.size, url: `data:${mime};base64,${data}` });
+        } catch {
+          rejected.push(`${name} (could not read)`);
+        }
+        continue;
+      }
+
+      if (VIDEO_MIME.has(mime)) {
+        if (hasVideo() && items.filter((i) => i.kind === 'video').length >= LIMITS.videosPerMessage) {
+          rejected.push(`${name} (max ${LIMITS.videosPerMessage} video)`);
+          continue;
+        }
+        if (file.size > LIMITS.videoBytes) {
+          rejected.push(`${name} (over ${kb(LIMITS.videoBytes)})`);
+          continue;
+        }
+        if (mediaBytes() + file.size > LIMITS.totalMediaBytes) {
+          rejected.push(`${name} (media total over ${kb(LIMITS.totalMediaBytes)})`);
+          continue;
+        }
+        try {
+          const data = await toBase64(file);
+          items.push({ kind: 'video', name, mimeType: mime, data, size: file.size });
         } catch {
           rejected.push(`${name} (could not read)`);
         }
@@ -174,13 +222,15 @@ export function createAttachments({ els, notifyWarning }) {
   function buildContent(text) {
     const body = foldedText(text);
     const images = items.filter((i) => i.kind === 'image');
-    if (!images.length) return body;
+    const videos = items.filter((i) => i.kind === 'video');
+    if (!images.length && !videos.length) return body;
 
     const parts = [];
     if (body.trim()) parts.push({ type: 'text', text: body });
-    // Images go last; the server appends a trailing text part where a provider
+    // Media goes last; the server appends a trailing text part where a provider
     // requires the turn to end with one.
     for (const img of images) parts.push({ type: 'image', data: img.data, mimeType: img.mimeType });
+    for (const video of videos) parts.push({ type: 'video', data: video.data, mimeType: video.mimeType });
     return parts;
   }
 
@@ -215,12 +265,17 @@ export function createAttachments({ els, notifyWarning }) {
   function stripForStorage(message) {
     if (typeof message.content === 'string') return message;
     const images = message.content.filter((p) => p.type === 'image').length;
+    const videos = message.content.filter((p) => p.type === 'video').length;
     const text = message.content
       .filter((p) => p.type === 'text')
       .map((p) => p.text)
       .join('\n')
       .trim();
-    const note = images ? `[${images} image${images > 1 ? 's' : ''} attached — not saved]` : '';
+    const what = [
+      images ? `${images} image${images > 1 ? 's' : ''}` : '',
+      videos ? `${videos} video${videos > 1 ? 's' : ''}` : '',
+    ].filter(Boolean);
+    const note = what.length ? `[${what.join(', ')} attached — not saved]` : '';
     return {
       ...message,
       content: [text, note].filter(Boolean).join('\n\n') || '[attachment]',
@@ -254,7 +309,9 @@ export function createAttachments({ els, notifyWarning }) {
       } else {
         const icon = document.createElement('span');
         icon.className = 'attach-icon';
-        icon.textContent = '≡';
+        // Not an emoji: the video glyph has no colour of its own, so it follows
+        // the same achromatic icon language as the rest of the composer.
+        icon.textContent = item.kind === 'video' ? '▶' : '≡';
         chip.appendChild(icon);
       }
 
@@ -293,12 +350,17 @@ export function createAttachments({ els, notifyWarning }) {
     // tooltip changes to say so.
     const blocked = false;
     els.attach.disabled = blocked;
+    const audio = assignedStt ? ' Audio is transcribed by the Speech to text model.' : '';
     els.attach.title =
-      state === 'yes'
-        ? 'Attach images or text files'
-        : state === 'no'
-          ? 'This model does not accept images (text files still work)'
-          : 'Attach images or text files — this provider does not advertise image support';
+      state === 'assigned'
+        ? `Attach images, video or text files — ${assignedVision} describes them first.${audio}`
+        : state === 'missing'
+          ? `The assigned vision model ${assignedVision} is not installed. Assign another in Settings.${audio}`
+          : state === 'yes'
+            ? `Attach images or text files${assignedStt ? '; audio is transcribed by the assigned speech model' : ''}`
+            : state === 'no'
+              ? 'This model does not accept images (text files still work)'
+              : 'Attach images or text files — this provider does not advertise image support';
     els.attach.classList.toggle('unverified', state === 'unknown');
   }
 
@@ -317,7 +379,11 @@ export function createAttachments({ els, notifyWarning }) {
       const files = Array.from(event.clipboardData?.files ?? []);
       if (!files.length) return;
       const usable = files.filter(
-        (f) => IMAGE_MIME.has(f.type) || TEXT_EXT.has(extOf(f.name)) || f.type.startsWith('text/'),
+        (f) =>
+          IMAGE_MIME.has(f.type) ||
+          VIDEO_MIME.has(f.type) ||
+          TEXT_EXT.has(extOf(f.name)) ||
+          f.type.startsWith('text/'),
       );
       if (!usable.length) return;
       // Stop the browser also inserting a filename as text.
@@ -384,6 +450,9 @@ export function createAttachments({ els, notifyWarning }) {
         activeProvider = '';
         visionModels = [];
         visionKnown = false;
+        assignedVision = '';
+        assignedVisionReady = false;
+        assignedStt = '';
       }
       updateAttachHint();
     },

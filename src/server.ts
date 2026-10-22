@@ -69,6 +69,7 @@ import {
 } from './assignments.js';
 import { CATALOG } from './model-catalog.js';
 import { runnableModels, type RunTask } from './runnable.js';
+import { parseVisionAssignment, preprocessVision } from './vision.js';
 import {
   finishTransfer,
   isRunning,
@@ -146,11 +147,11 @@ app.use((_req, res, next) => {
   next();
 });
 
-// Image attachments base64-inflate by about a third, so the chat route needs
-// far more headroom than the rest of the API. Scoped to this one path so no
-// other endpoint accepts a large body; checkUsage() still enforces the real
-// per-message caps, and this is only the outer bound.
-app.use('/api/chat', express.json({ limit: '20mb' }));
+// Media attachments base64-inflate by about a third, and a video may be 12 MB
+// before inflation. Scoped to this one path so no other endpoint accepts a
+// large body; checkUsage() still enforces the real per-message caps, and this
+// is only the outer bound.
+app.use('/api/chat', express.json({ limit: '32mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // A malformed JSON body would otherwise render Express's default error page,
@@ -433,17 +434,23 @@ app.get('/api/dictation', async (_req, res) => {
  */
 app.get('/api/runnable', async (req, res) => {
   const task = String(req.query.task ?? '');
-  if (task && !['stt', 'tts', 'image'].includes(task)) {
+  if (task && !['vision', 'stt', 'tts', 'image'].includes(task)) {
     return res.status(400).json({ error: 'Unknown task' });
   }
-  const tasks: RunTask[] = task ? [task as RunTask] : ['stt', 'tts', 'image'];
+  const tasks: RunTask[] = task ? [task as RunTask] : ['vision', 'stt', 'tts', 'image'];
+  const visionModels = tasks.includes('vision')
+    ? await providerRegistry().ollama.listVisionModels?.().catch(() => [])
+    : undefined;
   const out: Record<string, unknown> = {};
-  for (const t of tasks) out[t] = await runnableModels(t);
+  for (const t of tasks) {
+    out[t] = await runnableModels(t, t === 'vision' ? { visionModels } : {});
+  }
   res.json({ ...out, assigned: assignments() });
 });
 
 /**
- * Assigns a model to a job: speech-to-text, speech, or image generation.
+ * Assigns a model to a job: vision, speech-to-text, speech, or image
+ * generation.
  *
  * The single place a model gets tied to a task. The chat page and the Studio
  * both read the result rather than asking the user to choose again, which is
@@ -452,7 +459,7 @@ app.get('/api/runnable', async (req, res) => {
 app.post('/api/assignments', async (req, res) => {
   const task = String(req.body?.task ?? '') as TaskKey;
   const model = typeof req.body?.model === 'string' ? req.body.model : null;
-  if (!['stt', 'tts', 'image'].includes(task)) {
+  if (!['vision', 'stt', 'tts', 'image'].includes(task)) {
     return res.status(400).json({ error: 'Unknown task' });
   }
   try {
@@ -483,12 +490,36 @@ app.get('/api/vision', async (req, res) => {
   // their /models response, so it has to run first.
   const all = await provider.listModels();
   const claimed = (await provider.listVisionModels?.()) ?? [];
+  const current = assignments();
+  const target = parseVisionAssignment(current.vision);
+  // Readiness belongs to the *assigned* model's provider, which is not
+  // necessarily the chat provider. Asking OpenRouter whether an Ollama tag is
+  // installed always answered no, and the composer then claimed the vision
+  // model was missing even while it sat in the local daemon.
+  let assignedReady = false;
+  if (target) {
+    const assignedProvider = registry[target.providerId as ProviderId];
+    const assignedModels =
+      assignedProvider?.info.id === provider.info.id
+        ? claimed
+        : ((await assignedProvider?.listVisionModels?.().catch(() => [])) ?? []);
+    assignedReady = assignedModels.includes(target.model);
+  }
   res.json({
     provider: provider.info.id,
     models: all,
     visionModels: claimed,
     known: provider.info.id === 'ollama' || claimed.length > 0,
     limits: LIMITS,
+    // The attachment UI asks one question: will an image reach a model that
+    // can see it? That answer is "yes" either because this provider accepts
+    // images natively or because Settings assigned a vision model to describe
+    // them first. Keeping both facts here avoids a second round trip.
+    assigned: {
+      vision: current.vision,
+      stt: current.stt,
+      visionReady: assignedReady,
+    },
   });
 });
 
@@ -1859,9 +1890,12 @@ app.post('/api/hf/download-repo', async (req, res) => {
     'x-accel-buffering': 'no',
   });
   let clientGone = false;
+  // A reload, or the Resume button's fire-and-forget POST, must not kill a
+  // multi-file model download. The work is server-owned and only an explicit
+  // /api/hf/download/cancel aborts it; losing the reporting socket just means
+  // progress events stop being written.
   res.on('close', () => {
     clientGone = true;
-    controller.abort();
   });
   const send = (event: string, data: unknown) => {
     if (clientGone) return;
@@ -2123,6 +2157,27 @@ app.post('/api/chat', async (req, res) => {
     if (content) send('delta', { text: content });
     send('done', {});
   };
+
+  // The assigned vision model runs before the chat model is prepared. It sees
+  // each still image (and samples video into frames), and the active model gets
+  // the resulting text. With no assignment, still images are left untouched so
+  // a natively multimodal provider keeps its direct path; video is refused
+  // rather than silently dropped.
+  try {
+    const prepared = await preprocessVision(messages, {
+      assignment: assignments().vision,
+      resolveProvider: (id) => providerRegistry()[id],
+      signal: controller.signal,
+    });
+    messages = prepared.messages;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[vision]', message);
+    if (!controller.signal.aborted && !res.writableEnded) send('error', { message });
+    res.end();
+    releaseStream();
+    return;
+  }
 
   // A bare date question is answered from the clock, before any model is
   // prepared: tiny models ignore the date in their system prompt, and some
