@@ -341,20 +341,21 @@ export const CATALOG: CatalogSection[] = [
           'The same 82M voice model as the PyTorch checkpoint, exported to ONNX ' +
           'Runtime. On an NVIDIA machine the ONNX Runtime in the Kokoro ' +
           'environment is the GPU build, so the graph runs on the card; ' +
-          'without one it is the CPU build, which is the portable option ' +
-          'rather than the fastest one. The Speak button and Studio use it ' +
-          'like any other voice. The q4f16 weights, the af_heart style table ' +
-          'and the phoneme vocabulary are one bundle — the graph alone cannot ' +
+          'without one it is the CPU build. The q4 graph — 4-bit weights with ' +
+          'floating-point activations — is the export that computes correctly ' +
+          'on both. The fp16 exports are not bundled because the CUDA provider ' +
+          'turns them into a full-length silent file. The af_heart style table ' +
+          'and the phoneme vocabulary come with it; the graph alone cannot ' +
           'pronounce anything.',
         runtime: 'onnxruntime (Kokoro)',
         files: [
-          { name: 'onnx/model_q4f16.onnx', label: 'q4f16 weights', bytes: 154586422 },
+          { name: 'onnx/model_q4.onnx', label: 'q4 weights', bytes: 305215966 },
           { name: 'voices/af_heart.bin', label: 'af_heart voice', bytes: 522240 },
           { name: 'tokenizer.json', label: 'phoneme vocabulary', bytes: 3497 },
           { name: 'config.json', label: 'config.json', bytes: 44 },
         ],
         bundle: true,
-        bundleMB: 148,
+        bundleMB: 292,
         run: { kind: 'tts', requires: ['kokoro'] },
       },
       {

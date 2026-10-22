@@ -17,6 +17,7 @@
  * local-runner suites follow.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -67,12 +68,17 @@ const installed = {
 };
 
 console.log('The catalog must offer ONNX speech as a job, not just a file');
-await check('Kokoro ONNX lists one graph file, not two quants', () => {
+await check('Kokoro ONNX lists one graph file, and it is the q4 export', () => {
   const entry = catalogEntry('onnx-community/Kokoro-82M-v1.0-ONNX');
   assert.ok(entry, 'Kokoro ONNX entry exists');
   const graphs = entry.files.filter((file) => /\.onnx$/i.test(file.name));
   assert.equal(graphs.length, 1, `found ${graphs.map((f) => f.name).join(', ')}`);
-  assert.equal(graphs[0]?.name, 'onnx/model_q4f16.onnx');
+  // q4f16 and fp16 compute on the CPU but return NaNs under the CUDA
+  // provider, which produced a valid-looking silent WAV on an NVIDIA box.
+  // The bundle therefore ships the q4 graph (fp32 activations), which was
+  // verified on both devices.
+  assert.equal(graphs[0]?.name, 'onnx/model_q4.onnx');
+  assert.doesNotMatch(graphs[0]?.name ?? '', /f16/i);
 });
 
 await check('Kokoro ONNX is runnable and carries its voice and vocabulary', async () => {
@@ -89,7 +95,7 @@ await check('Kokoro ONNX is runnable and carries its voice and vocabulary', asyn
   const model = models.find((m) => m.repo === entry.repo);
   assert.ok(model, 'Kokoro ONNX appears in the TTS picker');
   assert.equal(model.ready, true, model.reason);
-  assert.equal(model.file, 'onnx/model_q4f16.onnx');
+  assert.equal(model.file, 'onnx/model_q4.onnx');
   assert.equal(model.runtimes.kokoro, '0.9.4');
 });
 
@@ -163,7 +169,7 @@ try {
     assert.match(model.label, /ONNX/);
   });
 
-  await check('an ONNX Kokoro export is claimed for TTS', async () => {
+  await check('an old bundle with only the fp16 graph is still claimed for TTS', async () => {
     const repo = 'Acme/onnx-kokoro';
     const downloads = await fixture(repo, {
       'config.json': JSON.stringify({ model_type: 'style_text_to_speech_2' }),
@@ -178,6 +184,24 @@ try {
     assert.equal(model.file, 'onnx/model_q4f16.onnx');
     assert.equal(model.runtimes.kokoro, '0.9.4');
     assert.match(model.label, /ONNX/);
+  });
+
+  await check('a bundle with both graphs picks the q4 export, not q4f16', async () => {
+    const repo = 'Acme/onnx-kokoro-mixed';
+    const downloads = await fixture(repo, {
+      'config.json': JSON.stringify({ model_type: 'style_text_to_speech_2' }),
+      'onnx/model_q4.onnx': 'graph',
+      'onnx/model_q4f16.onnx': 'graph',
+      'voices/af_heart.bin': 'voice',
+      'tokenizer.json': '{"model":{"vocab":{}}}',
+    });
+    const models = await runnableModels('tts', { downloads, installed });
+    const model = models.find((m) => m.repo === repo);
+    assert.ok(model, 'ONNX Kokoro discovered');
+    assert.equal(model.ready, true, model.reason);
+    // The old preference order returned q4f16 here, which is exactly the
+    // file that runs silently on a CUDA machine.
+    assert.equal(model.file, 'onnx/model_q4.onnx');
   });
 } finally {
   for (const root of fixtureRoots) rmSync(root, { recursive: true, force: true });
@@ -194,6 +218,38 @@ await check('the ONNX TTS runner exists and uses the graph plus Kokoro G2P', () 
   assert.match(source, /input_ids/);
   assert.match(source, /voices/);
   assert.doesNotMatch(source, /KModel\s*\(/);
+  // The call has to happen before the file is written: libsndfile happily
+  // turns a NaN array into a valid silent WAV.
+  const guarded = source.indexOf('check_audio(merged');
+  assert.ok(guarded > 0, 'render never calls check_audio');
+  assert.ok(guarded < source.indexOf('sf.write(out_path'), 'check_audio runs after sf.write');
+});
+await check('the ONNX runner refuses to write a silent WAV', () => {
+  // fp16 graphs under the CUDA provider return a full-length array of NaNs;
+  // the runner used to write it out and report success. This drives the guard
+  // directly, with no numpy or model download, so it runs everywhere.
+  const local = readFileSync(speakSource, 'utf8');
+  assert.match(local, /def check_audio\(/);
+  const script = `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('speak_onnx', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for bad in ([float('nan')] * 64, [float('inf')] * 64, [0.0] * 64, [-1.0] * 64):
+    try:
+        module.check_audio(bad, 'cuda', 'onnx/model_q4f16.onnx')
+    except RuntimeError as exc:
+        message = str(exc)
+        assert 'did not compute' in message, message
+        assert 'q4' in message, message
+    else:
+        raise SystemExit('check_audio accepted a silent signal')
+module.check_audio([0.0, 0.25, -0.25, 0.0], 'cpu', 'onnx/model_q4.onnx')
+print('guard ok')
+`;
+  const run = spawnSync('python3', ['-c', script, speakSource], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  assert.match(run.stdout, /guard ok/);
 });
 await check('the ONNX STT runner exists and keeps the decoder on its no-cache branch', () => {
   assert.ok(existsSync(transcribeSource));
@@ -370,10 +426,15 @@ const onnxKokoroDir = path.resolve('models/onnx-community--Kokoro-82M-v1.0-ONNX'
 const onnxWhisperDir = path.resolve('models/onnx-community--whisper-tiny.en');
 const foxClip = '_uploads/clip-1792421379226.wav';
 
+// The current bundle's graph, or the fp16 one an older bundle left behind.
+const onnxKokoroGraph = ['onnx/model_q4.onnx', 'onnx/model_q4f16.onnx'].find((file) =>
+  existsSync(path.join(onnxKokoroDir, file)),
+);
+
 await check('the real Kokoro ONNX export synthesises audio through speak()', async () => {
   if (
     !existsSync(path.resolve('.runtimes/venv-kokoro/bin/python')) ||
-    !existsSync(path.join(onnxKokoroDir, 'onnx/model_q4f16.onnx')) ||
+    !onnxKokoroGraph ||
     !existsSync(path.join(onnxKokoroDir, 'voices/af_heart.bin'))
   ) {
     console.log('  SKIP  no Kokoro ONNX venv/weights on this machine');
@@ -381,7 +442,7 @@ await check('the real Kokoro ONNX export synthesises audio through speak()', asy
   }
   const { result, outPath } = await speak({
     repo: 'onnx-community/Kokoro-82M-v1.0-ONNX',
-    file: 'onnx/model_q4f16.onnx',
+    file: onnxKokoroGraph,
     voice: 'af_heart',
     speed: 1,
     device: 'cpu',
@@ -392,6 +453,19 @@ await check('the real Kokoro ONNX export synthesises audio through speak()', asy
   assert.ok(statSync(outPath).size > 20_000, `wav is ${statSync(outPath).size} bytes`);
   assert.ok(Number(result.data?.seconds) > 1, JSON.stringify(result.data));
   assert.equal(result.data?.device, 'cpu');
+  // A silent WAV has the same sample count and passes the size check, so
+  // count the values that actually differ.
+  const audible = spawnSync(
+    'python3',
+    [
+      '-c',
+      'import array,sys,wave; w=wave.open(sys.argv[1]); a=array.array("h", w.readframes(w.getnframes())); print(len(set(a)))',
+      outPath,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.equal(audible.status, 0, audible.stderr);
+  assert.ok(Number(audible.stdout.trim()) > 100, `only ${audible.stdout.trim()} distinct samples`);
 });
 
 await check('the real ONNX Whisper export transcribes the fox clip through transcribe()', async () => {

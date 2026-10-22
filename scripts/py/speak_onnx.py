@@ -145,13 +145,18 @@ def find_model(model_dir, requested):
         if os.path.isfile(p):
             return p
     onnx_dir = os.path.join(model_dir, "onnx")
+    # Same order as findKokoroOnnx() in src/runnable.ts: q4 (fp32
+    # activations) first, because the fp16 exports are silent under the CUDA
+    # provider even though they compute on the CPU.
     for name in (
-        "model_q4f16.onnx",
         "model_q4.onnx",
+        "model.onnx",
         "model_quantized.onnx",
         "model_uint8.onnx",
-        "model.onnx",
+        "model_q4f16.onnx",
         "model_fp16.onnx",
+        "model_q8f16.onnx",
+        "model_uint8f16.onnx",
     ):
         p = os.path.join(onnx_dir, name)
         if os.path.isfile(p):
@@ -202,8 +207,48 @@ def build_engine(model_dir, device, repo, model_file="", report=None):
         "vocab": vocab,
         "pipeline": pipeline,
         "model_dir": model_dir,
+        "model_file": os.path.basename(model_path),
         "voice_repo": voice_repo,
     }
+
+
+def check_audio(samples, device, model_file=""):
+    """Refuse to write a WAV whose samples are not speech.
+
+    A broken graph does not fail the session — it returns an array of the
+    right length full of NaNs (or one constant value), and libsndfile turns
+    that into a perfectly valid, completely silent file. That is worse than
+    an error: the page shows a play button, the row says the run succeeded,
+    and the only way to find out is to listen. The fp16 Kokoro exports do
+    exactly this under ONNX Runtime's CUDA provider on an NVIDIA card while
+    the same files compute on the CPU, so the message names the graph and the
+    device rather than saying "synthesis failed".
+
+    `samples` is a numpy array from the session, but the checks only need
+    floats and the function is importable without numpy so the test suite can
+    call it with a plain list.
+    """
+    import math
+
+    values = samples.tolist() if hasattr(samples, "tolist") else list(samples)
+    if not values:
+        raise RuntimeError("Kokoro produced no audio")
+    name = os.path.basename(model_file) if model_file else "the ONNX graph"
+    non_finite = sum(1 for value in values if not math.isfinite(float(value)))
+    if non_finite:
+        raise RuntimeError(
+            f"{name} produced {non_finite} non-finite samples on {device}. The graph "
+            "did not compute, so no WAV was written. The fp16 exports are known to do "
+            "this under the CUDA provider; the q4 and fp32 graphs work. Download "
+            "onnx/model_q4.onnx from this repository and run it again."
+        )
+    low, high = min(values), max(values)
+    if low == high:
+        raise RuntimeError(
+            f"{name} produced a constant signal on {device} ({len(values)} samples at "
+            f"{low:g}). The graph did not compute, so no WAV was written. Download "
+            "onnx/model_q4.onnx from this repository and run it again."
+        )
 
 
 def render(engine, text, out_path, voice, speed, report=None):
@@ -245,6 +290,9 @@ def render(engine, text, out_path, voice, speed, report=None):
     if not chunks:
         raise RuntimeError("Kokoro produced no audio")
     merged = np.concatenate(chunks)
+    # Before the file exists, not after: a silent-but-valid WAV is a bug that
+    # survives every check except listening.
+    check_audio(merged, engine["landed"], engine.get("model_file", ""))
     sf.write(out_path, merged, 24000)
     return {
         "path": out_path,

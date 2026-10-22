@@ -224,11 +224,13 @@ checkpoint is not the only way to run Kokoro. There are three runners:
     GPU when there is one.
   - **Kokoro (ONNX)** — the same front end (phonemisation, chunking and the
     style table) with the acoustic graph run by ONNX Runtime instead of torch.
-    The catalog bundles the q4f16 graph, the `af_heart` voice and the phoneme
-    vocabulary, because the graph alone cannot pronounce anything. The Kokoro
-    environment installs the **GPU** build of ONNX Runtime on an NVIDIA
-    machine, so the graph runs on the card; without one it is the CPU build,
-    and the row says which is installed.
+    The catalog bundles the q4 graph (4-bit weights, floating-point
+    activations), the `af_heart` voice and the phoneme vocabulary, because the
+    graph alone cannot pronounce anything. The Kokoro environment installs the
+    **GPU** build of ONNX Runtime on an NVIDIA machine, so the graph runs on
+    the card; without one it is the CPU build, and the row says which is
+    installed. The fp16 exports are deliberately not bundled: under the CUDA
+    provider they compute NaNs and write a full-length silent WAV.
   - **The transformers `text-to-speech` pipeline** — **VITS** (which is what
     every MMS-TTS checkpoint is, `facebook/mms-tts-eng` among them), SpeechT5,
     Bark and FastSpeech2. It uses the shared Python environment, so **nothing

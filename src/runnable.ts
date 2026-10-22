@@ -208,13 +208,24 @@ export async function findKokoroOnnx(dir: string): Promise<string | null> {
   } catch {
     return null;
   }
+  /* The fp16-typed exports (q4f16, fp16, q8f16, uint8f16) are silent under
+   * ONNX Runtime's CUDA provider: the session reports CUDA, the graph returns
+   * a full-length array of non-finite samples, and the WAV is constant
+   * -32768. The same file computes on the CPU, which is why q4f16 used to be
+   * first and why this only showed up on a machine with a card. The q4 export
+   * keeps its activations in fp32 and produces real audio on both devices, so
+   * it leads; model.onnx (plain fp32) is the reference fallback. The fp16
+   * names stay at the end so a directory that has nothing else still runs on
+   * the CPU rather than being refused. */
   const preferred = [
-    'model_q4f16.onnx',
     'model_q4.onnx',
+    'model.onnx',
     'model_quantized.onnx',
     'model_uint8.onnx',
+    'model_q4f16.onnx',
     'model_fp16.onnx',
-    'model.onnx',
+    'model_q8f16.onnx',
+    'model_uint8f16.onnx',
   ];
   const model = preferred.find((name) => files.includes(name)) ??
     files.filter((name) => /\.onnx$/i.test(name)).sort()[0];

@@ -368,6 +368,38 @@ does not work" looked true even with models on disk.
   store in both layouts with a dead daemon; against the old code the first
   one fails with "not reachable".
 
+### 3.10 The ONNX voice was silent on the card — the fp16 exports
+
+The box with the T4 is the first machine here where ONNX Kokoro could run on
+a GPU, and its first synthesis produced a valid 10.43 s WAV that was **all
+−32768**. The session said `device: cuda`, the sample count and duration were
+right, and nothing in the API, the log or the play button could tell it apart
+from speech.
+
+- **The graph, not the request.** The same file on `device: cpu` produced
+  8,305 distinct samples (RMS 2161). On CUDA it returned NaNs, which
+  libsndfile turns into a full-length constant file — the failure looks like
+  a successful run until it is played.
+- **Both fp16 exports do it.** q4f16 (154 MB) and fp16 (163 MB) are silent
+  on the T4 under `CUDAExecutionProvider`; fp32 `model.onnx` and q4
+  `model_q4.onnx` both produce real audio (`device: cuda`, 16,027 and 15,574
+  distinct samples, RMS 2370 and 2358). q4f16 is also correct on the CPU,
+  which is why the old preference order looked fine everywhere except here.
+- **The bundle now ships `model_q4.onnx`** (4-bit weights, fp32 activations,
+  305 MB) instead of q4f16, and both `findKokoroOnnx()` and the runner's
+  `find_model()` put it first. The fp16 names remain last, so a CPU-only
+  machine with an old bundle that has nothing else still runs.
+- **The runner refuses silent audio.** `check_audio()` in `speak_onnx.py`
+  runs before `sf.write`: a non-finite or constant signal is an error naming
+  the graph, the device and the q4 file to download, not a WAV. Warm engines
+  call `render()` directly, so they are covered too.
+- **Verified live on the second box (2× T4):** q4 on CUDA and on the CPU,
+  fp32 on CUDA; the warm engine reports `resolvedDevice: cuda`, 671 MB VRAM
+  and 1.96 GB RSS. The test suite now asserts the q4 bundle, a mixed
+  directory picks q4 over q4f16 (fails on the old order), and the guard test
+  drives `check_audio()` with NaN and constant arrays (fails on the old
+  runner).
+
 ---
 
 ## 4. Methods that were tried and did **not** work
@@ -507,7 +539,7 @@ This section exists so nobody spends the same afternoon again.
 
 ## 5. State of play right now
 
-- `master` is at `1343fcc` and **pushed**. Working tree clean.
+- `master` is at the latest commit and **pushed**. Working tree clean.
 - The dev server is running in the background on port 3000. On this box it is
   currently `npx tsx src/server.ts` (no watch, log at
   `/tmp/opencode/dev-nowatch.log`) because image runs are long; `npm run dev`
@@ -520,17 +552,27 @@ This section exists so nobody spends the same afternoon again.
   is simply no GGUF on disk to load.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
-- **The live box at `/content/starr_mx` is current through the image fix.**
-  The Ollama listing fix in §3.9 came after it and needs one more pull and
-  restart. The Cloudflare URL in the notes is stale; the working one is
-  `https://sites-madonna-imaging-looks.trycloudflare.com`. Verified through
-  it: `/tools` redirects to `/#tools` (the tools-tab removal is there),
-  `torch 2.11.0+cu128` on a Tesla T4, sd-turbo ready, and a 512x512 / 4-step
-  image came back in **13 s** with `device: cuda` and a clean three-apple
-  table — so the guidance fix is on the box too. Ollama is installed there
-  with **0 models pulled**; the daemon auto-starts on the first chat probe
-  and answers `model '…' not found`, which is the honest state behind
-  "Installed but does not work".
+- **A fresh box is live at `https://mutual-welcome-doll-contribute.trycloudflare.com`**
+  (`/kaggle/working/starr_mx`, **2× Tesla T4**). It was completely empty:
+  no venv and no runtimes. The venv package itself needed root, so the
+  runtimes were installed through the browser (never with a password sent
+  over the API). All nine runtimes are installed; `torch 2.11.0+cu128`
+  reports CUDA available with two T4s.
+  - sd-turbo downloaded (12 files, 2.58 GB) and generates 512×512 / 4 steps
+    in **26 s** with `device: cuda` and a clean image.
+  - Cloud Pollinations flux returns a cached 768×768 JPEG in **8.9 s**, but
+    the adapter still reports the requested 1024×1024 — see the open item
+    below.
+  - ONNX Kokoro is downloaded and synthesises through `/api/infer/tts`:
+    q4 on CUDA (and on the CPU), fp32 on CUDA; q4f16/fp16 are the silent
+    files described in §3.10. The box currently has only `model_q4.onnx`
+    on disk (the diagnostic variants were deleted), which is the graph the
+    new code prefers anyway.
+  - Ollama is installed with **0 models**; the daemon stays down until the
+    first chat request.
+  - `/tools` redirects to `/#tools`. The old box at `/content/starr_mx` is
+    current only through the image fix; the Ollama disk listing in §3.9 is
+    newer than it.
 
 ### Questions that are still open, and are the user's to answer
 
@@ -547,10 +589,15 @@ This section exists so nobody spends the same afternoon again.
    run. Pull one from Settings → Models. The restart deadlock that made this
    worse (an empty picker could not start the daemon) is fixed in §3.9.
 4. **The avatar's "generating" motion** — which animation it should use.
-5. ~~**ONNX on the GPU**~~ — done: the GPU build is installed on an NVIDIA
-   machine, the runners ask for CUDA and report what they got, and the
-   Runtimes page says which build is installed. It still needs verifying on
-   the live box, which is the only machine here with an NVIDIA card.
+5. ~~**ONNX on the GPU**~~ — done and verified on the 2× T4 box: the GPU
+   build is installed, the graph runs with `device: cuda`, and the warm
+   engine shows its VRAM. The verification found the fp16-silence bug fixed
+   in §3.10, which is the reason this item was worth doing on the card
+   rather than trusting the CPU result.
+6. **The cloud image path reports the requested size, not the returned
+   one.** A 1024×1024 request came back as a 768×768 JPEG (Pollinations
+   flux) and the page still labelled it 1024×1024. Reading the actual
+   dimensions from the bytes would make the label honest.
 
 ---
 
