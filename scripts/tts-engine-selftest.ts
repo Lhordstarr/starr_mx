@@ -211,6 +211,14 @@ if (!haveWeights) {
     assert.ok(existsSync(outPath), 'a wav was written');
     assert.ok(statSync(outPath).size > 20_000, `the wav is ${statSync(outPath).size} bytes`);
   });
+
+  // The last request leaves its engine warm by design. This suite does not
+  // need it any more, and an engine nobody stops holds the runner open until
+  // the ten-minute idle release — which looks like a hung test.
+  for (const engine of ttsEngines()) {
+    const row = listProcesses().active.find((p) => p.pid === engine.pid);
+    if (row) await stopProcess(row.id);
+  }
 }
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
