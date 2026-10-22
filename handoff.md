@@ -419,6 +419,27 @@ bytes are the only authority.
   1024 claim. Six checks; the regression check cannot pass against the old
   adapter because the helper did not exist.
 
+### 3.12 A finished local image left the Studio blank
+
+The local runner finished, wrote a real PNG and sent its path, but the Studio
+showed no turn at all. Two client assumptions were wrong:
+
+- `/api/infer/image` answers with `path` (what Settings' runner reads), while
+  the Studio looked for `name`. No `name` was ever sent, so `appendGenerated()`
+  was skipped and the status returned to "ready" as if nothing had happened.
+  The handler now takes the basename of `path`, uses the runner's actual
+  `width`/`height`, and throws if the answer contains no file.
+- Choosing "On this PC" returned from `syncControls()` before rebuilding the
+  size list. The cloud provider's 1024×1024 (or 1536×640) stayed selected for
+  a 512px turbo checkpoint. The local branch now offers **512 / 768 / 1024**
+  squares and starts at 512.
+
+`npm run test:studio-image-ui` drives `/studio` in headless Chromium with the
+catalog and runner stubbed: it selects the local entry, checks the restored
+sizes and picked model, clicks Generate against a done event that carries only
+`path`, and waits for the appended image. Eight checks; the size and image
+checks fail on the old client.
+
 ---
 
 ## 4. Methods that were tried and did **not** work
@@ -571,7 +592,14 @@ This section exists so nobody spends the same afternoon again.
   is simply no GGUF on disk to load.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
-- **A fresh box is live at `https://mutual-welcome-doll-contribute.trycloudflare.com`**
+- **The current live box is `https://income-wedding-hat-infections.trycloudflare.com`**
+  (`/kaggle/working/starr_mx`, **2× Tesla T4**). It serves the image fixes:
+  a 1024×1024 Pollinations request reports 768×768, and local sd-turbo writes
+  a 512×512 PNG in ~19 s with `device: cuda`. Its `assigned.image` is `None`,
+  so the Studio opens on a cloud provider; the local diffusers entry has to be
+  chosen explicitly. Only torch, transformers and diffusers report installed
+  there, so the speech/chat runtime notes below describe earlier boxes.
+- **The previous fresh box was at `https://mutual-welcome-doll-contribute.trycloudflare.com`**
   (`/kaggle/working/starr_mx`, **2× Tesla T4**). It was completely empty:
   no venv and no runtimes. The venv package itself needed root, so the
   runtimes were installed through the browser (never with a password sent

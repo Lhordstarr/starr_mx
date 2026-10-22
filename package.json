@@ -35,7 +35,8 @@
     "test:image-dtype": "tsx scripts/image-dtype-selftest.ts",
     "test:image-size": "tsx scripts/image-size-selftest.ts",
     "test:tts-engine": "tsx scripts/tts-engine-selftest.ts",
-    "test:tts-engine-ui": "node scripts/tts-engine-ui-selftest.mjs"
+    "test:tts-engine-ui": "node scripts/tts-engine-ui-selftest.mjs",
+    "test:studio-image-ui": "node scripts/studio-image-ui-selftest.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.2.18",

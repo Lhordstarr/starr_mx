@@ -96,6 +96,17 @@ const THEME_KEY = 'llm-chat-theme';
  */
 const LOCAL_IMAGE_ID = '__local__';
 
+/**
+ * Sizes offered for diffusers output. Turbo checkpoints are trained at 512 —
+ * sd-turbo loses quality and speed above it — so the default stays there, with
+ * larger squares available for SDXL.
+ */
+const LOCAL_IMAGE_SIZES = [
+  { w: 512, h: 512 },
+  { w: 768, h: 768 },
+  { w: 1024, h: 1024 },
+];
+
 function applyTheme(theme) {
   if (theme === 'dark' || theme === 'light') document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
@@ -172,6 +183,17 @@ function syncControls() {
   if (localImageSelected()) {
     els.go.disabled = false;
     els.imgStatus.textContent = '';
+    // The cloud branch below replaces the size list; without restoring local
+    // sizes here, switching to this machine kept the cloud's 1024x1024 (or
+    // wider) choice and ran diffusers at a size it was not meant for.
+    els.size.textContent = '';
+    for (const s of LOCAL_IMAGE_SIZES) {
+      const opt = document.createElement('option');
+      opt.value = `${s.w}x${s.h}`;
+      opt.textContent = sizeLabel(s);
+      els.size.appendChild(opt);
+    }
+    els.size.value = '512x512';
     renderImagePicker();
     return;
   }
@@ -757,7 +779,7 @@ async function generateLocalImage(prompt) {
     els.imgStatus.textContent = model.reason || 'That model is not runnable here.';
     return;
   }
-  const [width, height] = els.size.value.split('x').map(Number);
+  const [width, height] = (els.size.value || '512x512').split('x').map(Number);
   setBusy(true);
   els.imgStatus.textContent = `Generating on this PC with ${model.label}… this is slow on CPU.`;
   try {
@@ -770,13 +792,23 @@ async function generateLocalImage(prompt) {
       height,
       device: 'auto',
     });
-    if (out?.name) {
-      appendGenerated(
-        { label: model.label, mimeType: 'image/png', data: '', url: `/api/infer/out/${encodeURIComponent(out.name)}`, width, height },
-        prompt,
-      );
-      notifySuccess('Image generated on this PC');
-    }
+    // `/api/infer/image` answers with the absolute path of the file it wrote
+    // (the same field Settings' runner reads), not a bare `name`. Looking for
+    // `name` here made a finished local generation leave no turn at all.
+    const name = String(out?.path || out?.name || '').split(/[\\/]/).pop();
+    if (!name) throw new Error('The runner finished without an image file.');
+    appendGenerated(
+      {
+        label: model.label,
+        mimeType: 'image/png',
+        data: '',
+        url: `/api/infer/out/${encodeURIComponent(name)}`,
+        width: Number(out?.width) || width,
+        height: Number(out?.height) || height,
+      },
+      prompt,
+    );
+    notifySuccess('Image generated on this PC');
     els.imgStatus.textContent = '';
   } catch (err) {
     els.imgStatus.textContent = '';
