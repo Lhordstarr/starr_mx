@@ -400,6 +400,25 @@ from speech.
   drives `check_audio()` with NaN and constant arrays (fails on the old
   runner).
 
+### 3.11 The cloud image was labelled with the request, not the answer
+
+A 1024×1024 request to Pollinations came back as a 768×768 JPEG. The adapter
+returned the width and height it had asked for, so the gallery caption said
+1024×1024 and the saved session remembered a size the file never had. The
+bytes are the only authority.
+
+- `actualImageSize()` (in `src/image-size.ts`) reads the header of the PNG,
+  JPEG, WebP or GIF that came back, and `generateImage()` reports those
+  dimensions. An unknown format falls back to the provider's claim rather
+  than inventing a size.
+- **Verified live:** a 1024×1024 Pollinations request now reports
+  **768×768** (15.7 s through the provider call); the local sd-turbo path
+  returned a real 512×512 PNG in 19 s with `device: cuda`.
+- `npm run test:image-size` builds PNG, JPEG (with segments before the
+  frame), WebP and GIF headers, and asserts that a 768 JPEG overrides a
+  1024 claim. Six checks; the regression check cannot pass against the old
+  adapter because the helper did not exist.
+
 ---
 
 ## 4. Methods that were tried and did **not** work
@@ -559,10 +578,9 @@ This section exists so nobody spends the same afternoon again.
   over the API). All nine runtimes are installed; `torch 2.11.0+cu128`
   reports CUDA available with two T4s.
   - sd-turbo downloaded (12 files, 2.58 GB) and generates 512×512 / 4 steps
-    in **26 s** with `device: cuda` and a clean image.
-  - Cloud Pollinations flux returns a cached 768×768 JPEG in **8.9 s**, but
-    the adapter still reports the requested 1024×1024 — see the open item
-    below.
+    in **19 s** (26 s cold) with `device: cuda` and a clean image.
+  - Cloud Pollinations flux returns a cached 768×768 JPEG in **7–9 s**. It
+    used to be labelled 1024×1024; §3.11 makes the label follow the bytes.
   - ONNX Kokoro is downloaded and synthesises through `/api/infer/tts`:
     q4 on CUDA (and on the CPU), fp32 on CUDA; q4f16/fp16 are the silent
     files described in §3.10. The box currently has only `model_q4.onnx`
@@ -594,10 +612,9 @@ This section exists so nobody spends the same afternoon again.
    engine shows its VRAM. The verification found the fp16-silence bug fixed
    in §3.10, which is the reason this item was worth doing on the card
    rather than trusting the CPU result.
-6. **The cloud image path reports the requested size, not the returned
-   one.** A 1024×1024 request came back as a 768×768 JPEG (Pollinations
-   flux) and the page still labelled it 1024×1024. Reading the actual
-   dimensions from the bytes would make the label honest.
+6. ~~**The cloud image path reports the requested size, not the returned
+   one.**~~ Fixed in §3.11: a 1024×1024 request comes back as a 768×768
+   JPEG and is now labelled 768×768. Verified through the provider.
 
 ---
 

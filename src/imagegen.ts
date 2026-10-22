@@ -20,6 +20,7 @@
  * shared /api limiter, and a separate concurrency cap stops one browser from
  * pinning the CPU with parallel long generations.
  */
+import { actualImageSize } from './image-size.js';
 import { getKey } from './store.js';
 
 export interface ImageGenSize {
@@ -353,6 +354,10 @@ export async function generateImage(call: GenerateCall): Promise<GeneratedImage>
   });
   return {
     ...result,
+    // A provider may answer with a smaller picture than the one requested
+    // (Pollinations returns 768×768 for a 1024 request), and its reported
+    // width/height is the request, not the answer. The file says what it is.
+    ...actualImageSize(result),
     provider: provider.id,
     model: call.model,
     prompt,

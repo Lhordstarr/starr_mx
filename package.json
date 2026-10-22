@@ -33,6 +33,7 @@
     "test:llamacpp-ui": "node scripts/llamacpp-ui-selftest.mjs",
     "test:models-ui": "node scripts/models-row-ui-selftest.mjs",
     "test:image-dtype": "tsx scripts/image-dtype-selftest.ts",
+    "test:image-size": "tsx scripts/image-size-selftest.ts",
     "test:tts-engine": "tsx scripts/tts-engine-selftest.ts",
     "test:tts-engine-ui": "node scripts/tts-engine-ui-selftest.mjs"
   },
