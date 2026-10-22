@@ -1,3 +1,4 @@
+import { modelIcon, providerIcon } from './entity-icons.js';
 import { notifySuccess, notifyError, notifyWarning } from './notify.js';
 import { initShaderBackdrop } from './shader.js';
 
@@ -188,6 +189,7 @@ function renderProviderRow(field) {
   row.className = 'key-row';
   row.setAttribute('aria-haspopup', 'dialog');
   row.innerHTML = `
+    ${providerIcon(field.providerId ?? field.envKey, 'key-row__icon')}
     <span class="key-row__label">${escapeHtml(field.label)}</span>
     ${badge(field)}
     <span class="key-row__env">${escapeHtml(field.envKey)}</span>
@@ -347,7 +349,7 @@ function renderCustomProvider(p) {
   row.className = 'row custom-row';
   row.innerHTML = `
     <div class="row-top">
-      <span class="provider">${escapeHtml(p.label)}</span>
+      <span class="provider">${providerIcon(p.id, 'custom-row__icon')}${escapeHtml(p.label)}</span>
       ${p.hasKey ? '<span class="badge ok">key saved</span>' : '<span class="badge info">no key</span>'}
       ${p.stt ? '<span class="badge ok">dictation</span>' : ''}
     </div>
@@ -517,12 +519,7 @@ function renderDictationProvider(p) {
   row.innerHTML = `
     <div class="row-top">
       <span class="provider">
-        <svg class="mic-mini" viewBox="0 0 24 24" width="13" height="13" fill="none"
-             stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-          <rect x="9" y="2" width="6" height="11" rx="3" />
-          <path d="M5 11a7 7 0 0 0 14 0" />
-          <path d="M12 18v4" />
-        </svg>
+        ${providerIcon(p.id, 'dictation-row__icon')}
         ${escapeHtml(p.label)}
       </span>
       <span>
@@ -641,7 +638,7 @@ function renderLocalModel(m) {
     </div>
     ${meta || when ? `<div class="row-note">${escapeHtml([meta, when].filter(Boolean).join(' · '))}</div>` : ''}`;
 
-  row.querySelector('.row-top').prepend(modelTile(m.name));
+  row.querySelector('.row-top').prepend(modelIconTile(m.name));
 
   // "Chat" is the whole point of having the model: hand the chat page this
   // provider+model pair and start a new conversation on it. Without this the
@@ -3204,7 +3201,10 @@ function renderCatalogEntry(entry) {
 
   const title = document.createElement('div');
   title.className = 'cat-entry__title';
-  title.textContent = entry.label;
+  title.innerHTML = modelIcon(entry.repo, 'cat-entry__icon');
+  const titleText = document.createElement('span');
+  titleText.textContent = entry.label;
+  title.append(titleText);
   head.append(title);
 
   const badges = document.createElement('div');
@@ -3858,6 +3858,20 @@ function modelTile(id, size = '') {
   const short = (id.split('/').pop() || id).replace(/^[^A-Za-z0-9]+/, '');
   s.textContent = (short[0] || '?').toUpperCase();
   s.setAttribute('aria-hidden', 'true');
+  return s;
+}
+
+/**
+ * Achromatic model mark for rows that are UI chrome rather than Hub artwork.
+ *
+ * The gradient tile above stays where it acts as a picture (the Hub's cards
+ * and the detail modal). Downloaded and installed rows are lists, so they get
+ * the same stroke icon language as providers instead.
+ */
+function modelIconTile(id, size = '') {
+  const s = document.createElement('span');
+  s.className = `model-icon-tile ${size}`.trim();
+  s.innerHTML = modelIcon(id);
   return s;
 }
 
@@ -5041,7 +5055,7 @@ function renderHfDownload(d) {
     ? `${d.repo} · ${d.file} (+${d.files.length - 1} more file${d.files.length === 2 ? '' : 's'})`
     : `${d.repo} / ${d.file}`;
   name.title = `${d.repo}\n${(d.files ?? [d.file]).join('\n')}`;
-  top.append(modelTile(d.repo));
+  top.append(modelIconTile(d.repo));
   const right = document.createElement('span');
   right.className = 'hf-file-right';
   const size = document.createElement('span');

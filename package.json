@@ -37,6 +37,7 @@
     "test:tts-engine": "tsx scripts/tts-engine-selftest.ts",
     "test:tts-engine-ui": "node scripts/tts-engine-ui-selftest.mjs",
     "test:studio-image-ui": "node scripts/studio-image-ui-selftest.mjs",
+    "test:entity-icons-ui": "node scripts/entity-icons-ui-selftest.mjs",
     "test:runtimes-total-ui": "node scripts/runtimes-total-ui-selftest.mjs"
   },
   "dependencies": {

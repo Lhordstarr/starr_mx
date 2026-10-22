@@ -367,9 +367,15 @@ h1 {
   gap: 7px;
 }
 
-.mic-mini {
+.custom-row .provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.custom-row__icon,
+.dictation-row__icon {
   color: var(--text-faint);
-  flex-shrink: 0;
 }
 
 .btn-scan-stt {
@@ -875,6 +881,37 @@ h1 {
   font-size: 1.35rem;
 }
 
+/* The row-sized counterpart to the Hub artwork above. Same stroke icon
+   language as providers, with a quiet panel fill so a list still scans as a
+   list of objects rather than a wall of text. */
+.model-icon-tile {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  color: var(--text-dim);
+  background: var(--panel-3);
+  border: 1px solid var(--border-soft);
+}
+
+.model-icon-tile .entity-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.model-icon-tile.lg {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+}
+
+.model-icon-tile.lg .entity-icon {
+  width: 24px;
+  height: 24px;
+}
+
 /* Names share rows with tiles, badges, and buttons, so they must shrink
    instead of shoving their neighbours out. */
 .local-model-row .model-name,
@@ -1029,6 +1066,16 @@ body.modal-open {
   white-space: nowrap;
 }
 
+.key-row__icon {
+  width: 18px;
+  height: 18px;
+  color: var(--text-faint);
+}
+
+.key-row:hover .key-row__icon {
+  color: var(--text-dim);
+}
+
 .key-row__env {
   flex: 1;
   min-width: 0;
@@ -1174,10 +1221,23 @@ body.modal-open {
 }
 
 .cat-entry__title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 0.92rem;
   font-weight: 700;
   color: var(--text);
   line-height: 1.3;
+}
+
+.cat-entry__icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-faint);
+}
+
+.cat-entry__head:hover .cat-entry__icon {
+  color: var(--text-dim);
 }
 
 .cat-entry__badges {
@@ -2587,11 +2647,16 @@ summary.hub-title {
   gap: 10px;
 }
 
-.local-model-row .model-tile {
+.local-model-row .model-tile,
+.local-model-row .model-icon-tile {
   width: 26px;
   height: 26px;
   border-radius: 8px;
-  font-size: 0.85rem;
+}
+
+.local-model-row .model-icon-tile .entity-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .local-model-row .btn-ghost {

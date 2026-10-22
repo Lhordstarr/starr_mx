@@ -159,13 +159,16 @@ body {
   color: var(--prov-text);
 }
 
-.dot-mark {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--prov);
-  flex-shrink: 0;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--prov) 22%, transparent);
+.chip-provider__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.chip-provider__icon .entity-icon {
+  width: 14px;
+  height: 14px;
 }
 
 /* Status readout, not a control: the model is chosen on the composer.
@@ -195,7 +198,7 @@ body {
 }
 
 .chip-model span,
-.chip-provider span:not(.dot-mark) {
+.chip-provider span:not(.chip-provider__icon) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2231,6 +2234,18 @@ a.icon-btn {
   box-shadow: 0 0 0 3px var(--prov-soft);
 }
 
+.mt-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.mt-icon .entity-icon {
+  width: 14px;
+  height: 14px;
+}
+
 .mt-label {
   min-width: 0;
   overflow: hidden;
@@ -2316,6 +2331,19 @@ a.icon-btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mm-option__icon {
+  color: var(--text-faint);
+}
+
+.mm-option:hover .mm-option__icon,
+.mm-option.active .mm-option__icon {
+  color: var(--text);
+}
+
+.mm-option[aria-selected='true'] .mm-option__icon {
+  color: var(--prov-text);
 }
 
 .mm-option:hover,
@@ -2635,6 +2663,15 @@ a.icon-btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.popover__item-icon {
+  color: var(--text-faint);
+}
+
+.popover__item:hover .popover__item-icon,
+.popover__item[aria-selected='true'] .popover__item-icon {
+  color: var(--text);
 }
 
 /* "no key" is the reason a provider will fail, so it stays visible rather than

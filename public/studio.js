@@ -1,3 +1,4 @@
+import { modelIcon as modelGlyph, providerIcon as providerGlyph } from './entity-icons.js';
 import { notifySuccess, notifyError } from './notify.js';
 import { mountNav } from './nav.js';
 import { initShaderBackdrop } from './shader.js';
@@ -26,10 +27,12 @@ const els = {
   modelSearch: document.getElementById('model-search'),
   modelList: document.getElementById('model-list'),
   modelCurrent: document.getElementById('model-current'),
+  modelIcon: document.getElementById('model-icon'),
   modelHint: document.getElementById('model-hint'),
   imgStatus: document.getElementById('img-status'),
   imageSettings: document.getElementById('studio-image-settings'),
   chipProvider: document.getElementById('chip-provider'),
+  chipProviderIcon: document.getElementById('chip-provider-icon'),
   chipModel: document.getElementById('chip-model'),
   historyList: document.getElementById('history-list'),
   historyHint: document.getElementById('history-hint'),
@@ -227,6 +230,7 @@ function syncChips() {
 
   if (els.chipProvider) {
     els.chipProvider.textContent = local ? 'On this PC' : p?.label ?? 'No provider';
+    els.chipProviderIcon.innerHTML = providerGlyph(local ? 'local' : p?.id ?? '');
   }
   if (!els.chipModel) return;
   if (local) {
@@ -277,8 +281,9 @@ function renderImagePicker() {
   if (!options.some((o) => o.id === imageModel && o.ready)) {
     imageModel = options.find((o) => o.ready)?.id ?? options[0]?.id ?? '';
   }
-  els.modelCurrent.textContent =
-    options.find((o) => o.id === imageModel)?.label ?? 'no model selected';
+  const chosen = options.find((o) => o.id === imageModel);
+  els.modelCurrent.textContent = chosen?.label ?? 'no model selected';
+  els.modelIcon.innerHTML = modelGlyph(chosen?.id ?? imageModel);
 
   const ready = options.filter((o) => o.ready).length;
   if (localImageSelected()) {
@@ -330,6 +335,7 @@ function renderImageMenu(query = '') {
           item.setAttribute('aria-disabled', 'true');
           item.title = o.reason ?? 'Not runnable here';
         }
+        item.innerHTML = modelGlyph(o.id, 'mm-option__icon');
         const name = document.createElement('span');
         name.textContent = o.label;
         item.append(name);

@@ -485,6 +485,45 @@ The tool descriptions carry the same steering where the model reads them:
 Tests assert the injection rule, the citation rule, the no-narration rule, and
 the two descriptions; four checks fail against the old prompt and descriptions.
 
+### 3.15 Providers and models carry achromatic marks
+
+`public/entity-icons.js` is now the one place that turns an entity id into a
+mark. The app has one icon language — inline SVG, `fill="none"`,
+`stroke="currentColor"` — and these are drawn in it: no font glyphs, no emoji,
+no brand logos and no coloured badges.
+
+- `providerIconKind()` matches the known chat and image provider ids first
+  (`ollama`, `llamacpp`, `openrouter`, `openai`, `pollinations`,
+  `stable-horde`, the env keys, and so on), then falls back to name shape for
+  discovered servers and user-created providers. The marks are roles rather
+  than logos: layers for Ollama/Transformers, a chip for llama.cpp, a route
+  for OpenRouter, a spark for OpenAI, a compass for Anthropic, twins for
+  Gemini, a bolt for Groq, a cloud for Cloudflare, a box for Hugging Face,
+  and a plug for an unrecognised custom endpoint.
+- `modelIconKind()` classifies model ids by name shape: code/coder, Whisper
+  and speech-to-text, Kokoro/speech synthesis, diffusion/FLUX, embeddings,
+  vision, reasoning, audio, and a chat bubble as the default. No model list is
+  hardcoded, so a provider adding a model does not leave the icon behind.
+- Every mark exposes `data-icon` and the shared `entity-icon` class for the
+  regression test, and is `aria-hidden` because the visible label already
+  names the entity.
+
+The marks are wired through the chat provider popover and top-bar provider
+chip, the chat model menu and the closed model pill, settings key rows, custom
+providers, dictation providers, installed/downloaded model rows and the local
+runtime catalog, and the Studio's provider chip, model menu and model pill.
+Settings lists use the new `.model-icon-tile`; the Hub's card artwork and
+detail modal still call `modelTile()`, because there the gradient tile is a
+picture rather than a list icon.
+
+`npm run test:entity-icons-ui` stubs providers, keys, custom/dictation rows,
+the Studio's image provider and its model list, then checks the mapping and
+every one of those surfaces in headless Chromium: 22 checks. Against the old
+page the same test reports 8 passed, 14 failed. The existing UI suites still
+pass after the change: `test:ui-tools` 50/50, `test:reasoning-ui` 18/18,
+`test:studio-image-ui` 8/8, `test:models-ui` 5/5 and
+`test:runtimes-total-ui` 6/6.
+
 ---
 
 ## 4. Methods that were tried and did **not** work
@@ -624,7 +663,8 @@ This section exists so nobody spends the same afternoon again.
 
 ## 5. State of play right now
 
-- `master` is at the latest commit and **pushed**. Working tree clean.
+- `master` includes the provider/model icon pass in §3.15 and is **pushed**;
+  the working tree is clean.
 - The dev server is running in the background on port 3000. On this box it is
   currently `npx tsx src/server.ts` (no watch, log at
   `/tmp/opencode/dev-nowatch.log`) because image runs are long; `npm run dev`
@@ -637,13 +677,16 @@ This section exists so nobody spends the same afternoon again.
   is simply no GGUF on disk to load.
 - Current task assignments in the app: speech-to-text = wav2vec2
   (transformers), speech = **Kokoro ONNX**, image = sd-turbo.
-- **The current live box is `https://income-wedding-hat-infections.trycloudflare.com`**
-  (`/kaggle/working/starr_mx`, **2× Tesla T4**). It serves the image fixes:
-  a 1024×1024 Pollinations request reports 768×768, and local sd-turbo writes
-  a 512×512 PNG in ~19 s with `device: cuda`. Its `assigned.image` is `None`,
-  so the Studio opens on a cloud provider; the local diffusers entry has to be
-  chosen explicitly. Only torch, transformers and diffusers report installed
-  there, so the speech/chat runtime notes below describe earlier boxes.
+- **The last live box was `https://income-wedding-hat-infections.trycloudflare.com`**
+  (`/kaggle/working/starr_mx`, **2× Tesla T4**). When it was reachable it
+  served the image fixes: a 1024×1024 Pollinations request reports 768×768,
+  and local sd-turbo writes a 512×512 PNG in ~19 s with `device: cuda`. Its
+  `assigned.image` was `None`, so the Studio opened on a cloud provider; the
+  local diffusers entry had to be chosen explicitly. Only torch, transformers
+  and diffusers reported installed there, so the speech/chat runtime notes
+  below describe earlier boxes. **That tunnel no longer resolves and there is
+  no shell access to `/kaggle/working/starr_mx`**, so §3.15 is verified locally
+  only.
 - **The previous fresh box was at `https://mutual-welcome-doll-contribute.trycloudflare.com`**
   (`/kaggle/working/starr_mx`, **2× Tesla T4**). It was completely empty:
   no venv and no runtimes. The venv package itself needed root, so the

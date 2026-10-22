@@ -700,6 +700,17 @@ button:disabled {
   margin: 0 auto;
 }
 
+/* Shared line marks for providers and models. The stroke and size live here
+   so the chat page, Studio and settings cannot drift into three icon styles.
+   Contexts below only set the size and the muted/active colour. */
+.entity-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: block;
+  color: inherit;
+}
+
 /* ---------- Small shared bits ---------- */
 
 .badge {

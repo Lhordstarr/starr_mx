@@ -35,7 +35,7 @@
     <div class="chip-wrap">
       <button id="open-panel" class="chip chip-provider" title="Change provider"
               aria-haspopup="listbox" aria-expanded="false" aria-controls="provider-pop">
-        <span class="dot-mark" aria-hidden="true"></span>
+        <span id="chip-provider-icon" class="chip-provider__icon" aria-hidden="true"></span>
         <span id="chip-provider">local</span>
       </button>
 
@@ -134,6 +134,7 @@
           <div class="model-select" id="model-select">
             <button type="button" id="model-trigger" class="model-trigger"
                     aria-haspopup="listbox" aria-expanded="false" title="Change model">
+              <span class="mt-icon" id="model-icon" aria-hidden="true"></span>
               <span class="mt-label" id="model-current">no model selected</span>
               <svg class="mt-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none"
                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

@@ -1,4 +1,5 @@
 import { createAttachments } from './attachments.js';
+import { modelIcon as modelGlyph, providerIcon as providerGlyph } from './entity-icons.js';
 import { renderCode } from './highlight.js';
 import { initShaderBackdrop } from './shader.js';
 import { initImageViewer } from './viewer.js';
@@ -45,7 +46,9 @@ const els = {
   providerList: document.getElementById('provider-list'),
   backdrop: document.getElementById('backdrop'),
   chipProvider: document.getElementById('chip-provider'),
+  chipProviderIcon: document.getElementById('chip-provider-icon'),
   chipModel: document.getElementById('chip-model'),
+  modelIcon: document.getElementById('model-icon'),
   composerHint: document.getElementById('composer-hint'),
   status: document.getElementById('status'),
   statusDot: document.getElementById('status-dot'),
@@ -631,7 +634,7 @@ function renderModelMenu(query = '') {
       .map(
         (m) =>
           `<li class="mm-option" role="option" data-model="${escapeHtml(m)}"
-               aria-selected="${m === model}"><span>${escapeHtml(m)}</span></li>`,
+               aria-selected="${m === model}">${modelGlyph(m, 'mm-option__icon')}<span>${escapeHtml(m)}</span></li>`,
       )
       .join('');
   }
@@ -669,6 +672,7 @@ function closeModelMenu() {
 function setModel(next) {
   model = next;
   els.modelCurrent.textContent = next || 'no model selected';
+  els.modelIcon.innerHTML = modelGlyph(next);
   updateTopbar();
   // Re-labels the attach button against the new model without re-probing.
   attachments.setContext(activeProviderId, next);
@@ -768,6 +772,7 @@ function updateTopbar() {
   document.documentElement.dataset.provider = p?.id ?? '';
 
   els.chipProvider.textContent = p?.label ?? '—';
+  els.chipProviderIcon.innerHTML = providerGlyph(p?.id ?? '');
   els.chipModel.textContent = model || 'no model selected';
 
   // The hint line is guidance by default; only borrow it to warn about a
@@ -840,6 +845,7 @@ async function loadProviders(saved) {
   const renderRow = (p) => `
     <button type="button" class="popover__item" role="option" data-id="${p.id}"
             aria-selected="${p.id === saved.provider}">
+      ${providerGlyph(p.id, 'popover__item-icon')}
       <span class="popover__item-label">${escapeHtml(p.label)}</span>
       ${p.configured ? '' : `<span class="popover__flag">${p.local ? 'no models' : 'no key'}</span>`}
     </button>`;
