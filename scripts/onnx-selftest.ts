@@ -260,6 +260,40 @@ await check('the ONNX STT runner exists and keeps the decoder on its no-cache br
   assert.match(source, /argmax/);
 });
 
+await check('a quantised Whisper graph has an fp32 fallback behind it', () => {
+  // The int8 graph in the catalog fails to open in onnxruntime 1.26 with
+  // "Missing required scale" — on CPU as well as CUDA. The repository ships
+  // the fp32 export beside it, so the runner has to keep looking instead of
+  // treating the first filename as the only graph.
+  const dir = mkdtempSync(path.join(tmpdir(), 'onnx-graphs-'));
+  try {
+    mkdirSync(path.join(dir, 'onnx'), { recursive: true });
+    for (const name of [
+      'encoder_model_quantized.onnx',
+      'decoder_model_merged_quantized.onnx',
+      'encoder_model.onnx',
+      'decoder_model_merged.onnx',
+    ]) {
+      writeFileSync(path.join(dir, 'onnx', name), 'graph');
+    }
+    const script = `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('transcribe_onnx', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps([[p.rsplit('/', 1)[-1] for p in pair] for pair in module.find_graphs(sys.argv[2])]))
+`;
+    const run = spawnSync('python3', ['-c', script, transcribeSource, dir], { encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    assert.deepEqual(JSON.parse(run.stdout.trim()), [
+      ['encoder_model_quantized.onnx', 'decoder_model_merged_quantized.onnx'],
+      ['encoder_model.onnx', 'decoder_model_merged.onnx'],
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await check('the resource manager credits the ONNX runners with their packages', () => {
   assert.deepEqual(SCRIPT_RUNTIMES['transcribe_onnx.py'], ['onnxruntime', 'transformers']);
   assert.deepEqual(SCRIPT_RUNTIMES['speak_onnx.py'], ['onnxruntime', 'kokoro']);
@@ -366,6 +400,23 @@ console.log('\nThe installer has to bring the build the machine needs');
       // And the build it is replacing goes first: the two install the same
       // import package, and left in place they overwrite each other.
       assert.match(said, /^uninstall .*onnxruntime\b/m, said || '(nothing was uninstalled)');
+      // Uninstalling the rival can delete files the wanted wheel's dist-info
+      // still claims are present. Without this force-reinstall pip says
+      // "Requirement already satisfied" and leaves an import with no
+      // providers.
+      assert.match(
+        said,
+        /^install .*--force-reinstall .*--no-deps .*onnxruntime-gpu/m,
+        said || '(the wanted wheel was not reinstalled)',
+      );
+      // The no-deps repair replaces the wheel but not its dependencies. A
+      // fresh venv needs a normal install too, or onnxruntime imports without
+      // numpy the moment the first model loads.
+      assert.match(
+        said,
+        /^install (?![^\n]*--no-deps)[^\n]*onnxruntime-gpu/m,
+        said || '(dependencies were never installed)',
+      );
     });
 
     await check('a machine without a card gets the CPU build', async () => {
@@ -383,6 +434,16 @@ console.log('\nThe installer has to bring the build the machine needs');
       assert.doesNotMatch(said, /^install .*onnxruntime-gpu/m, said);
       // And the build it is replacing goes first.
       assert.match(said, /^uninstall .*onnxruntime-gpu/m, said || '(nothing was uninstalled)');
+      assert.match(
+        said,
+        /^install .*--force-reinstall .*--no-deps .*onnxruntime\b/m,
+        said || '(the wanted wheel was not reinstalled)',
+      );
+      assert.match(
+        said,
+        /^install (?![^\n]*--no-deps)[^\n]*onnxruntime\b(?!-gpu)/m,
+        said || '(dependencies were never installed)',
+      );
     });
 
     await check('and the GPU wheel is the one that matches the CUDA build torch uses', () => {

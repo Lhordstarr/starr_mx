@@ -21,18 +21,23 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { nativeBackendReports } from '../src/backends.ts';
 import {
   describeVenvFailure,
   downloadTool,
   ensureVenv,
   installRuntimes,
+  invalidateRuntimeProbes,
   missingInstallerPrerequisite,
   MISSING_PIP_MESSAGE,
   MissingVenvPackage,
   needsPrivilege,
   ollamaCommand,
   ollamaRecipe,
+  llamaCppUpgradeKind,
   ollamaVulkanEnabled,
+  parseComputeCapability,
+  computeCapabilitySupportsLlamaCuda,
   permissionMessage,
   RUNTIME_GROUPS,
   runtimeStatus,
@@ -454,6 +459,230 @@ section('A vendored runtime is reported without a Python environment');
   if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
   else process.env.RUNTIMES_PYTHON = saved.py;
   rmSync(home, { recursive: true, force: true });
+}
+
+/* ---- 1f. An installed package that cannot import is not installed ---- */
+section('ONNX Runtime is installed only when it can import');
+{
+  const home = mkdtempSync(join(tmpdir(), 'starr-onnx-probe-'));
+  const py = join(home, '.runtimes', 'venv', 'bin', 'python');
+  mkdirSync(join(home, '.runtimes', 'venv', 'bin'), { recursive: true });
+  const saved = { dir: process.env.RUNTIMES_DIR, py: process.env.RUNTIMES_PYTHON };
+  process.env.RUNTIMES_DIR = join(home, '.runtimes');
+  delete process.env.RUNTIMES_PYTHON;
+
+  const writeProbe = (providers: string[]) => {
+    writeFileSync(
+      py,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "-c" ]; then',
+        `  echo '${JSON.stringify({
+          packages: { onnxruntime: true },
+          torch: null,
+          onnx_providers: providers,
+          ctranslate2_cuda: 0,
+        })}'`,
+        '  exit 0',
+        'fi',
+        'exit 1',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(py, 0o755);
+    invalidateRuntimeProbes();
+  };
+
+  // This is the state a GPU install left behind: `find_spec` found the
+  // namespace directory, but importing it produced no execution providers at
+  // all. The old code called that installed; the model then failed to load.
+  writeProbe([]);
+  const broken = await runtimeStatus(false);
+  report(
+    'an ONNX package with no execution providers is not installed',
+    broken.installed.onnxruntime === null,
+    JSON.stringify({ installed: broken.installed.onnxruntime, onnx: broken.onnx }),
+  );
+
+  writeProbe(['CPUExecutionProvider']);
+  const working = await runtimeStatus(false);
+  report(
+    'an ONNX package that imports with a CPU provider is installed',
+    working.installed.onnxruntime === 'installed',
+    JSON.stringify({ installed: working.installed.onnxruntime, onnx: working.onnx }),
+  );
+  report(
+    'and the provider is reported, not just the package name',
+    working.onnx.some((o) => o.venv === 'venv' && o.providers.includes('CPUExecutionProvider')),
+    JSON.stringify(working.onnx),
+  );
+
+  if (saved.dir === undefined) delete process.env.RUNTIMES_DIR;
+  else process.env.RUNTIMES_DIR = saved.dir;
+  if (saved.py === undefined) delete process.env.RUNTIMES_PYTHON;
+  else process.env.RUNTIMES_PYTHON = saved.py;
+  invalidateRuntimeProbes();
+  rmSync(home, { recursive: true, force: true });
+}
+
+/* ---- 1g. Native runners are reported even when idle ---- */
+section('Every native backend reports its own state');
+{
+  const rows = nativeBackendReports({
+    onnx: [
+      { venv: 'venv', label: 'shared', providers: ['CUDAExecutionProvider', 'CPUExecutionProvider'] },
+      { venv: 'venv-kokoro', label: 'Kokoro', providers: ['CPUExecutionProvider'] },
+    ],
+    llama: { installed: true, running: false, model: null, pid: null, kind: 'cuda', cudaCompute: 12, cudaUsable: true },
+    transformers: {
+      installed: true,
+      running: false,
+      model: null,
+      pid: null,
+      cuda: true,
+      deviceName: 'Tesla T4',
+    },
+    sd: { installed: true, kind: 'cpu', activeDevice: null, activePid: null },
+    whisper: { installed: true, device: 'cpu' },
+    fasterWhisper: { installed: true, cudaDevices: 1 },
+  });
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  report('an idle native runtime still gets a row', rows.length === 7, JSON.stringify([...byId.keys()]));
+  report(
+    'ONNX reports the provider it actually loaded',
+    byId.get('onnxruntime')?.device === 'gpu' && /CUDA/.test(byId.get('onnxruntime')?.detail ?? ''),
+    JSON.stringify(byId.get('onnxruntime')),
+  );
+  report(
+    'the voice environment is reported separately from the shared one',
+    byId.get('kokoro-onnx')?.device === 'cpu',
+    JSON.stringify(byId.get('kokoro-onnx')),
+  );
+  report(
+    'an idle GPU llama.cpp build says why there is nothing to unload',
+    byId.get('llamacpp')?.device === 'none' && /idle/.test(byId.get('llamacpp')?.detail ?? ''),
+    JSON.stringify(byId.get('llamacpp')),
+  );
+  report(
+    'Stable Diffusion on the CPU is not hidden behind the Python row',
+    byId.get('stable-diffusion-cpp')?.device === 'cpu' &&
+      /no Linux CUDA archive/.test(byId.get('stable-diffusion-cpp')?.readonlyReason ?? ''),
+    JSON.stringify(byId.get('stable-diffusion-cpp')),
+  );
+  report(
+    'CTranslate2 CUDA is reported independently of torch',
+    byId.get('faster-whisper')?.device === 'gpu',
+    JSON.stringify(byId.get('faster-whisper')),
+  );
+
+  const broken = nativeBackendReports({
+    onnx: [],
+    llama: { installed: true, running: false, model: null, pid: null, kind: 'cuda', cudaCompute: 7.5, cudaUsable: false },
+    transformers: { installed: false, running: false, model: null, pid: null, cuda: false, deviceName: null },
+    sd: { installed: false, kind: null, activeDevice: null, activePid: null },
+    whisper: { installed: false, device: 'cpu' },
+    fasterWhisper: { installed: false, cudaDevices: null },
+  }).find((r) => r.id === 'llamacpp');
+  report(
+    'an installed CUDA build with no kernels is not called GPU',
+    broken?.device === 'cpu' && /Blackwell/.test(broken.readonlyReason ?? ''),
+    JSON.stringify(broken),
+  );
+
+  const fallback = nativeBackendReports({
+    onnx: [],
+    llama: { installed: true, running: false, model: null, pid: null, kind: 'cpu', cudaCompute: 7.5, cudaUsable: false },
+    transformers: { installed: false, running: false, model: null, pid: null, cuda: false, deviceName: null },
+    sd: { installed: false, kind: null, activeDevice: null, activePid: null },
+    whisper: { installed: false, device: 'cpu' },
+    fasterWhisper: { installed: false, cudaDevices: null },
+  }).find((r) => r.id === 'llamacpp');
+  report(
+    'the CPU fallback does not tell a T4 owner to reinstall for a GPU that cannot run',
+    /source build/.test(fallback?.readonlyReason ?? '') && !/Reinstall .*Compute set to GPU/.test(fallback?.readonlyReason ?? ''),
+    JSON.stringify(fallback),
+  );
+
+  const active = nativeBackendReports({
+    onnx: [],
+    llama: { installed: false, running: false, model: null, pid: null, kind: null, cudaCompute: null, cudaUsable: false },
+    transformers: { installed: false, running: false, model: null, pid: null, cuda: false, deviceName: null },
+    sd: { installed: true, kind: 'vulkan', activeDevice: 'Vulkan0', activePid: 4321 },
+    whisper: { installed: false, device: 'cpu' },
+    fasterWhisper: { installed: false, cudaDevices: null },
+  }).find((r) => r.id === 'stable-diffusion-cpp');
+  report(
+    'an active SD job is attributed to its device and pid',
+    active?.device === 'gpu' && /Vulkan0/.test(active.detail) && /4321/.test(active.evidence ?? ''),
+    JSON.stringify(active),
+  );
+}
+
+/* ---- 1h. A CUDA archive must match the card ---- */
+section('The pinned CUDA build is not offered to a card it cannot run');
+{
+  report('a T4\'s compute capability is parsed', parseComputeCapability('7.5\n') === 7.5);
+  report('a trimmed capability is accepted', parseComputeCapability(' 8.6 ') === 8.6);
+  report('an unreadable capability is not guessed', parseComputeCapability('') === null);
+  report('a non-numeric capability is not guessed', parseComputeCapability('N/A') === null);
+  report(
+    'the Blackwell-only archive is rejected on compute 7.5',
+    !computeCapabilitySupportsLlamaCuda(7.5),
+  );
+  report(
+    'the Blackwell-only archive is rejected on compute 8.6',
+    !computeCapabilitySupportsLlamaCuda(8.6),
+  );
+  report('the Blackwell archive is accepted on compute 12.0', computeCapabilitySupportsLlamaCuda(12));
+  report('an unreadable card falls back rather than guessing CUDA', !computeCapabilitySupportsLlamaCuda(null));
+}
+
+/* ---- 1i. A CUDA build the card cannot run must be swapped out ---- */
+section('An installed CUDA build is replaced when the card cannot run it');
+{
+  const home = mkdtempSync(join(tmpdir(), 'starr-t4-'));
+  const rt = join(home, '.runtimes');
+  const bin = join(home, 'bin');
+  mkdirSync(join(rt, 'llama-b11706'), { recursive: true });
+  mkdirSync(join(rt, 'llama.cpp'), { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(rt, 'llama-b11706', 'llama-server'), '');
+  writeFileSync(join(rt, 'llama-b11706', 'libggml-cuda.so'), '');
+  writeFileSync(join(rt, 'llama.cpp', 'build.txt'), 'llama-b11706');
+  // A T4, as nvidia-smi describes one. No vulkaninfo is on this PATH, so the
+  // only GPU build that remains is the CPU one.
+  writeFileSync(
+    join(bin, 'nvidia-smi'),
+    [
+      '#!/bin/sh',
+      'case "$*" in',
+      '  *compute_cap*) echo "7.5" ;;',
+      '  *-L*) echo "GPU 0: Tesla T4 (UUID: GPU-test)" ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(join(bin, 'nvidia-smi'), 0o755);
+
+  const savedDir = process.env.RUNTIMES_DIR;
+  const savedPath = process.env.PATH;
+  process.env.RUNTIMES_DIR = rt;
+  process.env.PATH = bin;
+  try {
+    const kind = await llamaCppUpgradeKind();
+    report(
+      'a CUDA build on a T4 is replaced by the CPU build',
+      kind === 'cpu',
+      String(kind),
+    );
+  } finally {
+    if (savedDir === undefined) delete process.env.RUNTIMES_DIR;
+    else process.env.RUNTIMES_DIR = savedDir;
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 /* ---- 1b. An environment with no pip in it ---- */

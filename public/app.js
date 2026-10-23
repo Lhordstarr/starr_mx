@@ -907,7 +907,7 @@ const MAX_RECORDING_MS = 120_000;
  * Speech-to-text engines this machine can actually use right now.
  *
  * @typedef {{kind:'cloud', id:string, label:string, ready:boolean, hint:string}
- *          |{kind:'local', repo:string, label:string, file:string, ready:boolean, hint:string}} SttEngine
+ *          |{kind:'local', id?:string, repo:string, label:string, file:string, ready:boolean, assigned?:boolean, hint:string}} SttEngine
  *
  * There is deliberately no picker here. Which model transcribes your voice is
  * set once, in Settings -> Your models, and this page just follows it.
@@ -937,9 +937,13 @@ async function refreshSttEngines() {
     for (const m of data.local ?? []) {
       engines.push({
         kind: 'local',
+        // A repository with several quantisations has a unique id. Without it
+        // every whisper.cpp variant compared equal to the same assignment.
+        id: m.id,
         repo: m.repo,
         label: m.label,
         file: m.file,
+        assigned: Boolean(m.assigned),
         // Which bundled runner the server says will handle it. Carried through
         // because it decides the upload's audio format — whisper-cli cannot read
         // a browser recording, the Python runners can.
@@ -950,10 +954,11 @@ async function refreshSttEngines() {
     }
     sttEngines = engines;
 
-    // The assignment lives in Settings -> Your models. Fall back to the first
-    // ready engine when nothing is assigned, so dictation still works for
-    // someone who never visits that page.
-    assignedSttId = data.assigned?.stt ?? '';
+    // The assignment lives in Settings -> Your models. The server resolves a
+    // legacy repo-level value to one candidate; use that candidate's unique id
+    // so the exact-match lookup below selects the model that is actually ready.
+    const localAssigned = engines.find((e) => e.kind === 'local' && e.assigned);
+    assignedSttId = localAssigned?.id ?? data.assigned?.stt ?? '';
     refreshMic();
     window.dispatchEvent(new CustomEvent('stt-assigned'));
   } catch {
@@ -963,7 +968,7 @@ async function refreshSttEngines() {
 
 function sttEngineId(e) {
   if (typeof e === 'string') return e;
-  return e?.kind === 'local' ? `local:${e.repo}` : `cloud:${e?.id}`;
+  return e?.kind === 'local' ? (e.id ?? `local:${e.repo}`) : `cloud:${e?.id}`;
 }
 
 /** The speech-to-text model chosen in Settings -> Your models. */
@@ -2112,8 +2117,7 @@ async function speakReply(btn, text) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     const models = (data.tts ?? []).filter((m) => m.ready);
-    const assigned = data.assigned?.tts;
-    const model = models.find((m) => assigned === `local:${m.repo}`) ?? models[0];
+    const model = models.find((m) => m.assigned) ?? models[0];
     if (!model) {
       throw new Error('No voice model is runnable here — get one in Settings → Models.');
     }

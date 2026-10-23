@@ -90,7 +90,9 @@ def main():
 
         def do_GET(self):
             if self.path == '/health':
-                self._json(200, {'status': 'ok'})
+                # The resource row needs the device torch actually resolved,
+                # not the "auto" the supervisor asked for.
+                self._json(200, {'status': 'ok', 'device': device})
             elif self.path.startswith('/v1/models'):
                 self._json(200, {'object': 'list', 'data': [{'id': model_id, 'object': 'model'}]})
             else:

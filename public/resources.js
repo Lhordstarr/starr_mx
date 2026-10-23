@@ -538,6 +538,8 @@ export function mountResources() {
   ollamaGroup.className = 'procman__group';
   const jobsGroup = document.createElement('div');
   jobsGroup.className = 'procman__group';
+  const recentGroup = document.createElement('div');
+  recentGroup.className = 'procman__group';
   const emptyMsg = document.createElement('p');
   emptyMsg.className = 'procman__empty';
 
@@ -577,6 +579,7 @@ export function mountResources() {
     const ramTotal = data.ramTotalBytes ?? 0;
     const models = data.ollama?.models ?? [];
     const jobs = data.active ?? [];
+    const recent = data.recent ?? [];
     const running = jobs.filter((j) => j.state !== 'stopping');
     const desired = [];
     const live = new Set();
@@ -661,9 +664,13 @@ export function mountResources() {
         // not the truth on a machine that cannot run on a GPU at all.
         const device = j.resolvedDevice ?? j.device;
         parts.push(deviceLabel(device), `via ${rts}`, `pid ${j.pid}`);
+        // "Voice engine" was true when TTS was the only warm runner. The
+        // llama.cpp and Transformers servers are warm too, so the row names
+        // the state rather than one kind of model.
+        const kind = TASK_LABEL[j.kind] ?? (j.kind === 'llm' ? 'Model' : 'Job');
         fillRow(slot, {
           item: j,
-          name: `${isWarm ? 'Voice engine' : (TASK_LABEL[j.kind] ?? 'Working')} · ${j.repo ?? j.script}`,
+          name: `${isWarm ? 'Warm' : kind} · ${j.repo ?? j.script}`,
           metaParts: parts,
           // Every local job gets the bar Ollama gets. A job that is holding
           // three gigabytes of weights should not be the one row in the list
@@ -683,7 +690,7 @@ export function mountResources() {
             : isWarm
               ? {
                   label: 'Unload',
-                  title: 'Let go of this voice engine and free the memory it is holding',
+                  title: 'Let go of this loaded model and free the memory it is holding',
                   run: () => stopJob(slot.item),
                 }
               : {
@@ -692,6 +699,38 @@ export function mountResources() {
                   title: `Stop this job (pid ${j.pid})`,
                   run: () => stopJob(slot.item),
                 },
+        });
+        desired.push(slot.row);
+      }
+    }
+
+    // Finished jobs used to vanish on the next poll, which made "did it
+    // finish, or did it crash?" a question the panel could not answer. The
+    // server keeps them for a minute; show that transition instead of hiding
+    // it. These rows are deliberately not actionable — the process is gone.
+    if (recent.length) {
+      recentGroup.textContent = `Recently finished · ${recent.length}`;
+      desired.push(recentGroup);
+      for (const j of recent) {
+        const key = `recent:${j.id}`;
+        live.add(key);
+        const slot = rowSlot(key);
+        const ended = j.endedAt ?? now;
+        const outcome = j.stoppedByUser
+          ? 'stopped'
+          : j.exitCode === 0
+            ? 'finished'
+            : `failed${j.exitCode == null ? '' : ` (exit ${j.exitCode})`}`;
+        const rts = (j.runtimes ?? []).join(' + ') || 'python';
+        const kind = TASK_LABEL[j.kind] ?? (j.kind === 'llm' ? 'Model' : 'Job');
+        fillRow(slot, {
+          item: j,
+          name: `${kind} · ${j.repo ?? j.script}`,
+          metaParts: [
+            { strong: outcome, rest: `${fmtElapsed(now - ended)} ago` },
+            deviceLabel(j.resolvedDevice ?? j.device),
+            `via ${rts}`,
+          ],
         });
         desired.push(slot.row);
       }
@@ -709,7 +748,7 @@ export function mountResources() {
       emptyMsg.textContent =
         data.ollama && !data.ollama.ok
           ? `Nothing running. ${data.ollama.detail}`
-          : 'Nothing running. Ollama keeps a model in memory for a few minutes after a reply, a voice engine stays loaded for ten, and local jobs appear here while they work.';
+          : 'Nothing running. Ollama keeps a model in memory for a few minutes after a reply, a warm local model stays loaded until its idle timer releases it, and local jobs appear here while they work.';
       desired.push(emptyMsg);
       procmanNote.textContent = '';
     } else if (jobs.some((j) => j.state === 'stopping')) {
@@ -718,8 +757,8 @@ export function mountResources() {
       // "0 models · 1 job" read as a contradiction: the count is only ever
       // *Ollama-resident* models, and a local job loads its own. Say which is
       // which instead, and say when the Ollama half could not be read at all.
-      // A warm voice engine is counted apart from the jobs that are working:
-      // it is loaded and idle, which is neither of the other two.
+      // A warm process is counted apart from the jobs that are working: it is
+      // loaded and idle, which is neither of the other two.
       const warmJobs = jobs.filter((j) => j.warm);
       const workingJobs = jobs.filter((j) => !j.warm);
       const bits = [];
@@ -727,9 +766,10 @@ export function mountResources() {
         bits.push(`${workingJobs.length} job${workingJobs.length === 1 ? '' : 's'} running`);
       }
       if (warmJobs.length) {
-        bits.push(
-          `${warmJobs.length} voice engine${warmJobs.length === 1 ? '' : 's'} warm`,
-        );
+        bits.push(`${warmJobs.length} process${warmJobs.length === 1 ? '' : 'es'} warm`);
+      }
+      if (recent.length) {
+        bits.push(`${recent.length} recently finished`);
       }
       if (models.length) bits.push(`${models.length} Ollama model${models.length === 1 ? '' : 's'} loaded`);
       else if (data.ollama && !data.ollama.ok) bits.push('Ollama busy or not reachable');
@@ -773,7 +813,7 @@ export function mountResources() {
       } else {
         notifySuccess(
           job.warm
-            ? 'Released the voice engine.'
+            ? 'Released the loaded model.'
             : `Stopped ${TASK_LABEL[job.kind] ?? 'the job'}.`,
         );
       }

@@ -15,7 +15,12 @@ import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { runnableModels, type RunnableDeps } from '../src/runnable.js';
+import {
+  assignmentMatches,
+  assignmentValue,
+  runnableModels,
+  type RunnableDeps,
+} from '../src/runnable.js';
 import type { HFDownload } from '../src/huggingface.js';
 
 let passed = 0;
@@ -178,6 +183,7 @@ const ALL: Record<string, string | null> = {
   diffusers: 'installed',
   kokoro: 'installed',
   onnxruntime: 'installed',
+  'whisper-cpp': 'installed',
   ollama: 'installed',
 };
 
@@ -412,6 +418,34 @@ await check('catalog entries appear even when their files are absent', async () 
 await check('a repo with an empty file set is skipped', async () => {
   const stt = await runnableModels('stt', { downloads: [], installed: ALL });
   assert.equal(stt.some((m) => m.repo.startsWith('Acme/')), false);
+});
+
+await check('quantisations in one repo get unique assignment ids', async () => {
+  // whisper.cpp publishes every size under the same repo. The catalog carries
+  // one entry per quantisation, so `local:ggerganov/whisper.cpp` named all four
+  // and the assignment `<select>` kept whichever came last — usually a model
+  // that was not downloaded.
+  seed(root, 'ggerganov/whisper.cpp', { 'ggml-small-q8_0.bin': 'x' });
+  const stt = await runnableModels('stt', {
+    downloads: downloadsOf(root, ['ggerganov/whisper.cpp']),
+    installed: ALL,
+  });
+  const rows = stt.filter((m) => m.repo === 'ggerganov/whisper.cpp');
+  assert.equal(rows.length, 4, `got ${rows.length}`);
+  assert.equal(new Set(rows.map((m) => assignmentValue(m))).size, rows.length);
+  const small = rows.find((m) => m.label.includes('Whisper small'));
+  assert.ok(small, 'the small entry is present');
+  assert.equal(small.ready, true, small.reason);
+  assert.match(small.id ?? '', /^local:ggerganov\/whisper\.cpp#ggml-small-q8_0\.bin$/);
+
+  // A legacy repo-level assignment has to resolve to exactly the ready model,
+  // not to all of them.
+  const legacy = rows.filter((m) => assignmentMatches(m, 'local:ggerganov/whisper.cpp', rows));
+  assert.deepEqual(legacy.map((m) => m.label), ['Whisper small (whisper.cpp)']);
+
+  const exact = rows.filter((m) => assignmentMatches(m, assignmentValue(small), rows));
+  assert.equal(exact.length, 1);
+  assert.equal(exact[0], small);
 });
 
 // --- the shared Hugging Face cache ---------------------------------------------

@@ -389,8 +389,11 @@ export const RUNTIME_GROUPS: RuntimeGroup[] = [
     blurb:
       'The GGUF inference engine, installed as a pinned prebuilt binary into ' +
       'this app’s own folder — no root, no Python, no compiler. The build ' +
-      'matches the card: CUDA on NVIDIA, Vulkan where a render node and ' +
-      'vulkaninfo are both present, CPU otherwise. Download the quantized ' +
+      'matches the card: CUDA on Blackwell NVIDIA cards, Vulkan where a ' +
+      'render node and vulkaninfo are both present, CPU otherwise. The pinned ' +
+      'Linux CUDA archive only contains Blackwell (sm_120) kernels; older ' +
+      'cards get the CPU build rather than a binary that cannot start. ' +
+      'Download the quantized ' +
       'chat models in Get models (Qwen3, Llama 3.2, Gemma) and they show up ' +
       'in the chat provider picker, run on this machine. A GPU build is a much ' +
       'larger download than the CPU one — roughly 173 MB, and up to 766 MB ' +
@@ -496,9 +499,11 @@ approxMB: 17,
       'Runs Stable Diffusion 3.5 Medium from GGUF-quantised weights in this ' +
       'app’s own folder — no root, no Python, no PyTorch. The build matches ' +
       'the machine: Vulkan where a render node and vulkaninfo are present, CPU ' +
-      'otherwise. This is the route that fits the image model into 8 GB: the ' +
-      'quantised MMDiT stays in RAM and the 2.75 GB text encoder streams from ' +
-      'disk. About 37 MB for the Vulkan build, 27 MB for CPU.',
+      'otherwise. Upstream publishes no Linux CUDA archive, so an NVIDIA card ' +
+      'without Vulkan still gets the CPU build. This is the route that fits the ' +
+      'image model into 8 GB: the quantised MMDiT stays in RAM and the 2.75 GB ' +
+      'text encoder streams from disk. About 37 MB for the Vulkan build, 27 MB ' +
+      'for CPU.',
     unlocks: ['image-generation'],
     pkgs: [],
     needsTorch: false,
@@ -1232,6 +1237,14 @@ export interface RuntimeStatus {
    * environment has its own copy and that is the one the ONNX voice uses.
    */
   onnx: Array<{ venv: string; label: string; providers: string[] }>;
+  /**
+   * What CTranslate2 says about CUDA in the shared environment.
+   *
+   * `null` means the package could not be imported or did not answer; zero is
+   * a real answer and means the installed CTranslate2 is CPU-only. Faster
+   * Whisper's device is decided here, not by torch's build.
+   */
+  ctranslate2Cuda: number | null;
   busy: boolean;
 }
 
@@ -1255,7 +1268,7 @@ function buildProbe(): string {
   const names = [...new Set(RUNTIME_GROUPS.map((g) => g.probe))];
   return `
 import json, importlib.util
-out = {"packages": {}, "torch": None, "onnx_providers": []}
+out = {"packages": {}, "torch": None, "onnx_providers": [], "ctranslate2_cuda": None}
 for name in ${JSON.stringify(names)}:
     try:
         out["packages"][name] = True if importlib.util.find_spec(name) else False
@@ -1268,6 +1281,13 @@ try:
     # model is still on the CPU.
     import onnxruntime as _ort
     out["onnx_providers"] = list(_ort.get_available_providers())
+except Exception:
+    pass
+try:
+    # Faster Whisper's device is CTranslate2's decision, not torch's. A CUDA
+    # torch does not make a CPU-only CTranslate2 wheel transcribe on the card.
+    import ctranslate2
+    out["ctranslate2_cuda"] = int(ctranslate2.get_cuda_device_count())
 except Exception:
     pass
 try:
@@ -1373,18 +1393,21 @@ export function llamaServerPath(): string | null {
   return null;
 }
 
-/** True when the pinned server binary exists — llama.cpp's own "installed". */
-/** Which backend the installed build actually has, read off the shared
- *  libraries beside the binary rather than off its name. */
-/** What kind of llama.cpp build is installed here. */
-type LlamaKind = 'vulkan' | 'cuda' | 'cpu';
+/** What kind of llama.cpp build sits beside this binary. */
+export type LlamaKind = 'vulkan' | 'cuda' | 'cpu';
 
-function installedLlamaKind(): LlamaKind | null {
-  const p = llamaServerPath();
-  if (!p) return null;
+/**
+ * The backend a llama-server binary was built with, read off the shared
+ * libraries beside it rather than off its name.
+ *
+ * Takes the binary as an argument because the server can be overridden with
+ * LLAMACPP_SERVER; asking about the managed install would describe a different
+ * file from the one about to be spawned.
+ */
+export function llamaKindAt(bin: string | null): LlamaKind | null {
+  if (!bin) return null;
   try {
-    const dir = path.dirname(p);
-    const entries = readdirSync(dir);
+    const entries = readdirSync(path.dirname(bin));
     // CUDA first: a CUDA build bundles its own copy of the Vulkan loader's
     // neighbour libraries in some builds, and the name that proves the build is
     // the CUDA one is the ggml backend it was compiled against.
@@ -1394,6 +1417,11 @@ function installedLlamaKind(): LlamaKind | null {
   } catch {
     return null;
   }
+}
+
+/** What kind of llama.cpp build this app installed, if any. */
+export function installedLlamaKind(): LlamaKind | null {
+  return llamaKindAt(llamaServerPath());
 }
 
 /** Whether a Vulkan-capable GPU is actually usable on this machine. */
@@ -1454,6 +1482,51 @@ export function hasNvidiaGpu(): boolean {
   return spawnSync('nvidia-smi', ['-L'], { stdio: 'ignore' }).status === 0;
 }
 
+/**
+ * The pinned Linux CUDA archive's minimum compute capability.
+ *
+ * b11706's `libggml-cuda.so` carries only `sm_120a` kernels (Blackwell). The
+ * archive installs cleanly on a T4 and then dies before loading a model, so the
+ * installer must not choose it for an older card. A source build is the only
+ * way to get CUDA on compute 7.5–9.0 with this pin; the CPU build at least
+ * works.
+ */
+export const LLAMA_CUDA_MIN_COMPUTE = 12;
+
+/** Parse nvidia-smi's `compute_cap` column, e.g. "7.5", or null. */
+export function parseComputeCapability(raw: string): number | null {
+  const first = raw.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
+  if (!first) return null;
+  const value = Number(first);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** This machine's NVIDIA compute capability, or null when it cannot be read. */
+export function nvidiaComputeCapability(): number | null {
+  const smi = spawnSync(
+    'nvidia-smi',
+    ['--query-gpu=compute_cap', '--format=csv,noheader,nounits'],
+    { encoding: 'utf8' },
+  );
+  if (smi.status !== 0 || !smi.stdout) return null;
+  return parseComputeCapability(String(smi.stdout));
+}
+
+/**
+ * Whether the pinned CUDA archive has kernels for this GPU.
+ *
+ * Conservative on an unreadable capability: a CPU build that works beats a CUDA
+ * build that crashes on the first chat. The next pin needs this constant
+ * revisited if upstream starts publishing fat binaries again.
+ */
+export function computeCapabilitySupportsLlamaCuda(compute: number | null): boolean {
+  return compute !== null && compute >= LLAMA_CUDA_MIN_COMPUTE;
+}
+
+export function llamaCudaUsable(): boolean {
+  return computeCapabilitySupportsLlamaCuda(nvidiaComputeCapability());
+}
+
 async function llamaCppInstalled(): Promise<boolean> {
   const p = llamaServerPath();
   if (!p) return false;
@@ -1465,22 +1538,34 @@ async function llamaCppInstalled(): Promise<boolean> {
   }
 }
 
-/** Non-null when a better (GPU) build is available than the one installed. */
+/** The build this machine should be running, or null when nothing is installed.
+ *
+ * This is deliberately not called an "upgrade": a CUDA build with no kernels
+ * for the card has to be replaced by the CPU build, which is a downgrade in
+ * name only because only one of the two can serve a chat.
+ */
 export async function llamaCppUpgradeKind(): Promise<LlamaKind | null> {
   const kind = installedLlamaKind();
   if (kind === null) return null; // nothing installed yet — install handles it
   const best = bestLlamaKind();
-  if (!best || best === 'cpu') return null;
-  return kind === 'cpu' ? best : null;
+  return best === kind ? null : best;
 }
 
-/** The GPU build this machine should be running, or 'cpu'. */
+/** The build this machine should be running, or 'cpu'. */
 function bestLlamaKind(): LlamaKind {
   // CUDA before Vulkan. An NVIDIA card has no usable Vulkan story here (no
   // render node in a container, and the CPU build is what the Vulkan check then
   // falls back to), so an NVIDIA machine that reached the CPU build is exactly
   // the case this fixes. On a card that answers both, CUDA is the native path.
-  if (hasNvidiaGpu()) return 'cuda';
+  if (hasNvidiaGpu()) {
+    // b11706's Linux CUDA archive is Blackwell-only. Choosing it on a T4
+    // produces a binary that unpacks, then crashes in the CUDA backend before
+    // the first token. Vulkan is the next-best GPU path where it exists (not in
+    // a T4 container); otherwise the CPU build is the one that works.
+    if (llamaCudaUsable()) return 'cuda';
+    if (hasVulkan()) return 'vulkan';
+    return 'cpu';
+  }
   if (hasVulkan()) return 'vulkan';
   return 'cpu';
 }
@@ -1601,6 +1686,8 @@ type VenvProbe = {
    * which is what makes an ONNX model use the card.
    */
   onnxProviders: string[];
+  /** CUDA device count reported by CTranslate2, or null when unavailable. */
+  ctranslate2Cuda: number | null;
 };
 
 /**
@@ -1638,6 +1725,7 @@ function runVenvProbe(py: string): Promise<VenvProbe> {
           packages?: Record<string, boolean>;
           torch?: VenvProbe['torch'];
           onnx_providers?: string[];
+          ctranslate2_cuda?: number | null;
         };
         // The probe script is Python and names its fields in snake_case; this
         // is where they become the camelCase the rest of the app uses. A key
@@ -1646,9 +1734,11 @@ function runVenvProbe(py: string): Promise<VenvProbe> {
           packages: parsed.packages ?? {},
           torch: parsed.torch ?? null,
           onnxProviders: Array.isArray(parsed.onnx_providers) ? parsed.onnx_providers : [],
+          ctranslate2Cuda:
+            typeof parsed.ctranslate2_cuda === 'number' ? parsed.ctranslate2_cuda : null,
         });
       } catch {
-        resolve({ packages: {}, torch: null, onnxProviders: [] });
+        resolve({ packages: {}, torch: null, onnxProviders: [], ctranslate2Cuda: null });
       }
     });
   });
@@ -1754,6 +1844,15 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
       continue;
     }
     const probe = venvName(g) === 'venv' ? main : (side.get(venvName(g)) ?? null);
+    // `find_spec('onnxruntime')` answers yes for an empty namespace directory
+    // left behind when one wheel uninstalls the other's files. That was exactly
+    // the state a GPU install left behind: the page said "Installed", the
+    // model failed to load, and no execution provider was ever reported. The
+    // provider list is the only answer that requires the package to import.
+    if (g.probe === 'onnxruntime') {
+      installed[g.id] = probe?.onnxProviders?.length ? 'installed' : null;
+      continue;
+    }
     installed[g.id] = probe?.packages?.[g.probe] ? 'installed' : null;
   }
 
@@ -1773,6 +1872,7 @@ export async function runtimeStatus(busy = false): Promise<RuntimeStatus> {
     },
     torches,
     onnx,
+    ctranslate2Cuda: main?.ctranslate2Cuda ?? null,
     busy,
   };
 }
@@ -2773,7 +2873,28 @@ export async function installRuntimes({
       }
 
       onProgress(`Installing ${g.label} into ${where}…`);
-      await runPip(py, [...common, ...plan.pkgs], g.label);
+      // Both ONNX wheels install the same `onnxruntime` package. Uninstalling
+      // the rival can delete files that the wanted wheel's dist-info still
+      // claims are present, after which pip says "Requirement already
+      // satisfied" and leaves an import that has no providers at all. Reinstall
+      // the wanted wheel over itself so its files come back, then install the
+      // group's other packages normally. `--no-deps` is deliberate: the rival
+      // only shares the ONNX package, not numpy/protobuf, so there is nothing
+      // else that needs replacing.
+      const onnxPkg = plan.pkgs.find((p) => /^onnxruntime(?:-gpu)?(?:[<>=!~].*)?$/.test(p));
+      if (rival && onnxPkg) {
+        onProgress(`Reinstalling ${onnxPkg} so the new build is complete…`);
+        await runPip(py, [...common, '--force-reinstall', '--no-deps', onnxPkg], g.label);
+        const others = plan.pkgs.filter((p) => p !== onnxPkg);
+        // The repair above deliberately skipped dependencies. On a fresh venv
+        // there are none yet, so ask pip for the same wheel again without
+        // --no-deps: it sees the wheel installed and fills in numpy/protobuf
+        // and the rest. Doing this in the same command as the group's other
+        // packages keeps it to one extra invocation.
+        await runPip(py, [...common, onnxPkg, ...others], g.label);
+      } else {
+        await runPip(py, [...common, ...plan.pkgs], g.label);
+      }
       onProgress(`${g.label} installed.`);
     }
   }
@@ -3140,7 +3261,7 @@ async function installLlamaCpp(onProgress: (line: string) => void): Promise<void
     return;
   }
   if (await llamaCppInstalled()) {
-    onProgress('Upgrading llama.cpp to the GPU build…');
+    onProgress('Replacing the installed llama.cpp build…');
   }
   const picked = llamaAsset();
   if (!picked) {
@@ -3169,6 +3290,15 @@ async function installLlamaCpp(onProgress: (line: string) => void): Promise<void
     cuda: `CUDA ${cudaTag()}`,
     cpu: 'CPU',
   };
+  if (picked.kind === 'cpu' && hasNvidiaGpu()) {
+    const compute = nvidiaComputeCapability();
+    if (compute !== null && !computeCapabilitySupportsLlamaCuda(compute)) {
+      onProgress(
+        `The pinned Linux CUDA build has only Blackwell (sm_120) kernels, and ` +
+          `this card is compute ${compute}; installing the CPU build instead.`,
+      );
+    }
+  }
   onProgress(`Fetching llama.cpp ${LLAMA_BUILD} (${KIND_LABEL[picked.kind]} build)…`);
   const url = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${asset}`;
 

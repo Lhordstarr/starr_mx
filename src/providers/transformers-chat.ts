@@ -1,4 +1,12 @@
-import { transformersHint, transformersServerState, transformersChatModelsOnly, prepareTransformers, cachedTransformersModels } from '../transformers-chat.js';
+import {
+  cachedTransformersModels,
+  markTransformersBusy,
+  markTransformersIdle,
+  prepareTransformers,
+  transformersChatModelsOnly,
+  transformersHint,
+  transformersServerState,
+} from '../transformers-chat.js';
 import { openAICompatible } from './openai-compat.js';
 import type { Provider } from './types.js';
 
@@ -21,6 +29,18 @@ function compat(): Provider {
   return inner;
 }
 
+/** Mirrors the llama.cpp wrapper: warm means loaded and not generating. */
+function tracked<T>(inner: AsyncGenerator<T>): AsyncGenerator<T> {
+  return (async function* () {
+    markTransformersBusy();
+    try {
+      yield* inner;
+    } finally {
+      markTransformersIdle();
+    }
+  })();
+}
+
 export const transformersChat: Provider = {
   info: {
     id: 'transformers-chat',
@@ -36,8 +56,8 @@ export const transformersChat: Provider = {
     return (await transformersChatModelsOnly()).map((m) => m.id);
   },
   prepare: (model, onProgress) => prepareTransformers(model),
-  stream: (opts) => compat().stream(opts),
-  chatWithTools: (opts) => compat().chatWithTools!(opts),
+  stream: (opts) => tracked(compat().stream(opts)),
+  chatWithTools: (opts) => tracked(compat().chatWithTools!(opts)),
   listVisionModels: async () => [],
 };
 

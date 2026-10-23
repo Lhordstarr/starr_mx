@@ -91,7 +91,7 @@ put('ggml-org--gemma-3-4b-it-GGUF', 'mmproj-model-f16.gguf');
 // longer a speech-to-text GGUF repo to stand in for one. The classification
 // rule under test — the repo's catalog task, not the file name — is unchanged.
 put('Systran--faster-whisper-tiny', 'encore-Q4_K_M.gguf');
-put('city96--stable-diffusion-3.5-medium-gguf', 'turbo-Q4_K_M.gguf');
+put('second-state--stable-diffusion-3.5-medium-GGUF', 'turbo-Q4_K_M.gguf');
 // No catalog entry at all: the name is the only signal, and it says vocoder.
 put('someone--Speech-Tools', 'vocoder-f16.gguf');
 // Same file name in two repos: chat models both, and neither may shadow the
@@ -215,6 +215,62 @@ section('Refusals before anything is started');
     missing,
   );
   report('nothing was narrated for a request that never started', progress.length === 0, progress.join(' | '));
+}
+
+/* ------- 3b. A CUDA build with no kernels is refused before it crashes ------- */
+section('A CUDA build the card cannot run is refused before it starts');
+{
+  const cudaDir = join(work, 'cuda-bin');
+  const smiDir = join(work, 'smi-bin');
+  mkdirSync(cudaDir, { recursive: true });
+  mkdirSync(smiDir, { recursive: true });
+  const cudaServer = join(cudaDir, 'llama-server');
+  writeFileSync(cudaServer, '');
+  // The override is the binary the app will launch; its neighbouring
+  // libggml-cuda.so is what `llamaKindAt` reads. A managed-install marker
+  // would describe a different file and let the test pass without exercising
+  // the check that matters.
+  writeFileSync(join(cudaDir, 'libggml-cuda.so'), '');
+  // A Tesla T4, as nvidia-smi describes one. The installed CUDA library is
+  // what makes this the old broken build; the compute capability is why it
+  // has to be refused.
+  const smi = join(smiDir, 'nvidia-smi');
+  writeFileSync(
+    smi,
+    [
+      '#!/bin/sh',
+      'case "$*" in',
+      '  *compute_cap*) echo "7.5" ;;',
+      '  *-L*) echo "GPU 0: Tesla T4 (UUID: GPU-test)" ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(smi, 0o755);
+
+  const saved = {
+    server: process.env.LLAMACPP_SERVER,
+    path: process.env.PATH,
+  };
+  process.env.LLAMACPP_SERVER = cudaServer;
+  process.env.PATH = smiDir;
+  let refused = '';
+  try {
+    await prepareLlama('Qwen3-4B-Q4_K_M', () => {}).catch((err: Error) => {
+      refused = err.message;
+    });
+  } finally {
+    if (saved.server === undefined) delete process.env.LLAMACPP_SERVER;
+    else process.env.LLAMACPP_SERVER = saved.server;
+    if (saved.path === undefined) delete process.env.PATH;
+    else process.env.PATH = saved.path;
+  }
+  report(
+    'a Blackwell-only CUDA build is refused with the fix, not a libc backtrace',
+    /no kernels/.test(refused) && /CPU build/.test(refused),
+    refused || '(no error)',
+  );
 }
 
 /* ------- 4. The stand-in server ------- */

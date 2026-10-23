@@ -44,7 +44,15 @@ if (!browser) {
   process.exit(0);
 }
 
-/** Every repo a job in this app will run, straight from the app. */
+/**
+ * Every repo a job in this app will run, straight from the app.
+ *
+ * Catalog auxiliary repositories count too: the SD 3.5 VAE lives in its own
+ * repo but is downloaded as part of the image bundle, so the hub groups it
+ * under that bundle rather than rendering a standalone "no local runner" row
+ * for it. Leaving it out of this set made the test demand a row the page is
+ * right not to show.
+ */
 async function runnableRepos() {
   const repos = new Set();
   for (const task of ['stt', 'tts', 'image']) {
@@ -52,6 +60,16 @@ async function runnableRepos() {
       signal: AbortSignal.timeout(15000),
     });
     for (const m of (await res.json())?.[task] ?? []) repos.add(m.repo);
+  }
+  const catalog = await fetch(new URL('/api/catalog', APP_URL), {
+    signal: AbortSignal.timeout(15000),
+  }).then((r) => r.json());
+  for (const section of catalog?.catalog ?? []) {
+    for (const entry of section.entries ?? []) {
+      for (const file of entry.files ?? []) {
+        if (file.repo) repos.add(file.repo);
+      }
+    }
   }
   return repos;
 }

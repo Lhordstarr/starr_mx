@@ -9,7 +9,15 @@
  * (`prepare`) — so picking a downloaded Qwen3 in the composer just works,
  * whether or not llama-server was already running.
  */
-import { cachedGgufModels, llamaHint, llamaServerState, ggufChatModels, prepareLlama } from '../llamacpp.js';
+import {
+  cachedGgufModels,
+  ggufChatModels,
+  llamaHint,
+  llamaServerState,
+  markLlamaBusy,
+  markLlamaIdle,
+  prepareLlama,
+} from '../llamacpp.js';
 import { openAICompatible } from './openai-compat.js';
 import type { Provider } from './types.js';
 
@@ -38,6 +46,24 @@ function compat(): Provider {
     });
   }
   return inner;
+}
+
+/**
+ * Keeps the resource row honest for the duration of one request.
+ *
+ * `prepare` can only say "the weights are loaded"; it cannot see the stream
+ * finish. Without this wrapper the row stayed "warm" while tokens were being
+ * generated, which is the one moment it is definitely not idle.
+ */
+function tracked<T>(inner: AsyncGenerator<T>): AsyncGenerator<T> {
+  return (async function* () {
+    markLlamaBusy();
+    try {
+      yield* inner;
+    } finally {
+      markLlamaIdle();
+    }
+  })();
 }
 
 export const llamacpp: Provider = {
@@ -76,9 +102,9 @@ export const llamacpp: Provider = {
    */
   prepare: prepareLlama,
 
-  stream: (opts) => compat().stream(opts),
+  stream: (opts) => tracked(compat().stream(opts)),
 
-  chatWithTools: (opts) => compat().chatWithTools!(opts),
+  chatWithTools: (opts) => tracked(compat().chatWithTools!(opts)),
 
   /**
    * llama.cpp publishes no per-model capability list, and a GGUF can only

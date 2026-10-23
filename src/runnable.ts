@@ -87,6 +87,15 @@ export interface RunnableModel {
   /** Why it cannot run, or '' when it can. */
   reason: string;
   ready: boolean;
+  /**
+   * True when the saved assignment points at this candidate.
+   *
+   * Computed by the server because a legacy assignment names the repository,
+   * not one of several quantisations that share it. The picker must select
+   * exactly one option; comparing raw strings selected every whisper.cpp
+   * variant and let the last one win.
+   */
+  assigned?: boolean;
 }
 
 /**
@@ -136,6 +145,39 @@ function entryAnchor(entry: CatalogEntry, onDisk: Set<string>): string {
     if (onDisk.has(`${repo}::${alt}`)) return alt;
   }
   return biggest.name;
+}
+
+/**
+ * The value a picker stores for this candidate.
+ *
+ * Most catalog entries have one model per repository, so `local:<repo>` stays
+ * the assignment. whisper.cpp's quantisations share a repository, and using
+ * that same value for all of them made a `<select>` mark every option selected
+ * — the browser keeps the last, which was "Whisper tiny — Not downloaded yet"
+ * while the ready file was the small one. The anchor file disambiguates them.
+ */
+export function assignmentValue(model: Pick<RunnableModel, 'id' | 'repo'>): string {
+  return model.id ?? `local:${model.repo}`;
+}
+
+/**
+ * Whether a saved assignment points at this candidate.
+ *
+ * A stored `local:<repo>` from before unique ids is still honoured: it resolves
+ * to the first ready candidate in that repository, which is the model the user
+ * could actually run. A new selection stores the unique id.
+ */
+export function assignmentMatches(
+  model: RunnableModel,
+  value: string | null,
+  all: RunnableModel[],
+): boolean {
+  if (!value) return false;
+  if (value === assignmentValue(model)) return true;
+  if (value !== `local:${model.repo}`) return false;
+  const sameRepo = all.filter((m) => m.repo === model.repo && m.task === model.task);
+  const target = sameRepo.find((m) => m.ready) ?? sameRepo[0];
+  return target === model;
 }
 
 /** Actual on-disk file satisfying one catalog slot, or '' when absent. */
@@ -580,7 +622,13 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
 
   const out: RunnableModel[] = [];
   const catalogVisionTags = new Set<string>();
-  for (const entry of candidatesFor(task)) {
+  const entries = candidatesFor(task);
+  // Only repositories that carry more than one catalog entry need a unique
+  // assignment id. Keeping `local:<repo>` for the rest preserves every
+  // existing assignment, including the vision/tts/image ones.
+  const repoCounts = new Map<string, number>();
+  for (const entry of entries) repoCounts.set(entry.repo, (repoCounts.get(entry.repo) ?? 0) + 1);
+  for (const entry of entries) {
     // Vision models pulled from Ollama's registry have no Hub files. Their
     // presence is the daemon's model list, not the downloader's records.
     if (task === 'vision' && entry.ollamaTag) {
@@ -639,6 +687,9 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
 
     out.push({
       repo: entry.repo,
+      ...(repoCounts.get(entry.repo)! > 1
+        ? { id: `local:${entry.repo}#${entryAnchor(entry, onDisk)}` }
+        : {}),
       label: entry.label,
       task,
       file: entryAnchor(entry, onDisk),

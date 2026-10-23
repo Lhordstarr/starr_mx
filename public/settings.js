@@ -1473,11 +1473,19 @@ function renderRuntimeGroups(groups, installed, blocked = [], upgrades = {}, oll
         up.type = 'button';
         up.className = 'btn-ghost btn-tiny';
         up.textContent =
-          kind === 'vulkan' ? 'Upgrade to GPU (Vulkan)' : kind === 'gpu' ? 'Upgrade to GPU (CUDA)' : `Upgrade to ${kind}`;
+          kind === 'vulkan'
+            ? 'Upgrade to GPU (Vulkan)'
+            : kind === 'gpu'
+              ? 'Upgrade to GPU (CUDA)'
+              : kind === 'cpu'
+                ? 'Replace with CPU build'
+                : `Upgrade to ${kind}`;
         up.title =
           kind === 'gpu'
             ? 'Reinstall this with the GPU build of ONNX Runtime — the device is set to Auto so the card is used'
-            : 'Reinstall this with the better build';
+            : kind === 'cpu'
+              ? 'The installed CUDA build has no kernels for this card; replace it with the CPU build so chat works'
+              : 'Reinstall this with the better build';
         up.addEventListener('click', () => {
           if (kind === 'gpu') {
             // The GPU build of ONNX Runtime is chosen by the device, so the
@@ -2352,7 +2360,6 @@ async function renderAssignments() {
     host.append(hfNote('Could not read what is runnable.'));
     return;
   }
-  const assigned = data.assigned ?? {};
   host.innerHTML = '';
 
   for (const key of ['vision', 'stt', 'tts', 'image']) {
@@ -2395,7 +2402,11 @@ async function renderAssignments() {
       opt.value = value;
       opt.textContent = m.ready ? m.label : `${m.label} — ${m.reason}`;
       opt.disabled = !m.ready;
-      if (assigned[key] === value) opt.selected = true;
+      // The server resolves a legacy repo-level assignment to one candidate.
+      // Comparing `assigned[key] === value` selected every whisper.cpp variant
+      // that shared `local:ggerganov/whisper.cpp`, and the browser kept the
+      // last one — which was not the ready model.
+      if (m.assigned) opt.selected = true;
       select.append(opt);
     }
 
@@ -2933,11 +2944,19 @@ async function refreshHub() {
   // which knows perfectly well what the set is.
   const byRepo = new Map();
   for (const file of files) {
-    const entry = catalogEntryForRepo(file.repo);
+    // Match the file, not just its repository. whisper.cpp has one entry per
+    // quantisation behind the same repo id; using the first entry labelled the
+    // downloaded small file as large-v3-turbo and counted the large weights as
+    // missing.
+    const entry = catalogEntryForFile(file.repo, file.file);
     // `file.repo`, not `entry.repo`: most downloads have no catalog entry at
     // all, and dereferencing the entry in the non-bundle branch threw a
     // TypeError that silently emptied the whole hub.
-    const key = entry?.bundle ? `${entry.repo}#bundle` : file.repo;
+    const key = entry
+      ? entry.bundle
+        ? `${entry.repo}#bundle`
+        : catalogEntryKey(entry)
+      : file.repo;
     if (!byRepo.has(key)) byRepo.set(key, { entry, members: [] });
     byRepo.get(key).members.push(file);
   }
@@ -5468,7 +5487,7 @@ function renderLocalDownload(d, resolved) {
 
   // Find the catalog entry for this repo, so the Run affordance and its gating
   // are the same rules the catalog uses — not a second guess written twice.
-  const entry = catalogEntryForRepo(d.repo);
+  const entry = catalogEntryForFile(d.repo, d.file);
   const file = entry?.files?.find((f) => f.name === d.file);
 
   // Both actions take two clicks, so a stray one can't remove gigabytes of
@@ -5594,20 +5613,53 @@ function renderLocalDownload(d, resolved) {
   return row;
 }
 
+function catalogEntriesForRepo(repo) {
+  const out = [];
+  for (const section of catalogData) {
+    for (const entry of section.entries) {
+      if (entry.repo === repo) out.push(entry);
+    }
+  }
+  return out;
+}
+
 function catalogEntryForRepo(repo) {
   // Main repo first, so a catalog entry that also happens to be another
   // entry's auxiliary source still resolves to itself.
-  for (const section of catalogData) {
-    for (const entry of section.entries) {
-      if (entry.repo === repo) return entry;
-    }
+  return catalogEntriesForRepo(repo)[0] ?? null;
+}
+
+/**
+ * The catalog entry whose file this download actually is.
+ *
+ * `catalogEntryForRepo` returns the first entry for a repository. That is
+ * wrong for whisper.cpp, where four quantisations share one repository: the
+ * small file on disk was being labelled "large-v3-turbo" and reported as
+ * missing the large weights. Match the file first, then fall back to the only
+ * entry, a bundle, or no entry at all.
+ */
+function catalogEntryForFile(repo, file) {
+  const entries = catalogEntriesForRepo(repo);
+  for (const entry of entries) {
+    const specs = entry.files ?? [];
+    if (specs.some((f) => f.name === file || (f.oneOf ?? []).includes(file))) return entry;
   }
   for (const section of catalogData) {
     for (const entry of section.entries) {
-      if ((entry.files ?? []).some((f) => f.repo === repo)) return entry;
+      const specs = entry.files ?? [];
+      if (specs.some((f) => f.repo === repo && (f.name === file || (f.oneOf ?? []).includes(file)))) {
+        return entry;
+      }
     }
   }
-  return null;
+  const bundle = entries.find((entry) => entry.bundle);
+  if (bundle) return bundle;
+  return entries.length === 1 ? entries[0] : null;
+}
+
+/** A stable key for the files that make up one catalog entry. */
+function catalogEntryKey(entry) {
+  return `${entry.repo}#${(entry.files ?? []).map((f) => f.name).join('|')}`;
 }
 
 /** Downloads list, plus whatever the runner needs, so Run buttons are current. */

@@ -73,14 +73,20 @@ from the same Stop button, shut down after ten idle minutes
 (`OLLAMA_IDLE_MS`), and are killed when the app exits.
 
 llama.cpp is installed as the build that suits the machine: **CUDA** on an NVIDIA
-card, **Vulkan** where a render node and `vulkaninfo` are both present, **CPU**
-otherwise. Upstream publishes the CUDA 12.8 and 13.4 builds separately, so the
-one matching the CUDA runtime already on the machine is chosen — otherwise the
-server loads and then fails on the first device. Its CUDA runtime libraries come
-down with it (594 MB, once) only when the machine has none of its own, which a
-Colab runtime, a CUDA toolkit install or torch's own `nvidia-*` wheels all
-already provide. A machine on the CPU build with a GPU it could use is offered a
-one-click upgrade to the right one.
+card the pinned archive can address, **Vulkan** where a render node and
+`vulkaninfo` are both present, **CPU** otherwise. Upstream publishes the CUDA
+12.8 and 13.4 builds separately, so the one matching the CUDA runtime already
+on the machine is chosen — otherwise the server loads and then fails on the
+first device. Its CUDA runtime libraries come down with it (594 MB, once) only
+when the machine has none of its own, which a Colab runtime, a CUDA toolkit
+install or torch's own `nvidia-*` wheels all already provide.
+
+The pinned Linux CUDA archive (`b11706`) contains only Blackwell `sm_120a`
+kernels. On an older card — a Tesla T4, for example — it installs and then
+crashes before the first token, so the installer chooses the CPU build instead
+and Settings → Backends says why. Using CUDA on those cards needs a source build
+against that architecture; the prebuilt archive cannot do it. A machine on the
+CPU build with a GPU the pinned archive *can* use is offered a one-click upgrade.
 
 ### Security
 

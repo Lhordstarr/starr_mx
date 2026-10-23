@@ -25,6 +25,8 @@ import {
   finishProcess,
   registerProcess,
   registerStopHandler,
+  setProcessDevice,
+  setProcessWarm,
   unregisterStopHandler,
 } from './processes.js';
 
@@ -303,10 +305,28 @@ function clearIdle() {
 
 function touchIdle() {
   clearIdle();
+  const jobId = serving?.jobId;
   const ms = idleMs();
-  if (!Number.isFinite(ms) || ms <= 0) return;
+  if (!Number.isFinite(ms) || ms <= 0) {
+    if (jobId) setProcessWarm(jobId, false);
+    return;
+  }
+  const until = Date.now() + ms;
+  if (jobId) setProcessWarm(jobId, true, until);
   idleTimer = setTimeout(() => void stopTransformersServer(), ms);
   idleTimer.unref?.();
+}
+
+/** A chat request is in flight: the server is working, not idle. */
+export function markTransformersBusy(): void {
+  if (!serving) return;
+  clearIdle();
+  if (serving.jobId) setProcessWarm(serving.jobId, false);
+}
+
+/** The request is done: restart the idle clock and publish its deadline. */
+export function markTransformersIdle(): void {
+  if (serving) touchIdle();
 }
 
 export async function stopTransformersServer(byUser = false): Promise<void> {
@@ -331,7 +351,7 @@ export async function stopTransformersServer(byUser = false): Promise<void> {
   if (serving === current) serving = null;
 }
 
-async function waitForReady(child: ChildProcess, model: TransformersModel) {
+async function waitForReady(child: ChildProcess, model: TransformersModel): Promise<string | null> {
   const started = Date.now();
   for (;;) {
     if (child.exitCode !== null || child.signalCode) {
@@ -339,7 +359,12 @@ async function waitForReady(child: ChildProcess, model: TransformersModel) {
     }
     try {
       const res = await fetch(`http://127.0.0.1:${port()}/health`, { signal: AbortSignal.timeout(1500) });
-      if (res.ok) return;
+      if (res.ok) {
+        // The runner resolves "auto" itself. Ask it rather than repeating the
+        // guess here: torch may have fallen back to CPU after the build check.
+        const health = (await res.json().catch(() => null)) as { device?: unknown } | null;
+        return typeof health?.device === 'string' ? health.device : null;
+      }
     } catch (e) {
       /* not listening yet */
     }
@@ -383,7 +408,7 @@ async function start(bin: string, model: TransformersModel) {
     }
   });
 
-  await waitForReady(child, model);
+  const resolvedDevice = await waitForReady(child, model);
 
   // Find the real python server pid for the resource manager.
   let serverPid = child.pid ?? -1;
@@ -399,11 +424,13 @@ async function start(bin: string, model: TransformersModel) {
     kind: 'llm',
     script: 'chat_transformers.py',
     pid: serverPid > 0 ? serverPid : (child.pid ?? -1),
+    repo: model.repo,
     device: 'auto',
   });
   serving.jobId = job.id;
   attachChild(job.id, child);
   registerStopHandler(job.id, () => stopTransformersServer(true));
+  if (resolvedDevice) setProcessDevice(job.id, resolvedDevice);
 
   touchIdle();
 }
@@ -415,14 +442,17 @@ export async function prepareTransformers(modelId: string): Promise<void> {
   if (!model.chat) throw new Error(`transformers: ${model.repo} is not a chat model — ${model.why}.`);
   if (!bin) throw new Error('transformers is not available. Install torch and transformers under Settings → Runtimes, then try again.');
 
-  if (serving?.model === model.id) { touchIdle(); return; }
+  if (serving?.model === model.id) { markTransformersBusy(); return; }
   if (starting) {
     await starting.catch(() => undefined);
-    if (serving?.model === model.id) { touchIdle(); return; }
+    if (serving?.model === model.id) { markTransformersBusy(); return; }
   }
   const attempt = start(bin, model);
   starting = attempt;
-  try { await attempt; } finally { if (starting === attempt) starting = null; }
+  try {
+    await attempt;
+    markTransformersBusy();
+  } finally { if (starting === attempt) starting = null; }
 }
 
 export function transformersHint(): string {

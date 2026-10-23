@@ -169,22 +169,52 @@ def decode_audio(path):
 
 
 def find_graphs(model_dir):
-    """Encoder + merged decoder, preferring the int8 export the catalog ships."""
+    """Every encoder + merged-decoder pair, best first.
+
+    A graph can be present and still fail to open. The int8 export this app
+    catalogued is one: onnxruntime 1.26 rejects its QDQ weights with
+    "Missing required scale" before a single token is generated. The repository
+    also ships an fp32 export, and that one loads. Returning every pair lets the
+    caller try the next graph instead of turning a bad quantisation into a
+    failed transcription with no path forward.
+    """
     onnx_dir = os.path.join(model_dir, "onnx")
     pairs = [
         ("encoder_model_quantized.onnx", "decoder_model_merged_quantized.onnx"),
         ("encoder_model.onnx", "decoder_model_merged.onnx"),
         ("encoder_model_int8.onnx", "decoder_model_merged_int8.onnx"),
+        ("encoder_model_uint8.onnx", "decoder_model_merged_uint8.onnx"),
+        ("encoder_model_q4.onnx", "decoder_model_merged_q4.onnx"),
+        ("encoder_model_bnb4.onnx", "decoder_model_merged_bnb4.onnx"),
     ]
+    found = []
+    seen = set()
     for enc, dec in pairs:
         ep, dp = os.path.join(onnx_dir, enc), os.path.join(onnx_dir, dec)
         if os.path.isfile(ep) and os.path.isfile(dp):
-            return ep, dp
+            key = (ep, dp)
+            if key not in seen:
+                seen.add(key)
+                found.append(key)
+    if found:
+        return found
+
+    # An unfamiliar export can still be a usable pair. Pair the encoder and
+    # merged decoder by suffix where the names agree, then fall back to the
+    # first of each rather than refusing a directory that has both shapes.
     encoders = sorted(glob.glob(os.path.join(onnx_dir, "encoder_model*.onnx")))
     decoders = sorted(glob.glob(os.path.join(onnx_dir, "decoder_model_merged*.onnx")))
-    if encoders and decoders:
-        return encoders[0], decoders[0]
-    return None, None
+    for enc in encoders:
+        suffix = os.path.basename(enc)[len("encoder_model") :]
+        for dec in decoders:
+            if os.path.basename(dec)[len("decoder_model_merged") :] == suffix:
+                key = (enc, dec)
+                if key not in seen:
+                    seen.add(key)
+                    found.append(key)
+    if not found and encoders and decoders:
+        found.append((encoders[0], decoders[0]))
+    return found
 
 
 def main() -> int:
@@ -205,8 +235,8 @@ def main() -> int:
         return 1
 
     try:
-        encoder_path, decoder_path = find_graphs(model_dir)
-        if not encoder_path or not decoder_path:
+        graph_pairs = find_graphs(model_dir)
+        if not graph_pairs:
             print(
                 json.dumps(
                     {
@@ -221,8 +251,26 @@ def main() -> int:
 
         ort = prepare_runtime()
         providers = pick_providers(ort, device)
-        enc_sess = open_session(ort, encoder_path, providers)
-        dec_sess = open_session(ort, decoder_path, providers)
+        enc_sess = None
+        dec_sess = None
+        failures = []
+        for encoder_path, decoder_path in graph_pairs:
+            try:
+                enc_sess = open_session(ort, encoder_path, providers)
+                dec_sess = open_session(ort, decoder_path, providers)
+                break
+            except Exception as exc:
+                # A graph that will not open is a bad export, not necessarily
+                # a bad machine. Keep the reason and try the next quantisation.
+                failures.append(
+                    f"{os.path.basename(encoder_path)}: {type(exc).__name__}: {exc}"
+                )
+                enc_sess = None
+                dec_sess = None
+        if enc_sess is None or dec_sess is None:
+            detail = failures[-1] if failures else "no graph opened"
+            print(json.dumps({"error": f"no ONNX Whisper graph could be loaded — {detail}"}))
+            return 1
         landed = provider_label(enc_sess.get_providers())
         # Read before any model work so the resource row is right even when the
         # tokenizer or the audio later fails.

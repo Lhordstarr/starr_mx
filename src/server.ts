@@ -54,8 +54,15 @@ import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGe
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
 import { ggufModels, llamaContextSize, llamaServerState, stopLlamaServer } from './llamacpp.js';
 import { stopTtsEngines } from './tts-engine.js';
-import { llamaCppUpgradeKind } from './runtimes.js';
-import { stopTransformersServer, transformersChatModels } from './transformers-chat.js';
+import {
+  installedLlamaKind,
+  llamaCppUpgradeKind,
+  computeCapabilitySupportsLlamaCuda,
+  nvidiaComputeCapability,
+} from './runtimes.js';
+import { stopTransformersServer, transformersChatModels, transformersServerState } from './transformers-chat.js';
+import { sdCppInstalled, sdCppKind } from './sdcpp.js';
+import { whisperCppInstalled, whisperDevice } from './whispercpp.js';
 import { fileVramEstimate, vramFit } from './vram.js';
 import { allProviders, providerOrder } from './providers/index.js';
 import { discoverLocalServers, discoveredProvider, type DiscoveredServer } from './discovery.js';
@@ -68,7 +75,7 @@ import {
   type TaskKey,
 } from './assignments.js';
 import { CATALOG } from './model-catalog.js';
-import { runnableModels, type RunTask } from './runnable.js';
+import { assignmentMatches, runnableModels, type RunTask } from './runnable.js';
 import { parseVisionAssignment, preprocessVision } from './vision.js';
 import {
   finishTransfer,
@@ -421,9 +428,12 @@ app.get('/api/dictation', async (_req, res) => {
 
   // Mark the assigned model so the UI can show the choice without a second
   // round trip, and so a stale assignment is visibly stale rather than silent.
+  // `assignmentMatches` resolves a legacy repo-level value to one ready
+  // quantisation; comparing `local:<repo>` directly marked all four
+  // whisper.cpp variants assigned.
   local = local.map((m) => ({
     ...m,
-    assigned: assigned.stt === `local:${m.repo}`,
+    assigned: assignmentMatches(m, assigned.stt, local),
   }));
 
   res.json({ providers: entries, local, assigned });
@@ -443,10 +453,15 @@ app.get('/api/runnable', async (req, res) => {
     ? await providerRegistry().ollama.listVisionModels?.().catch(() => [])
     : undefined;
   const out: Record<string, unknown> = {};
+  const saved = assignments();
   for (const t of tasks) {
-    out[t] = await runnableModels(t, t === 'vision' ? { visionModels } : {});
+    const models = await runnableModels(t, t === 'vision' ? { visionModels } : {});
+    out[t] = models.map((m) => ({
+      ...m,
+      assigned: assignmentMatches(m, saved[t], models),
+    }));
   }
-  res.json({ ...out, assigned: assignments() });
+  res.json({ ...out, assigned: saved });
 });
 
 /**
@@ -1087,7 +1102,8 @@ app.get('/api/runtimes', async (_req, res) => {
   // Runtime upgrades available for the installed build (e.g. a CPU build on a
   // machine with a GPU). The UI offers a one-click reinstall for these.
   const upgrades: Record<string, string> = {};
-  if (await llamaCppUpgradeKind()) upgrades['llama-cpp'] = 'vulkan';
+  const llamaUpgrade = await llamaCppUpgradeKind();
+  if (llamaUpgrade) upgrades['llama-cpp'] = llamaUpgrade;
   for (const id of onnxGpuUpgradeGroups(status, presence, device)) upgrades[id] = 'gpu';
   const payload = {
     runtimes: status,
@@ -1114,14 +1130,57 @@ app.get('/api/runtimes', async (_req, res) => {
  */
 app.get('/api/backends', async (_req, res) => {
   try {
-    const [status, servers] = await Promise.all([
+    const [status, servers, sdInstalled, whisperInstalled] = await Promise.all([
       runtimeStatus(runtimeBusy),
       discoverLocalServers(true).catch(() => []),
+      sdCppInstalled().catch(() => false),
+      whisperCppInstalled().catch(() => false),
     ]);
+    // The Python row is about Python packages. It used to list every group,
+    // including Ollama and the native binaries, so it claimed work done by
+    // four other runtimes and made "which backend is on the GPU?" unanswerable.
+    const pythonGroups = RUNTIME_GROUPS.filter(
+      (g) => !['ollama', 'llama-cpp', 'whisper-cpp', 'stable-diffusion-cpp'].includes(g.installer ?? ''),
+    );
+    const sdJob = listProcesses().active.find((p) => p.script === 'sd-cli');
+    const llama = llamaServerState();
+    const transformers = transformersServerState();
+    const llamaCompute = nvidiaComputeCapability();
     const backends = await backendReports({
       python: { venv: status.venv, torch: status.torch, torches: status.torches },
-      groups: RUNTIME_GROUPS.map((g) => ({ id: g.id, label: g.label })),
+      // Only what is actually installed. Listing every Python group made the
+      // row read as if Faster Whisper and Kokoro were running before they had
+      // ever been downloaded.
+      groups: pythonGroups
+        .filter((g) => status.installed[g.id])
+        .map((g) => ({ id: g.id, label: g.label })),
       servers: servers.map((s) => ({ id: s.id, label: s.label, baseUrl: s.baseUrl })),
+      ollamaInstalled: Boolean(status.installed.ollama),
+      native: {
+        onnx: status.onnx,
+        llama: {
+          ...llama,
+          kind: installedLlamaKind(),
+          cudaCompute: llamaCompute,
+          cudaUsable: computeCapabilitySupportsLlamaCuda(llamaCompute),
+        },
+        transformers: {
+          ...transformers,
+          cuda: status.torch.cudaAvailable,
+          deviceName: status.torch.deviceName,
+        },
+        sd: {
+          installed: sdInstalled,
+          kind: sdCppKind(),
+          activeDevice: sdJob ? (sdJob.resolvedDevice ?? sdJob.device) : null,
+          activePid: sdJob?.pid ?? null,
+        },
+        whisper: { installed: whisperInstalled, device: whisperDevice() },
+        fasterWhisper: {
+          installed: Boolean(status.installed['faster-whisper']),
+          cudaDevices: status.ctranslate2Cuda,
+        },
+      },
     });
     res.json({ backends, at: Date.now() });
   } catch (err) {
