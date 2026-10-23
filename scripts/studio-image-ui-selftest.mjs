@@ -10,6 +10,9 @@
  *  - choosing "On this PC" returned from syncControls() before rebuilding the
  *    size list, leaving the previously selected cloud provider's 1024x1024 (or
  *    1536x640) in place for a 512px turbo checkpoint.
+ *  - the local request hard-coded four sampler steps, which is right for a
+ *    turbo checkpoint and leaves SD 3.5 Medium as noise. The count now comes
+ *    from the catalog through /api/runnable.
  *
  * This visits /studio with a stubbed catalog and runner, so it needs neither a
  * downloaded model nor a GPU. The interception is what makes it fail on the
@@ -63,14 +66,23 @@ const FAKE_MODEL = {
   repo: 'stub/sd-turbo',
   label: 'Stub SD Turbo',
   file: 'unet/diffusion_pytorch_model.fp16.safetensors',
+  // Deliberately not the Studio's old hard-coded 4: a model-aware client must
+  // carry the catalog's recommendation through to the runner request.
+  steps: 20,
+  // A model with a preferred, capped canvas. The Studio must start here and
+  // must not offer the larger sizes that this model says are known bad.
+  width: 384,
+  height: 384,
+  maxWidth: 384,
+  maxHeight: 384,
   ready: true,
   reason: '',
 };
 
 const DONE = {
   path: '/tmp/starr-studio-selftest/img-stub.png',
-  width: 512,
-  height: 512,
+  width: 384,
+  height: 384,
   device: 'cuda',
 };
 
@@ -148,6 +160,7 @@ try {
   let idc = 0;
   const pending = new Map();
   let cdp;
+  let requestedImage = null;
 
   async function fulfill(requestId, contentType, body) {
     await cdp('Fetch.fulfillRequest', {
@@ -181,6 +194,7 @@ try {
       return;
     }
     if (/\/api\/infer\/image(?:\?|$)/.test(url)) {
+      requestedImage = JSON.parse(request.postData ?? '{}');
       await fulfill(
         requestId,
         'text/event-stream',
@@ -266,7 +280,7 @@ try {
   })()`);
 
   const sizesReady = await waitFor(
-    `!!document.querySelector('#studio-img-size option[value="512x512"]')`,
+    `!!document.querySelector('#studio-img-size option[value="384x384"]')`,
   );
   const sizes = JSON.parse(
     (await evalJs(
@@ -274,13 +288,13 @@ try {
     )) ?? '[]',
   );
   report(
-    'choosing this PC replaces the cloud sizes with local ones',
-    sizesReady && sizes.join(',') === '512x512,768x768,1024x1024',
+    'choosing this PC replaces the cloud sizes with the model\'s local sizes',
+    sizesReady && sizes.join(',') === '256x256,384x384',
     sizes.join(',') || '(empty)',
   );
 
   const selectedSize = await evalJs(`document.getElementById('studio-img-size').value`);
-  report('local output starts at 512x512, the size turbo checkpoints are trained for', selectedSize === '512x512', selectedSize);
+  report('local output starts at the model\'s preferred canvas', selectedSize === '384x384', selectedSize);
 
   const picked = await evalJs(`document.getElementById('model-current').textContent`);
   report('the first ready local model is chosen for the pill', /Stub SD Turbo/.test(picked ?? ''), picked ?? '');
@@ -302,12 +316,23 @@ try {
     await evalJs(`JSON.stringify([...document.querySelectorAll('#messages img')].map(i => i.getAttribute('src')))`),
   );
 
+  report(
+    'the runner request uses the selected model\'s catalog step count',
+    requestedImage?.steps === 20,
+    JSON.stringify(requestedImage),
+  );
+  report(
+    'the runner request keeps the selected local size',
+    requestedImage?.width === 384 && requestedImage?.height === 384,
+    JSON.stringify(requestedImage),
+  );
+
   if (rendered) {
     const meta = await evalJs(`(() => {
       const img = document.querySelector('#messages img[src="/api/infer/out/img-stub.png"]');
       return img?.closest('.turn, .message, article')?.textContent ?? img?.parentElement?.textContent ?? '';
     })()`);
-    report('the turn labels the size the runner actually produced', /512\s*[×x]\s*512/.test(meta ?? ''), meta ?? '');
+    report('the turn labels the size the runner actually produced', /384\s*[×x]\s*384/.test(meta ?? ''), meta ?? '');
   }
 
   const status = await evalJs(`document.getElementById('status').textContent`);

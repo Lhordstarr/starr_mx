@@ -307,8 +307,22 @@ export function mountResources() {
     rocm: 'GPU (ROCm)',
     nvidia: 'GPU (CUDA)',
     amd: 'GPU (ROCm)',
+    vulkan: 'GPU (Vulkan)',
+    metal: 'GPU (Metal)',
     auto: 'detecting…',
   };
+
+  /**
+   * The CLI's own device names carry an index (`Vulkan0`, `Vulkan1`, `CUDA0`).
+   * The manager should say what kind of device that is, not echo a token from
+   * a backend listing.
+   */
+  function deviceLabel(device) {
+    if (/^vulkan\d+$/i.test(device)) return 'GPU (Vulkan)';
+    if (/^cuda\d+$/i.test(device)) return 'GPU (CUDA)';
+    if (/^metal\d+$/i.test(device)) return 'GPU (Metal)';
+    return DEVICE_LABEL[device] ?? device;
+  }
 
   /**
    * Rows are made once and rewritten in place, keyed by what they describe.
@@ -646,7 +660,7 @@ export function mountResources() {
         // The runner's own answer where it has one: the request ("auto") is
         // not the truth on a machine that cannot run on a GPU at all.
         const device = j.resolvedDevice ?? j.device;
-        parts.push(DEVICE_LABEL[device] ?? device, `via ${rts}`, `pid ${j.pid}`);
+        parts.push(deviceLabel(device), `via ${rts}`, `pid ${j.pid}`);
         fillRow(slot, {
           item: j,
           name: `${isWarm ? 'Voice engine' : (TASK_LABEL[j.kind] ?? 'Working')} · ${j.repo ?? j.script}`,

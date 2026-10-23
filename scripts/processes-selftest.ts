@@ -88,6 +88,12 @@ await test('runtimes come from what the script imports', () => {
   assert.deepEqual(tts.runtimes, ['torch', 'kokoro']);
   const hf = registerProcess({ kind: 'stt', script: 'transcribe.py', pid: 1, device: 'nvidia' });
   assert.deepEqual(hf.runtimes, ['torch', 'transformers']);
+  // The native SD 3.5 runner spawns sd-cli directly, so it needs its own row
+  // in this map; without it the resource manager would claim the job uses no
+  // runtime at all.
+  const sd = registerProcess({ kind: 'image', script: 'sd-cli', pid: 1, device: 'auto' });
+  assert.deepEqual(sd.runtimes, ['stable-diffusion-cpp']);
+  finishProcess(sd.id, 0);
 });
 
 await test('an unknown script reports no runtimes rather than inventing them', () => {

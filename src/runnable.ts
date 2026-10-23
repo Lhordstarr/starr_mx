@@ -69,6 +69,19 @@ export interface RunnableModel {
    * the original bytes and their own audio libraries.
    */
   driver?: 'whisper-cpp' | 'faster-whisper' | 'transformers' | 'onnx';
+  /**
+   * Sampler steps the catalog recommends, for image models. A turbo checkpoint
+   * is complete in four; SD 3.5 Medium at four is still noise. The Studio used
+   * to send the turbo number to every model because the browser had no way to
+   * know which one it had selected.
+   */
+  steps?: number;
+  /** Preferred canvas for an image model; the Studio starts here. */
+  width?: number;
+  height?: number;
+  /** Largest canvas the Studio should offer, when a bigger one is known bad. */
+  maxWidth?: number;
+  maxHeight?: number;
   /** False when a required runtime is blocked on this interpreter. */
   blocked: boolean;
   /** Why it cannot run, or '' when it can. */
@@ -634,6 +647,11 @@ export async function runnableModels(task: RunTask, deps: RunnableDeps = {}): Pr
       runtimes,
       missing: missingRuntimes,
       driver: driverFor(requires),
+      ...(typeof entry.run?.steps === 'number' ? { steps: entry.run.steps } : {}),
+      ...(typeof entry.run?.width === 'number' ? { width: entry.run.width } : {}),
+      ...(typeof entry.run?.height === 'number' ? { height: entry.run.height } : {}),
+      ...(typeof entry.run?.maxWidth === 'number' ? { maxWidth: entry.run.maxWidth } : {}),
+      ...(typeof entry.run?.maxHeight === 'number' ? { maxHeight: entry.run.maxHeight } : {}),
       blocked: false,
       reason,
       ready: !reason,

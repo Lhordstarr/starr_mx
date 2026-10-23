@@ -80,6 +80,19 @@ export interface CatalogEntry {
     requires: string[];
     /** Sensible starting point for the Run panel; the user can change it. */
     steps?: number;
+    /**
+     * Preferred canvas for an image model, in pixels. The Studio starts at
+     * this size instead of its generic 512; 384 is the largest canvas SD 3.5
+     * Medium produces reliably on this laptop's Vulkan card.
+     */
+    width?: number;
+    height?: number;
+    /**
+     * Largest canvas the Studio offers for this model. Set only when a known
+     * failure makes a larger size a false promise.
+     */
+    maxWidth?: number;
+    maxHeight?: number;
   };
 }
 
@@ -496,8 +509,9 @@ export const CATALOG: CatalogSection[] = [
           'from disk, and runs the UNet on the Vulkan card. That split is what ' +
           'fits an 8 GB laptop. The VAE is not in the quantised repo, so this ' +
           'card fetches an ungated copy of the official VAE too — no Hugging ' +
-          'Face token is required. Expect several minutes per 512×512 image ' +
-          'on this hardware.',
+          'Face token is required. The Run panel starts at 384×384 and eight ' +
+          'steps: that is the largest canvas that stayed coherent on this ' +
+          'card, and it takes roughly a quarter of an hour.',
         runtime: 'stable-diffusion.cpp',
         files: [
           { name: 'sd3.5_medium-Q4_0.gguf', label: 'UNet Q4_0', bytes: 2079836768 },
@@ -517,7 +531,18 @@ export const CATALOG: CatalogSection[] = [
         ],
         bundle: true,
         bundleMB: 5208,
-        run: { kind: 'image', requires: ['stable-diffusion-cpp'], steps: 20 },
+        run: {
+          kind: 'image',
+          requires: ['stable-diffusion-cpp'],
+          // Eight steps at 384 is the largest canvas that came out coherent
+          // here. A 512 canvas sampled at the same settings decoded to wood
+          // grain: the card's compute buffers exceed what RADV can handle.
+          steps: 8,
+          width: 384,
+          height: 384,
+          maxWidth: 384,
+          maxHeight: 384,
+        },
       },
 
   {

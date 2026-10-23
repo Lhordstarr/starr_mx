@@ -95,6 +95,7 @@ import {
   type RuntimeGroup,
 } from './runtimes.js';
 import { generateImageLocal, speak, transcribe } from './infer.js';
+import { SDCPP_DEFAULT_HEIGHT, SDCPP_DEFAULT_WIDTH, isSdCppRepo } from './sdcpp.js';
 import {
   addCustomProvider,
   customApiKey,
@@ -1569,8 +1570,10 @@ app.post('/api/infer/image', async (req, res) => {
     return res.status(400).json({ error: `Prompt is too long (${MAX_PROMPT_LENGTH} max).` });
   }
   const steps = Math.min(Math.max(Number(req.body?.steps) || 4, 1), 50);
-  const width = Math.min(Math.max(Number(req.body?.width) || 512, 64), 1024);
-  const height = Math.min(Math.max(Number(req.body?.height) || 512, 64), 1024);
+  const defaultWidth = isSdCppRepo(repo) ? SDCPP_DEFAULT_WIDTH : 512;
+  const defaultHeight = isSdCppRepo(repo) ? SDCPP_DEFAULT_HEIGHT : 512;
+  const width = Math.min(Math.max(Number(req.body?.width) || defaultWidth, 64), 1024);
+  const height = Math.min(Math.max(Number(req.body?.height) || defaultHeight, 64), 1024);
   withPythonLog(res, async (send) => {
     const { result } = await generateImageLocal({
       repo, file, prompt, steps, width, height, device,

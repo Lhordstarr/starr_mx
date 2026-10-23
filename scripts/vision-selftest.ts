@@ -248,6 +248,11 @@ await check('the SD 3.5 bundle is runnable once its runtime is installed', async
   assert.equal(sd.missing.length, 0);
   assert.ok(sd.runtimes['stable-diffusion-cpp']);
   assert.equal(isSdCppRepo(sd.repo), true);
+  assert.equal(sd.steps, 8, 'the catalog supplies the step count the Studio needs');
+  assert.equal(sd.width, 384, 'the catalog starts at the canvas this card can decode');
+  assert.equal(sd.height, 384);
+  assert.equal(sd.maxWidth, 384, 'larger canvases are not offered for this model');
+  assert.equal(sd.maxHeight, 384);
 });
 
 await check('a missing VAE is reported instead of claiming the card is complete', async () => {

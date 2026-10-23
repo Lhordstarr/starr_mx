@@ -3742,7 +3742,7 @@ function openRunPanel(entry, file) {
     inputs.steps = add('Steps', steps);
     const size = document.createElement('input');
     size.type = 'text';
-    size.value = '512x512';
+    size.value = `${entry.run.width ?? 512}x${entry.run.height ?? 512}`;
     inputs.size = add('Size', size);
   }
 
@@ -3787,6 +3787,11 @@ function openRunPanel(entry, file) {
         );
       } else {
         const [w, h] = String(inputs.size.value).toLowerCase().split('x').map((n) => Number(n) || 512);
+        const maxW = entry.run.maxWidth ?? 1024;
+        const maxH = entry.run.maxHeight ?? 1024;
+        if (w > maxW || h > maxH) {
+          throw new Error(`This model is capped at ${maxW}×${maxH} on this machine.`);
+        }
         result = await streamInference(
           '/api/infer/image',
           {

@@ -17,6 +17,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 
 import { listDownloads, modelsDir } from './huggingface.js';
+import {
+  attachChild,
+  finishProcess,
+  registerProcess,
+  setProcessDevice,
+} from './processes.js';
 import { runtimesDir } from './paths.js';
 import type { Device } from './runtimes.js';
 
@@ -193,6 +199,15 @@ export function isSdCppRepo(repo: string): boolean {
   return repo === 'second-state/stable-diffusion-3.5-medium-GGUF';
 }
 
+/**
+ * The canvas this card produces coherently. A 512×512 request sampled into
+ * wood grain on the Radeon here; 384×384 at eight steps produced the intended
+ * apple. Keeping the default honest matters more than matching a desktop GPU's
+ * usual size.
+ */
+export const SDCPP_DEFAULT_WIDTH = 384;
+export const SDCPP_DEFAULT_HEIGHT = 384;
+
 function findFile(files: string[], pattern: RegExp): string | undefined {
   return files.filter((f) => pattern.test(f)).sort()[0];
 }
@@ -356,6 +371,23 @@ export async function generateWithSdCpp(
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    // stable-diffusion.cpp is a native child rather than one of infer.ts's
+    // Python runners, so it does not pass through run() and would otherwise be
+    // invisible in the resource manager. Registering it here makes this the
+    // long job it is: visible from its first second, with a Stop button.
+    const job = registerProcess({
+      kind: 'image',
+      script: 'sd-cli',
+      pid: child.pid ?? -1,
+      repo: opts.repo,
+      device: opts.device,
+    });
+    attachChild(job.id, child);
+    // The backend was already resolved from --list-devices, so the manager can
+    // say "GPU (Vulkan)" immediately instead of showing the requested device.
+    setProcessDevice(job.id, backend ?? 'cpu');
+
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
@@ -375,10 +407,18 @@ export async function generateWithSdCpp(
     child.stderr.on('data', emit);
     child.on('error', (err) => {
       clearTimeout(timer);
+      finishProcess(job.id, null);
       resolve({ ok: false, data: { error: err.message } });
     });
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       clearTimeout(timer);
+      const finished = finishProcess(job.id, code, signal);
+      // A job stopped from the resource manager is a decision, not a fault.
+      // The close handler is the place that can still see the flag.
+      if (finished?.stoppedByUser) {
+        resolve({ ok: false, data: { error: 'Stopped from the resource manager.' } });
+        return;
+      }
       if (code !== 0) {
         const last = stderr
           .split(/\r?\n/)

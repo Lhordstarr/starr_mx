@@ -100,11 +100,14 @@ const THEME_KEY = 'llm-chat-theme';
 const LOCAL_IMAGE_ID = '__local__';
 
 /**
- * Sizes offered for diffusers output. Turbo checkpoints are trained at 512 —
- * sd-turbo loses quality and speed above it — so the default stays there, with
- * larger squares available for SDXL.
+ * Sizes offered for local image output. Turbo checkpoints are trained at 512 —
+ * sd-turbo loses quality and speed above it — so that is their default. SD 3.5
+ * Medium on this card is only reliable at 384 or below; the catalog narrows the
+ * list per model rather than offering a canvas known to decode as noise.
  */
 const LOCAL_IMAGE_SIZES = [
+  { w: 256, h: 256 },
+  { w: 384, h: 384 },
   { w: 512, h: 512 },
   { w: 768, h: 768 },
   { w: 1024, h: 1024 },
@@ -189,15 +192,8 @@ function syncControls() {
     // The cloud branch below replaces the size list; without restoring local
     // sizes here, switching to this machine kept the cloud's 1024x1024 (or
     // wider) choice and ran diffusers at a size it was not meant for.
-    els.size.textContent = '';
-    for (const s of LOCAL_IMAGE_SIZES) {
-      const opt = document.createElement('option');
-      opt.value = `${s.w}x${s.h}`;
-      opt.textContent = sizeLabel(s);
-      els.size.appendChild(opt);
-    }
-    els.size.value = '512x512';
     renderImagePicker();
+    syncLocalSize();
     return;
   }
   const p = providers.find((x) => x.id === els.provider.value);
@@ -218,6 +214,36 @@ function syncControls() {
   els.size.selectedIndex = 0;
 
   renderImagePicker();
+}
+
+/**
+ * Rebuilds the local size list from the selected model. A model that declares
+ * a maximum is not offered a larger canvas; a model with no preference keeps
+ * the 512 default that turbo checkpoints were trained for.
+ */
+function syncLocalSize() {
+  if (!localImageSelected()) return;
+  const model = localImageModels.find((m) => m.repo === imageModel)
+    ?? localImageModels.find((m) => m.ready);
+  const maxW = model?.maxWidth ?? Infinity;
+  const maxH = model?.maxHeight ?? Infinity;
+  const sizes = LOCAL_IMAGE_SIZES.filter((s) => s.w <= maxW && s.h <= maxH);
+  els.size.textContent = '';
+  for (const s of sizes) {
+    const opt = document.createElement('option');
+    opt.value = `${s.w}x${s.h}`;
+    opt.textContent = sizeLabel(s);
+    els.size.appendChild(opt);
+  }
+  const preferred = model?.width && model?.height
+    ? `${model.width}x${model.height}`
+    : '512x512';
+  const values = sizes.map((s) => `${s.w}x${s.h}`);
+  els.size.value = values.includes(preferred)
+    ? preferred
+    : values.includes('512x512')
+      ? '512x512'
+      : values[0] ?? '512x512';
 }
 
 /**
@@ -391,6 +417,7 @@ function commitImageModel(id) {
   imageModel = id;
   closeImageMenu();
   renderImagePicker();
+  syncLocalSize();
   els.prompt.focus();
 }
 
@@ -793,7 +820,10 @@ async function generateLocalImage(prompt) {
       repo: model.repo,
       file: model.file,
       prompt,
-      steps: 4,
+      // Turbo checkpoints finish in a handful of steps, but SD 3.5 Medium is
+      // not coherent at the old hard-coded 4. The catalog knows the model and
+      // sends its recommended count through /api/runnable.
+      steps: model.steps ?? 4,
       width,
       height,
       device: 'auto',
