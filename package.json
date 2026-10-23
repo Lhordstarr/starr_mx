@@ -31,6 +31,7 @@
     "test:onnx": "tsx scripts/onnx-selftest.ts",
     "test:runtimes": "tsx scripts/runtimes-selftest.ts",
     "test:whisper": "tsx scripts/whisper-selftest.ts",
+    "test:whisper-ct2": "tsx scripts/whisper-ct2-selftest.ts",
     "test:tts": "tsx scripts/tts-selftest.ts",
     "test:llamacpp": "tsx scripts/llamacpp-selftest.ts",
     "test:llamacpp-ui": "node scripts/llamacpp-ui-selftest.mjs",
