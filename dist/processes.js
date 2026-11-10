@@ -1,0 +1,446 @@
+/**
+ * Registry of the processes this app spawned and is still running.
+ *
+ * The local runners in infer.ts are ordinary `spawn` children that used to be
+ * created, awaited and thrown away — the handle never outlived the promise, so
+ * there was no way to see one running or to stop it. That matters because these
+ * are the long jobs: image generation is allowed to run for an hour, a CPU
+ * transcription can hold a core for minutes, and neither is interruptible from
+ * the UI. Stopping a runaway local job is the whole point of this file.
+ *
+ * Only children this process started are tracked. There is deliberately no
+ * "kill by pid" entry point: the server has no authentication, so a route that
+ * accepted an arbitrary pid from the browser would be an arbitrary-process
+ * killer reachable by any page that can talk to the port. Jobs are named by an
+ * id minted here, so a caller can only ever stop something this app started.
+ */
+import { execFile } from 'node:child_process';
+import { readdir, readFile, readlink } from 'node:fs/promises';
+/**
+ * What each runner actually imports.
+ *
+ * Read off the scripts rather than guessed. `whisper_ct2.py` uses
+ * faster_whisper + ctranslate2 and deliberately never touches torch, which is
+ * the whole reason it exists (40 MB of runtime instead of 529 MB). The
+ * transformers and Kokoro runners build on torch; the ONNX Whisper runner uses
+ * ONNX Runtime plus transformers for its feature extractor and tokenizer, and
+ * the ONNX Kokoro runner adds the ONNX graph to the Kokoro environment. Leaving
+ * a new script out of this table makes its process row claim it uses nothing,
+ * which is the same kind of lie as naming the wrong runtime.
+ */
+export const SCRIPT_RUNTIMES = {
+    'whisper_ct2.py': ['faster-whisper'],
+    'transcribe.py': ['torch', 'transformers'],
+    'transcribe_onnx.py': ['onnxruntime', 'transformers'],
+    'speak.py': ['torch', 'kokoro'],
+    'speak_hf.py': ['torch', 'transformers'],
+    'speak_onnx.py': ['onnxruntime', 'kokoro'],
+    'generate.py': ['torch', 'diffusers'],
+    'llama-server': ['llama-cpp'],
+    'whisper-cli': ['whisper-cpp'],
+    'chat_transformers.py': ['torch', 'transformers'],
+};
+let seq = 0;
+const live = new Map();
+/**
+ * Some processes cannot be signalled by their child handle alone: llama.cpp
+ * runs under a supervisor whose stdin is the death watch, so stopping it means
+ * killing the supervisor and letting it reap the server. Registering a handler
+ * here lets stopProcess delegate instead of sending a bare SIGTERM that would
+ * leave the server behind.
+ */
+const stopHandlers = new Map();
+export function registerStopHandler(id, fn) {
+    stopHandlers.set(id, fn);
+}
+export function unregisterStopHandler(id) {
+    stopHandlers.delete(id);
+}
+/** Finished jobs stay listed briefly so the UI can show the transition. */
+const recent = [];
+const RECENT_TTL_MS = 60_000;
+const RECENT_MAX = 20;
+/** How long a politely-stopped process gets before it is killed outright. */
+const SIGKILL_GRACE_MS = 4000;
+export function registerProcess(opts) {
+    seq += 1;
+    const entry = {
+        id: `job-${seq}`,
+        pid: opts.pid,
+        kind: opts.kind,
+        script: opts.script,
+        runtimes: SCRIPT_RUNTIMES[opts.script] ?? [],
+        repo: opts.repo,
+        device: opts.device,
+        startedAt: Date.now(),
+        state: 'running',
+    };
+    live.set(entry.id, { entry, child: undefined });
+    return entry;
+}
+/**
+ * Binds the child handle so the job can actually be signalled.
+ *
+ * Registration happens at spawn time, when the pid is known but the handle is
+ * not returned until the next tick; this closes that gap. Returns the id so the
+ * caller can pass one object to both calls.
+ */
+export function attachChild(id, child) {
+    const slot = live.get(id);
+    if (slot)
+        slot.child = child;
+}
+/**
+ * Records what the runner resolved its device request to.
+ *
+ * The scripts print the resolved device on stdout as soon as `pick_device`
+ * returns — before the model is even loaded — and infer.ts reads those lines
+ * out of the running job's output. Values are the scripts' own: `cpu`, `cuda`
+ * or `rocm`. An id that is already gone is ignored, because a job that died
+ * between printing and this call has nothing left to relabel.
+ */
+export function setProcessDevice(id, device) {
+    const slot = live.get(id);
+    if (slot && slot.entry.resolvedDevice !== device)
+        slot.entry.resolvedDevice = device;
+}
+/**
+ * Marks a process as warm — loaded, and waiting — with the time it will be
+ * released at.
+ *
+ * A speech engine is the case this exists for: it is not working, but it is
+ * not finished either, and it is holding a model in memory. The deadline is
+ * published so the manager can say how long that lasts, instead of the row
+ * looking like a job that has been running for hours.
+ */
+export function setProcessWarm(id, warm, idleUntil) {
+    const slot = live.get(id);
+    if (!slot)
+        return;
+    slot.entry.warm = warm;
+    if (warm && typeof idleUntil === 'number')
+        slot.entry.idleUntil = idleUntil;
+    else
+        delete slot.entry.idleUntil;
+}
+/**
+ * Resident set size of a pid, in bytes, or null when it cannot be read.
+ *
+ * This is VmRSS out of /proc/<pid>/status, the figure `top` shows as RES: how
+ * much memory the process actually holds right now, which for these jobs is
+ * mostly model weights. Every failure — pid gone, /proc unreadable, a platform
+ * without it — answers null, and the manager leaves the figure out rather than
+ * showing a guess.
+ */
+export async function processMemoryBytes(pid) {
+    if (process.platform !== 'linux' || !Number.isFinite(pid) || pid <= 0)
+        return null;
+    try {
+        const status = await readFile(`/proc/${pid}/status`, 'utf8');
+        const match = status.match(/^VmRSS:\s*(\d+)\s*kB/m);
+        return match ? Number(match[1]) * 1024 : null;
+    }
+    catch {
+        return null;
+    }
+}
+/** One line of `/proc/<pid>/fdinfo/<fd>`: `drm-resident-local0: 5396348 KiB`. */
+const DRM_RESIDENT = 'drm-resident-';
+const DRM_TOTAL = 'drm-total-';
+/**
+ * Bytes from one DRM usage value: `123 KiB`, `8589934592 B`, or bare bytes.
+ *
+ * Anything with an unknown unit is rejected rather than read as bytes — a
+ * driver inventing `2 Pages` would otherwise be reported as two bytes.
+ */
+function drmBytes(raw) {
+    const fields = raw.trim().split(/\s+/);
+    if (!fields.length || fields.length > 2)
+        return null;
+    const n = Number(fields[0]);
+    if (!Number.isFinite(n) || n < 0)
+        return null;
+    if (fields.length === 1)
+        return n;
+    switch ((fields[1] ?? '').toLowerCase()) {
+        case 'b':
+            return n;
+        case 'kib':
+            return n * 1024;
+        case 'mib':
+            return n * 1024 * 1024;
+        case 'gib':
+            return n * 1024 * 1024 * 1024;
+        default:
+            return null;
+    }
+}
+/**
+ * The VRAM a single DRM fd is holding, out of its fdinfo blob.
+ *
+ * The kernel's standardised usage keys (Documentation/gpu/drm-usage-stats.rst,
+ * Linux ≥ 5.19) name regions per driver: i915 says `local0`, amdgpu and xe say
+ * `vram0`. Only those count as device memory — `system0`, `gtt0` and
+ * `stolen-local0` are host-RAM mirrors or reserved carve-outs, and adding them
+ * would turn a 512 MB allocation into several gigabytes.
+ *
+ * `drm-resident-` is preferred: it is what the card is actually holding now.
+ * `drm-total-` includes bindings that may have been evicted, so it is only a
+ * fallback for a driver that reports no resident keys. `reported` separates
+ * "this process holds nothing" from "this kernel does not account at all":
+ * a driver with no usage keys cannot answer, and zero would be a
+ * plausible-looking lie.
+ */
+export function parseDrmUsage(text) {
+    let resident = 0;
+    let total = 0;
+    let sawResident = false;
+    let sawTotal = false;
+    for (const line of text.split('\n')) {
+        const kind = line.startsWith(DRM_RESIDENT)
+            ? DRM_RESIDENT
+            : line.startsWith(DRM_TOTAL)
+                ? DRM_TOTAL
+                : null;
+        if (!kind)
+            continue;
+        const colon = line.indexOf(':');
+        if (colon < 0)
+            continue;
+        const region = line.slice(kind.length, colon);
+        if (!region.startsWith('local') && !region.startsWith('vram'))
+            continue;
+        const n = drmBytes(line.slice(colon + 1));
+        if (n === null)
+            continue;
+        if (kind === DRM_RESIDENT) {
+            sawResident = true;
+            resident += n;
+        }
+        else {
+            sawTotal = true;
+            total += n;
+        }
+    }
+    if (sawResident)
+        return { bytes: resident, reported: true };
+    return { bytes: total, reported: sawTotal };
+}
+/**
+ * Parse `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits`.
+ *
+ * Values are MiB. A `[N/A]` row (MIG instances and some virtualised drivers)
+ * is skipped, not read as zero: an unreadable allocation is not an empty one.
+ */
+export function parseNvidiaComputeApps(text) {
+    const out = new Map();
+    for (const line of text.split('\n')) {
+        const [pidRaw, memRaw] = line.split(',').map((s) => s.trim());
+        const pid = Number(pidRaw);
+        const mib = Number(memRaw);
+        if (!Number.isInteger(pid) || pid <= 0)
+            continue;
+        if (!Number.isFinite(mib) || mib < 0)
+            continue;
+        out.set(pid, mib * 1024 * 1024);
+    }
+    return out;
+}
+/**
+ * Video memory a process is holding, or null when it cannot be told.
+ *
+ * Two readers, because one is not enough on the GPU people actually use:
+ *
+ * - DRM fdinfo, which works for amdgpu, i915, xe and nouveau on Linux ≥ 5.19
+ *   and costs a handful of /proc reads.
+ * - `nvidia-smi --query-compute-apps`, for the proprietary NVIDIA driver. It
+ *   does not implement DRM usage accounting — a CUDA process holds
+ *   /dev/nvidia* nodes, not a render node — so without this the T4-shaped
+ *   machine would report nothing at all for the job using the GPU.
+ *
+ * The NVIDIA query is shared by a short cache because the process manager polls
+ * every second and a spawn per job per poll would cost more than the reading.
+ *
+ * Zero is a real answer (the process holds no device memory). Null means the
+ * process is gone, /proc is unavailable, or neither reader can answer — in
+ * which case the caller leaves the figure out rather than claiming none.
+ */
+export async function processVramBytes(pid) {
+    if (process.platform !== 'linux' || !Number.isFinite(pid) || pid <= 0)
+        return null;
+    let fds;
+    try {
+        fds = await readdir(`/proc/${pid}/fd`);
+    }
+    catch {
+        return null;
+    }
+    let render = false;
+    let nvidia = false;
+    let reported = false;
+    let bytes = 0;
+    for (const fd of fds) {
+        let target;
+        try {
+            target = await readlink(`/proc/${pid}/fd/${fd}`);
+        }
+        catch {
+            continue; // the process closed the fd between listing and reading
+        }
+        if (target.startsWith('/dev/nvidia')) {
+            // The proprietary driver's allocations are invisible to DRM accounting;
+            // nvidia-smi is the only reader that can see them.
+            nvidia = true;
+            continue;
+        }
+        if (!target.startsWith('/dev/dri/render'))
+            continue;
+        render = true;
+        try {
+            const usage = parseDrmUsage(await readFile(`/proc/${pid}/fdinfo/${fd}`, 'utf8'));
+            if (usage.reported) {
+                reported = true;
+                bytes += usage.bytes;
+            }
+        }
+        catch {
+            /* fd closed mid-walk */
+        }
+    }
+    if (!nvidia) {
+        if (!render)
+            return 0;
+        return reported ? bytes : null;
+    }
+    const apps = await nvidiaComputeApps();
+    if (!apps)
+        return null;
+    return apps.get(pid) ?? 0;
+}
+const NVIDIA_CACHE_MS = 900;
+let nvidiaCache = null;
+async function nvidiaComputeApps() {
+    if (nvidiaCache && Date.now() - nvidiaCache.at < NVIDIA_CACHE_MS)
+        return nvidiaCache.apps;
+    const query = async (field) => {
+        const stdout = await new Promise((resolve, reject) => {
+            execFile('nvidia-smi', [`--query-compute-apps=pid,${field}`, '--format=csv,noheader,nounits'], { timeout: 3000, maxBuffer: 512 * 1024 }, (err, out) => (err ? reject(err) : resolve(out)));
+        });
+        return parseNvidiaComputeApps(stdout);
+    };
+    let apps = null;
+    try {
+        apps = await query('used_memory');
+    }
+    catch (err) {
+        // Older drivers name the column differently; a missing binary is not
+        // worth a second spawn.
+        if (err.code !== 'ENOENT') {
+            try {
+                apps = await query('used_gpu_memory');
+            }
+            catch {
+                apps = null;
+            }
+        }
+    }
+    nvidiaCache = { at: Date.now(), apps };
+    return apps;
+}
+/**
+ * Moves a job out of the live set and into the recent list.
+ *
+ * Returns the finished entry, because the caller needs `stoppedByUser` *after*
+ * the fact — stopProcess marks it while the job is still live, so by the time
+ * the child closes there is nothing left to look it up on. Reading it from the
+ * returned copy is the only way to tell "the user stopped this" from "this
+ * finished on its own".
+ */
+export function finishProcess(id, code, signal, stoppedByUser) {
+    const slot = live.get(id);
+    if (!slot)
+        return null;
+    const { entry } = slot;
+    entry.state = 'exited';
+    entry.endedAt = Date.now();
+    entry.exitCode = code;
+    if (stoppedByUser !== undefined)
+        entry.stoppedByUser = stoppedByUser;
+    else if (signal)
+        entry.stoppedByUser = true;
+    live.delete(id);
+    recent.unshift({ ...entry });
+    while (recent.length > RECENT_MAX)
+        recent.pop();
+    return { ...entry };
+}
+/**
+ * Stops one job: SIGTERM, then SIGKILL if it is still there after the grace
+ * period. Python is given the chance to clean up its own temporary output —
+ * a TTS job killed mid-write leaves a half-written wav behind.
+ */
+export async function stopProcess(id) {
+    const slot = live.get(id);
+    if (!slot)
+        return null;
+    const { entry } = slot;
+    const handler = stopHandlers.get(id);
+    if (handler) {
+        entry.state = 'stopping';
+        entry.stoppedByUser = true;
+        await handler();
+        return entry;
+    }
+    const { child } = slot;
+    if (!child || child.pid === undefined) {
+        // Spawned but not yet bound, or already gone. Either way there is nothing
+        // left to signal; drop it so it stops appearing as running.
+        finishProcess(id, null);
+        return entry;
+    }
+    if (entry.state !== 'stopping') {
+        entry.state = 'stopping';
+        entry.stoppedByUser = true;
+        try {
+            child.kill('SIGTERM');
+        }
+        catch {
+            // Already reaped. The close handler will clean up the registry entry.
+        }
+        const timer = setTimeout(() => {
+            const still = live.get(id);
+            if (!still)
+                return;
+            try {
+                still.child.kill('SIGKILL');
+            }
+            catch {
+                /* gone between the check and the signal */
+            }
+        }, SIGKILL_GRACE_MS);
+        timer.unref?.();
+    }
+    return entry;
+}
+export async function stopAllProcesses() {
+    let n = 0;
+    for (const id of [...live.keys()]) {
+        if (await stopProcess(id))
+            n += 1;
+    }
+    return n;
+}
+/** Everything the manager needs: what is running now, and what just stopped. */
+export function listProcesses() {
+    const cutoff = Date.now() - RECENT_TTL_MS;
+    while (recent.length && (recent[recent.length - 1].endedAt ?? 0) < cutoff)
+        recent.pop();
+    return {
+        // Slower jobs first: the thing most likely to need stopping is the one the
+        // user opened the manager to find.
+        active: [...live.values()]
+            .map((s) => ({ ...s.entry }))
+            .sort((a, b) => b.startedAt - a.startedAt),
+        recent: recent.filter((p) => p.state === 'exited').map((p) => ({ ...p })),
+    };
+}
