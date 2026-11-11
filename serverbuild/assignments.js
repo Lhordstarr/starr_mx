@@ -11,16 +11,29 @@ import path from 'node:path';
  * so they live here and every surface reads the same answer.
  */
 const prefsFile = path.resolve(process.env.PREFS_FILE ?? '.prefs.json');
-const EMPTY = { stt: null, tts: null, image: null };
+const EMPTY = { vision: null, stt: null, tts: null, image: null };
 let cache = { ...EMPTY };
 /** Values are model ids like `local:Systran/faster-whisper-tiny`. */
 function isId(v) {
     return typeof v === 'string' && v.length > 0 && v.length < 200;
 }
+/**
+ * Vision ids were briefly written as `local:ollama/<model>` before the runner
+ * was wired to the daemon by tag. Normalising here means a prefs file from that
+ * build keeps working instead of silently disabling image handling.
+ */
+function normalizeVision(v) {
+    const legacy = 'local:ollama/';
+    if (!v?.startsWith(legacy))
+        return v;
+    const tag = v.slice(legacy.length);
+    return `ollama:${tag.includes(':') ? tag : `${tag}:latest`}`;
+}
 export async function loadAssignments() {
     try {
         const parsed = JSON.parse(await readFile(prefsFile, 'utf8'));
         cache = {
+            vision: isId(parsed.vision) ? normalizeVision(parsed.vision) : null,
             stt: isId(parsed.stt) ? parsed.stt : null,
             tts: isId(parsed.tts) ? parsed.tts : null,
             image: isId(parsed.image) ? parsed.image : null,
@@ -39,15 +52,16 @@ export function assignments() {
 /**
  * Assigns a model to a task. An empty value clears it.
  *
- * Only the three known tasks are accepted, and only plain strings are stored,
- * so this file cannot be turned into a place to keep arbitrary data.
+ * Only the known tasks are accepted, and only plain strings are stored, so
+ * this file cannot be turned into a place to keep arbitrary data.
  */
 export async function setAssignment(task, modelId) {
     if (!(task in cache))
         throw new Error(`Unknown task: ${task}`);
-    const value = modelId && modelId.trim() ? modelId.trim() : null;
-    if (value !== null && !isId(value))
+    const raw = modelId && modelId.trim() ? modelId.trim() : null;
+    if (raw !== null && !isId(raw))
         throw new Error('Invalid model id');
+    const value = task === 'vision' ? normalizeVision(raw) : raw;
     cache = { ...cache, [task]: value };
     await persist();
     return assignments();

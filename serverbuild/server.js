@@ -13,15 +13,17 @@ import { directDateAnswer, isToolFormatError, isToolsUnsupported, runAgent, with
 import { ThinkingSplitter } from './reasoning.js';
 import { enabledTools, listTools, resolveToolSelection, setToolEnabled } from './tools.js';
 import { acquirePull, deleteLocalModel, listLocalModels, listRunningModels, pullModel, releasePull, unloadModel, validateModelName, } from './ollama-models.js';
-import { ensureOllamaRunning, hookOllamaExit, ollamaReachable } from './ollama-server.js';
+import { ensureOllamaRunning, hookOllamaExit, noteOllamaUsed, ollamaReachable } from './ollama-server.js';
 import { listProcesses, processMemoryBytes, processVramBytes, stopAllProcesses, stopProcess } from './processes.js';
 import { acquireDownload, avatarEtag, deleteCacheRepo, deleteDownload, downloadFile, modelsDir, fetchAvatar, imageMime, listDownloads, modelDetail, requiredFiles, pruneStalePartials, releaseDownload, searchModels, validateFilePath, validateRepoId, } from './huggingface.js';
 import { imageProviderById, imageGenProvidersView, generateImage, acquireImageGen, releaseImageGen, IMAGE_FIELD_LABELS, MAX_PROMPT_LENGTH } from './imagegen.js';
 import { cacheImage, cacheNameError, imageCachePath } from './image-cache.js';
 import { ggufModels, llamaContextSize, llamaServerState, stopLlamaServer } from './llamacpp.js';
 import { stopTtsEngines } from './tts-engine.js';
-import { llamaCppUpgradeKind } from './runtimes.js';
-import { transformersChatModels } from './transformers-chat.js';
+import { installedLlamaKind, llamaCppUpgradeKind, computeCapabilitySupportsLlamaCuda, nvidiaComputeCapability, } from './runtimes.js';
+import { transformersChatModels, transformersServerState } from './transformers-chat.js';
+import { sdCppInstalled, sdCppKind } from './sdcpp.js';
+import { whisperCppInstalled, whisperDevice } from './whispercpp.js';
 import { fileVramEstimate, vramFit } from './vram.js';
 import { allProviders, providerOrder } from './providers/index.js';
 import { discoverLocalServers, discoveredProvider } from './discovery.js';
@@ -29,11 +31,13 @@ import { backendReports } from './backends.js';
 import { runDriverInstaller } from './drivers.js';
 import { assignments, loadAssignments, setAssignment, } from './assignments.js';
 import { CATALOG } from './model-catalog.js';
-import { runnableModels } from './runnable.js';
+import { assignmentMatches, runnableModels } from './runnable.js';
+import { parseVisionAssignment, preprocessVision } from './vision.js';
 import { finishTransfer, isRunning, listTransfers, startTransfer, transferId, updateTransfer, } from './transfers.js';
 import { gpuVramTotalBytes, resourceReport } from './resources.js';
-import { RUNTIME_GROUPS, detectGpu, deviceWarning, groupBlockedReason, groupById, installRuntimes, parseDevice, removeRuntimeGroup, removeRuntimes, runtimeStatus, venvPythonVersion, } from './runtimes.js';
+import { RUNTIME_GROUPS, detectGpu, deviceWarning, groupBlockedReason, groupById, installRuntimes, onnxGpuUpgradeGroups, parseDevice, removeRuntimeGroup, removeRuntimes, runtimeStatus, runtimeStorageBytes, venvPythonVersion, } from './runtimes.js';
 import { generateImageLocal, speak, transcribe } from './infer.js';
+import { SDCPP_DEFAULT_HEIGHT, SDCPP_DEFAULT_WIDTH, isSdCppRepo } from './sdcpp.js';
 import { addCustomProvider, customApiKey, customProvidersFilePath, deleteCustomProvider, listCustomProviders, loadCustomProviders, updateCustomProvider, } from './providers/custom.js';
 import { ALLOWED_KEYS, clearAllKeys, clearKey, getKey, keysFilePath, loadKeys, maskKey, keySource, setKey } from './store.js';
 const app = express();
@@ -67,11 +71,11 @@ app.use((_req, res, next) => {
     }
     next();
 });
-// Image attachments base64-inflate by about a third, so the chat route needs
-// far more headroom than the rest of the API. Scoped to this one path so no
-// other endpoint accepts a large body; checkUsage() still enforces the real
-// per-message caps, and this is only the outer bound.
-app.use('/api/chat', express.json({ limit: '20mb' }));
+// Media attachments base64-inflate by about a third, and a video may be 12 MB
+// before inflation. Scoped to this one path so no other endpoint accepts a
+// large body; checkUsage() still enforces the real per-message caps, and this
+// is only the outer bound.
+app.use('/api/chat', express.json({ limit: '32mb' }));
 app.use(express.json({ limit: '1mb' }));
 // A malformed JSON body would otherwise render Express's default error page,
 // which leaks a stack trace and absolute paths. There's no auth on this server,
@@ -100,9 +104,10 @@ app.use(express.static(publicDir, { extensions: ['html'] }));
  * because the page learned to do more than images.
  */
 app.get(['/image', '/imagestudio'], (_req, res) => res.redirect(302, '/studio'));
-// The standalone Tools page merged into the settings hub; old links land on
-// the Tools tab instead of 404ing.
-app.get('/tools', (_req, res) => res.redirect('/settings#tools'));
+// The standalone Tools page merged into the settings hub, then moved out
+// again: the tools now live in the chat page's picker, so a bookmark made when
+// they had a page or a tab of their own still lands on them.
+app.get('/tools', (_req, res) => res.redirect('/#tools'));
 /**
  * Blocks cross-site state changes. There's no session cookie to rely on, so this
  * Origin check is the only thing standing between a malicious page in your
@@ -314,9 +319,12 @@ app.get('/api/dictation', async (_req, res) => {
     const assigned = assignments();
     // Mark the assigned model so the UI can show the choice without a second
     // round trip, and so a stale assignment is visibly stale rather than silent.
+    // `assignmentMatches` resolves a legacy repo-level value to one ready
+    // quantisation; comparing `local:<repo>` directly marked all four
+    // whisper.cpp variants assigned.
     local = local.map((m) => ({
         ...m,
-        assigned: assigned.stt === `local:${m.repo}`,
+        assigned: assignmentMatches(m, assigned.stt, local),
     }));
     res.json({ providers: entries, local, assigned });
 });
@@ -326,17 +334,27 @@ app.get('/api/dictation', async (_req, res) => {
  */
 app.get('/api/runnable', async (req, res) => {
     const task = String(req.query.task ?? '');
-    if (task && !['stt', 'tts', 'image'].includes(task)) {
+    if (task && !['vision', 'stt', 'tts', 'image'].includes(task)) {
         return res.status(400).json({ error: 'Unknown task' });
     }
-    const tasks = task ? [task] : ['stt', 'tts', 'image'];
+    const tasks = task ? [task] : ['vision', 'stt', 'tts', 'image'];
+    const visionModels = tasks.includes('vision')
+        ? await providerRegistry().ollama.listVisionModels?.().catch(() => [])
+        : undefined;
     const out = {};
-    for (const t of tasks)
-        out[t] = await runnableModels(t);
-    res.json({ ...out, assigned: assignments() });
+    const saved = assignments();
+    for (const t of tasks) {
+        const models = await runnableModels(t, t === 'vision' ? { visionModels } : {});
+        out[t] = models.map((m) => ({
+            ...m,
+            assigned: assignmentMatches(m, saved[t], models),
+        }));
+    }
+    res.json({ ...out, assigned: saved });
 });
 /**
- * Assigns a model to a job: speech-to-text, speech, or image generation.
+ * Assigns a model to a job: vision, speech-to-text, speech, or image
+ * generation.
  *
  * The single place a model gets tied to a task. The chat page and the Studio
  * both read the result rather than asking the user to choose again, which is
@@ -345,7 +363,7 @@ app.get('/api/runnable', async (req, res) => {
 app.post('/api/assignments', async (req, res) => {
     const task = String(req.body?.task ?? '');
     const model = typeof req.body?.model === 'string' ? req.body.model : null;
-    if (!['stt', 'tts', 'image'].includes(task)) {
+    if (!['vision', 'stt', 'tts', 'image'].includes(task)) {
         return res.status(400).json({ error: 'Unknown task' });
     }
     try {
@@ -376,12 +394,35 @@ app.get('/api/vision', async (req, res) => {
     // their /models response, so it has to run first.
     const all = await provider.listModels();
     const claimed = (await provider.listVisionModels?.()) ?? [];
+    const current = assignments();
+    const target = parseVisionAssignment(current.vision);
+    // Readiness belongs to the *assigned* model's provider, which is not
+    // necessarily the chat provider. Asking OpenRouter whether an Ollama tag is
+    // installed always answered no, and the composer then claimed the vision
+    // model was missing even while it sat in the local daemon.
+    let assignedReady = false;
+    if (target) {
+        const assignedProvider = registry[target.providerId];
+        const assignedModels = assignedProvider?.info.id === provider.info.id
+            ? claimed
+            : ((await assignedProvider?.listVisionModels?.().catch(() => [])) ?? []);
+        assignedReady = assignedModels.includes(target.model);
+    }
     res.json({
         provider: provider.info.id,
         models: all,
         visionModels: claimed,
         known: provider.info.id === 'ollama' || claimed.length > 0,
         limits: LIMITS,
+        // The attachment UI asks one question: will an image reach a model that
+        // can see it? That answer is "yes" either because this provider accepts
+        // images natively or because Settings assigned a vision model to describe
+        // them first. Keeping both facts here avoids a second round trip.
+        assigned: {
+            vision: current.vision,
+            stt: current.stt,
+            visionReady: assignedReady,
+        },
     });
 });
 /** Provider metadata for the settings form. Never returns a usable key. */
@@ -585,6 +626,26 @@ app.get('/api/image/file/:name', (req, res) => {
 });
 const downloadControllers = new Map();
 /**
+ * Why a download was stopped, and what is left of it.
+ *
+ * `paused` keeps the partial file, so the next attempt continues from it;
+ * `cancelled` discards it, so the next attempt starts over. The browser needs
+ * the difference to label the button it offers next — "Resume" and "Retry" are
+ * different promises, and an abort message alone cannot tell them apart.
+ */
+const downloadStops = new Map();
+/**
+ * Why a download was stopped, if it was stopped by hand.
+ *
+ * The transfer's error text is where the browser reads it: "paused" means the
+ * partial file is still there and the row can offer a Resume, "cancelled"
+ * means it is gone and the row has to offer a Retry. An abort message on its
+ * own cannot tell those apart.
+ */
+function stopReason(repo) {
+    return downloadStops.get(repo) ?? null;
+}
+/**
  * Cancels an in-flight model download.
  *
  * The work is server-owned, so leaving the page never stops it — which is the
@@ -602,8 +663,13 @@ app.post('/api/hf/download/cancel', async (req, res) => {
     if (!controller) {
         return res.json({ cancelled: false, reason: 'not running' });
     }
+    // The caller says whether the partial file is being kept. Pause keeps it;
+    // Cancel discards it, and says so here so the row can offer "Retry"
+    // rather than a "Resume" that would start from nothing.
+    const discard = req.body?.discard === true;
+    downloadStops.set(repo, discard ? 'cancelled' : 'paused');
     controller.abort();
-    res.json({ cancelled: true });
+    res.json({ cancelled: true, kept: !discard });
 });
 /**
  * Discards a paused or failed download's partial file, so the next attempt
@@ -821,6 +887,10 @@ app.post('/api/ollama/pull', async (req, res) => {
     try {
         let latest = 0;
         for await (const progress of pullModel(name, controller.signal)) {
+            // A pull can outlast the daemon's ten-minute idle window. Every progress
+            // line is proof the daemon is in use, so reset the timer before handling
+            // it; otherwise the idle stop kills the download halfway through.
+            noteOllamaUsed();
             if (clientGone)
                 continue;
             // Ollama reports completed/total bytes per layer; the largest denominator
@@ -893,6 +963,8 @@ app.get('/api/runtimes', async (_req, res) => {
     const status = await runtimeStatus(runtimeBusy);
     const device = parseDevice(_req.query.device);
     const python = await venvPythonVersion();
+    // What the machine actually has, so Auto is not a guess.
+    const presence = await detectGpu();
     // Which groups cannot be installed here, and why. A group in the shared venv
     // is judged by that venv's interpreter; one with its own venv (Kokoro) is
     // judged by whether a compatible interpreter exists to build it on. Offering
@@ -904,18 +976,34 @@ app.get('/api/runtimes', async (_req, res) => {
         if (reason)
             blocked.push({ id: g.id, label: g.label, maxPython: g.maxPython, reason });
     }
+    // What each group would install *here*. Some of them depend on the device —
+    // the ONNX Runtime GPU wheel is a different package with a different size —
+    // and the page shows the size before the download, so the size it shows has
+    // to be the one that will actually be fetched.
+    const groups = RUNTIME_GROUPS.map((g) => {
+        const plan = g.deviceInstall?.(device, presence);
+        return plan
+            ? { ...g, approxMB: plan.approxMB, devicePkgs: plan.pkgs, storageMB: g.storageMB ?? plan.approxMB }
+            : { ...g, storageMB: g.storageMB ?? g.approxMB };
+    });
+    // Runtime upgrades available for the installed build (e.g. a CPU build on a
+    // machine with a GPU). The UI offers a one-click reinstall for these.
+    const upgrades = {};
+    const llamaUpgrade = await llamaCppUpgradeKind();
+    if (llamaUpgrade)
+        upgrades['llama-cpp'] = llamaUpgrade;
+    for (const id of onnxGpuUpgradeGroups(status, presence, device))
+        upgrades[id] = 'gpu';
     const payload = {
         runtimes: status,
-        groups: RUNTIME_GROUPS,
+        groups,
         python,
         blocked,
         // Surfaced up front so the UI can warn before a multi-hundred-MB download.
         warning: await deviceWarning(device),
         // What the machine actually has, so Auto is not a guess.
-        gpu: await detectGpu(),
-        // Runtime upgrades available for the installed build (e.g. a CPU build on a
-        // machine with a GPU). The UI offers a one-click reinstall for these.
-        upgrades: (await llamaCppUpgradeKind()) ? { 'llama-cpp': 'vulkan' } : {},
+        gpu: presence,
+        upgrades,
     };
     runtimesCache = payload;
     runtimesCacheAt = Date.now();
@@ -930,14 +1018,55 @@ app.get('/api/runtimes', async (_req, res) => {
  */
 app.get('/api/backends', async (_req, res) => {
     try {
-        const [status, servers] = await Promise.all([
+        const [status, servers, sdInstalled, whisperInstalled] = await Promise.all([
             runtimeStatus(runtimeBusy),
             discoverLocalServers(true).catch(() => []),
+            sdCppInstalled().catch(() => false),
+            whisperCppInstalled().catch(() => false),
         ]);
+        // The Python row is about Python packages. It used to list every group,
+        // including Ollama and the native binaries, so it claimed work done by
+        // four other runtimes and made "which backend is on the GPU?" unanswerable.
+        const pythonGroups = RUNTIME_GROUPS.filter((g) => !['ollama', 'llama-cpp', 'whisper-cpp', 'stable-diffusion-cpp'].includes(g.installer ?? ''));
+        const sdJob = listProcesses().active.find((p) => p.script === 'sd-cli');
+        const llama = llamaServerState();
+        const transformers = transformersServerState();
+        const llamaCompute = nvidiaComputeCapability();
         const backends = await backendReports({
             python: { venv: status.venv, torch: status.torch, torches: status.torches },
-            groups: RUNTIME_GROUPS.map((g) => ({ id: g.id, label: g.label })),
+            // Only what is actually installed. Listing every Python group made the
+            // row read as if Faster Whisper and Kokoro were running before they had
+            // ever been downloaded.
+            groups: pythonGroups
+                .filter((g) => status.installed[g.id])
+                .map((g) => ({ id: g.id, label: g.label })),
             servers: servers.map((s) => ({ id: s.id, label: s.label, baseUrl: s.baseUrl })),
+            ollamaInstalled: Boolean(status.installed.ollama),
+            native: {
+                onnx: status.onnx,
+                llama: {
+                    ...llama,
+                    kind: installedLlamaKind(),
+                    cudaCompute: llamaCompute,
+                    cudaUsable: computeCapabilitySupportsLlamaCuda(llamaCompute),
+                },
+                transformers: {
+                    ...transformers,
+                    cuda: status.torch.cudaAvailable,
+                    deviceName: status.torch.deviceName,
+                },
+                sd: {
+                    installed: sdInstalled,
+                    kind: sdCppKind(),
+                    activeDevice: sdJob ? (sdJob.resolvedDevice ?? sdJob.device) : null,
+                    activePid: sdJob?.pid ?? null,
+                },
+                whisper: { installed: whisperInstalled, device: whisperDevice() },
+                fasterWhisper: {
+                    installed: Boolean(status.installed['faster-whisper']),
+                    cudaDevices: status.ctranslate2Cuda,
+                },
+            },
         });
         res.json({ backends, at: Date.now() });
     }
@@ -1057,6 +1186,7 @@ app.post('/api/runtimes/install', async (req, res) => {
         const warning = await deviceWarning(device);
         if (warning)
             send('progress', warning);
+        const storageBefore = await runtimeStorageBytes();
         await installRuntimes({
             groups: groups,
             device,
@@ -1074,6 +1204,11 @@ app.post('/api/runtimes/install', async (req, res) => {
                 updateTransfer(installId, { label: line.trim().slice(0, 80) });
                 send('progress', line);
             },
+        });
+        const storageAfter = await runtimeStorageBytes();
+        send('usage', {
+            storageMB: Math.round((storageAfter - storageBefore) / (1024 * 1024)),
+            totalStorageMB: Math.round(storageAfter / (1024 * 1024)),
         });
         const status = await runtimeStatus(false);
         // Released before the completion is announced, not after. The browser
@@ -1271,10 +1406,20 @@ function withPythonLog(res, onResult) {
     res.setHeader('content-type', 'text/event-stream');
     res.setHeader('cache-control', 'no-cache');
     res.setHeader('connection', 'keep-alive');
-    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = (event, data) => {
+        // The browser may have gone — the speaking bar's Stop button aborts the
+        // request while the model is still working. Writing to a closed response
+        // is an error nobody is waiting for, and it takes the run down with it.
+        if (res.writableEnded || res.destroyed)
+            return;
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
     onResult(send)
         .catch((err) => send('error', { message: err.message }))
-        .finally(() => res.end());
+        .finally(() => {
+        if (!res.writableEnded)
+            res.end();
+    });
 }
 /**
  * Stages a browser-picked audio file for transcription. The runner deliberately
@@ -1389,8 +1534,10 @@ app.post('/api/infer/image', async (req, res) => {
         return res.status(400).json({ error: `Prompt is too long (${MAX_PROMPT_LENGTH} max).` });
     }
     const steps = Math.min(Math.max(Number(req.body?.steps) || 4, 1), 50);
-    const width = Math.min(Math.max(Number(req.body?.width) || 512, 64), 1024);
-    const height = Math.min(Math.max(Number(req.body?.height) || 512, 64), 1024);
+    const defaultWidth = isSdCppRepo(repo) ? SDCPP_DEFAULT_WIDTH : 512;
+    const defaultHeight = isSdCppRepo(repo) ? SDCPP_DEFAULT_HEIGHT : 512;
+    const width = Math.min(Math.max(Number(req.body?.width) || defaultWidth, 64), 1024);
+    const height = Math.min(Math.max(Number(req.body?.height) || defaultHeight, 64), 1024);
     withPythonLog(res, async (send) => {
         const { result } = await generateImageLocal({
             repo, file, prompt, steps, width, height, device,
@@ -1709,9 +1856,12 @@ app.post('/api/hf/download-repo', async (req, res) => {
         'x-accel-buffering': 'no',
     });
     let clientGone = false;
+    // A reload, or the Resume button's fire-and-forget POST, must not kill a
+    // multi-file model download. The work is server-owned and only an explicit
+    // /api/hf/download/cancel aborts it; losing the reporting socket just means
+    // progress events stop being written.
     res.on('close', () => {
         clientGone = true;
-        controller.abort();
     });
     const send = (event, data) => {
         if (clientGone)
@@ -1818,11 +1968,12 @@ app.post('/api/hf/download-repo', async (req, res) => {
                     send('file-done', { path: f.path, ...fileDone });
                 }
                 catch (err) {
-                    const message = err instanceof Error ? err.message : String(err);
+                    const stopped = stopReason(repo);
+                    const message = stopped ?? (err instanceof Error ? err.message : String(err));
                     finishTransfer(id, 'error', message);
                     failed.push(f.path);
                     send('file-failed', { path: f.path, message });
-                    if (!clientGone)
+                    if (!clientGone && !stopped)
                         console.error('[hf-download-repo]', message);
                 }
                 finally {
@@ -1838,6 +1989,7 @@ app.post('/api/hf/download-repo', async (req, res) => {
     }
     finally {
         downloadControllers.delete(repo);
+        downloadStops.delete(repo);
         if (!clientGone)
             res.end();
     }
@@ -1891,15 +2043,17 @@ app.post('/api/hf/download', async (req, res) => {
         send('done', done);
     }
     catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const stopped = stopReason(repo);
+        const message = stopped ?? (err instanceof Error ? err.message : String(err));
         // A dead socket is not a failed download.
-        if (!clientGone)
+        if (!clientGone && !stopped)
             console.error('[hf-download]', message);
         finishTransfer(id, 'error', message);
         send('error', { message });
     }
     finally {
         downloadControllers.delete(repo);
+        downloadStops.delete(repo);
         if (!clientGone)
             res.end();
         releaseDownload(`${repo}/${file}`);
@@ -1973,6 +2127,28 @@ app.post('/api/chat', async (req, res) => {
             send('delta', { text: content });
         send('done', {});
     };
+    // The assigned vision model runs before the chat model is prepared. It sees
+    // each still image (and samples video into frames), and the active model gets
+    // the resulting text. With no assignment, still images are left untouched so
+    // a natively multimodal provider keeps its direct path; video is refused
+    // rather than silently dropped.
+    try {
+        const prepared = await preprocessVision(messages, {
+            assignment: assignments().vision,
+            resolveProvider: (id) => providerRegistry()[id],
+            signal: controller.signal,
+        });
+        messages = prepared.messages;
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error('[vision]', message);
+        if (!controller.signal.aborted && !res.writableEnded)
+            send('error', { message });
+        res.end();
+        releaseStream();
+        return;
+    }
     // A bare date question is answered from the clock, before any model is
     // prepared: tiny models ignore the date in their system prompt, and some
     // call a tool for it, so generation can only make this answer worse.
@@ -2033,7 +2209,7 @@ app.post('/api/chat', async (req, res) => {
             if (!provider.info.local) {
                 send('notice', {
                     message: !tools.length
-                        ? 'No tools enabled — answering directly (see Settings → Tools).'
+                        ? 'No tools enabled — answering directly (pick one under the Tools button).'
                         : `${provider.info.label} doesn't support tool calls yet — answering directly.`,
                 });
             }

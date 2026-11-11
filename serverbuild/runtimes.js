@@ -26,10 +26,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { needsPrivilege } from './drivers.js';
 import { runtimesDir } from './paths.js';
 import { accessSync, constants, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { WHISPER_BUILD, whisperAsset, whisperCliPath, whisperCppInstalled, whisperDir, whisperVersion, } from './whispercpp.js';
+import { SDCPP_BUILD, sdCppAsset, sdCppCliName, sdCppCliPath, sdCppDir, sdCppInstalled, } from './sdcpp.js';
 const VULKAN_DISCRETE = /DISCRETE_GPU/i;
 /** Asks the Vulkan loader what it can actually open. Cached briefly. */
 let vulkanCache = null;
@@ -159,6 +160,43 @@ const TORCH_INDEX = {
     // Whichever is actually present; resolved before use.
     auto: 'https://download.pytorch.org/whl/cpu',
 };
+/**
+ * The ONNX Runtime GPU build, pinned to the CUDA major this app's torch uses.
+ *
+ * ONNX Runtime publishes a wheel per CUDA major: 1.26.0 and earlier are CUDA
+ * 12 builds, 1.27.0 and later are CUDA 13. A CUDA 13 runtime does not run on
+ * a CUDA 12 driver, so the wheel has to match the machine — and the torch
+ * index is already the app's answer to "which CUDA is this", because that is
+ * where it installs torch from.
+ *
+ * The CUDA libraries themselves are not in this wheel. They are the ones torch
+ * already brought in with its own CUDA build, and ONNX Runtime is told where
+ * to find them (`preload_dlls`) before it tries to open a session.
+ */
+const ONNX_GPU_CUDA12 = 'onnxruntime-gpu==1.26.0';
+const ONNX_GPU_CUDA13 = 'onnxruntime-gpu';
+/** The GPU wheel that matches the torch build this app installs. */
+function onnxGpuPackage() {
+    return TORCH_INDEX.nvidia.includes('cu13') ? ONNX_GPU_CUDA13 : ONNX_GPU_CUDA12;
+}
+/**
+ * Does this machine want the GPU build of ONNX Runtime?
+ *
+ * NVIDIA only, for now. The ROCm build of ONNX Runtime is a separate wheel
+ * with its own compatibility story, and offering it without being able to
+ * stand behind it would be the same promise this app refuses to make
+ * anywhere else — so an AMD machine gets the CPU build and is told so.
+ */
+function wantsOnnxGpu(device, presence) {
+    if (device === 'nvidia')
+        return true;
+    if (device === 'cpu' || device === 'amd')
+        return false;
+    // Auto: what the machine actually has. `usable` is false when a card is
+    // present but the driver cannot run CUDA on it, and a GPU wheel for that
+    // would be 244 MB of something that cannot be used.
+    return presence.vendor === 'nvidia' && presence.usable !== false;
+}
 export const RUNTIME_GROUPS = [
     {
         id: 'ollama',
@@ -183,8 +221,11 @@ export const RUNTIME_GROUPS = [
         label: 'llama.cpp',
         blurb: 'The GGUF inference engine, installed as a pinned prebuilt binary into ' +
             'this app’s own folder — no root, no Python, no compiler. The build ' +
-            'matches the card: CUDA on NVIDIA, Vulkan where a render node and ' +
-            'vulkaninfo are both present, CPU otherwise. Download the quantized ' +
+            'matches the card: CUDA on Blackwell NVIDIA cards, Vulkan where a ' +
+            'render node and vulkaninfo are both present, CPU otherwise. The pinned ' +
+            'Linux CUDA archive only contains Blackwell (sm_120) kernels; older ' +
+            'cards get the CPU build rather than a binary that cannot start. ' +
+            'Download the quantized ' +
             'chat models in Get models (Qwen3, Llama 3.2, Gemma) and they show up ' +
             'in the chat provider picker, run on this machine. A GPU build is a much ' +
             'larger download than the CPU one — roughly 173 MB, and up to 766 MB ' +
@@ -212,13 +253,25 @@ export const RUNTIME_GROUPS = [
         // speech-to-text; the Kokoro environment installs its own copy because the
         // TTS front end lives there. Neither claims every `.onnx` file: a graph
         // still needs a runner that knows its inputs.
-        blurb: 'Runs the ONNX Whisper export for speech-to-text. The Kokoro environment ' +
-            'installs its own copy for the ONNX voice model, so this row is the ' +
-            'shared-environment package and not a promise that any .onnx file will run.',
+        //
+        // The build depends on the machine: a GPU wheel on an NVIDIA card, the
+        // CPU wheel without one. The GPU wheel is the one that makes an ONNX
+        // model use the card, and it is the reason this group is not a fixed
+        // list of packages.
+        blurb: 'Runs the ONNX Whisper export for speech-to-text, and the ONNX export ' +
+            'of Kokoro in the Kokoro environment. On an NVIDIA machine this is the ' +
+            'GPU build, so those models run on the card; without one it is the CPU ' +
+            'build. The row says which one is installed. It is still not a promise ' +
+            'that any .onnx file will run — a graph needs a runner that knows its ' +
+            'inputs.',
         unlocks: ['speech-to-text'],
-        pkgs: ['onnxruntime'],
+        pkgs: [],
+        deviceInstall: (device, presence) => wantsOnnxGpu(device, presence)
+            ? { pkgs: [onnxGpuPackage()], approxMB: 244 }
+            : { pkgs: ['onnxruntime'], approxMB: 23 },
+        allPkgs: ['onnxruntime', 'onnxruntime-gpu'],
         needsTorch: false,
-        approxMB: 18,
+        approxMB: 23,
     },
     {
         id: 'torch',
@@ -237,6 +290,7 @@ export const RUNTIME_GROUPS = [
         blurb: 'Loads Whisper for transcription. Without it there is no local STT.',
         unlocks: ['speech-to-text'],
         pkgs: ['transformers', 'accelerate', 'sentencepiece'],
+        needs: ['torch'],
         needsTorch: true,
         approxMB: 45,
     },
@@ -247,6 +301,7 @@ export const RUNTIME_GROUPS = [
         blurb: 'Runs Stable Diffusion and friends for image generation. Slow on CPU.',
         unlocks: ['image-generation'],
         pkgs: ['diffusers', 'safetensors', 'accelerate'],
+        needs: ['torch'],
         needsTorch: true,
         approxMB: 25,
     },
@@ -268,6 +323,24 @@ export const RUNTIME_GROUPS = [
         installer: 'whisper-cpp',
     },
     {
+        id: 'stable-diffusion-cpp',
+        probe: 'sd-cli',
+        label: 'stable-diffusion.cpp',
+        blurb: 'Runs Stable Diffusion 3.5 Medium from GGUF-quantised weights in this ' +
+            'app’s own folder — no root, no Python, no PyTorch. The build matches ' +
+            'the machine: Vulkan where a render node and vulkaninfo are present, CPU ' +
+            'otherwise. Upstream publishes no Linux CUDA archive, so an NVIDIA card ' +
+            'without Vulkan still gets the CPU build. This is the route that fits the ' +
+            'image model into 8 GB: the quantised MMDiT stays in RAM and the 2.75 GB ' +
+            'text encoder streams from disk. About 37 MB for the Vulkan build, 27 MB ' +
+            'for CPU.',
+        unlocks: ['image-generation'],
+        pkgs: [],
+        needsTorch: false,
+        approxMB: 37,
+        installer: 'stable-diffusion-cpp',
+    },
+    {
         id: 'faster-whisper',
         probe: 'faster_whisper',
         label: 'Faster Whisper',
@@ -287,15 +360,25 @@ export const RUNTIME_GROUPS = [
             'environment on Python 3.12 or older — nothing in its dependency tree ' +
             'has wheels for newer interpreters, so it cannot share the main venv. ' +
             'ONNX Runtime is installed alongside it so the ONNX export of Kokoro ' +
-            'can run in the same environment; an environment installed before that ' +
+            'can run in the same environment — the GPU build on an NVIDIA machine, ' +
+            'so the ONNX voice uses the card; an environment installed before that ' +
             'runner existed needs a reinstall to add it.',
         unlocks: ['text-to-speech'],
         // ONNX Runtime is not optional here: the catalog's ONNX Kokoro entry runs
         // its graph through it, and the export lives in this venv because the G2P
         // front end does. The shared ONNX Runtime group is a separate copy for STT.
-        pkgs: ['kokoro', 'soundfile', 'onnxruntime'],
+        //
+        // Which build of it depends on the machine, for the same reason as
+        // everywhere else: the GPU wheel on an NVIDIA card, the CPU wheel without
+        // one.
+        pkgs: ['kokoro', 'soundfile'],
+        needs: ['torch'],
+        deviceInstall: (device, presence) => wantsOnnxGpu(device, presence)
+            ? { pkgs: ['kokoro', 'soundfile', onnxGpuPackage()], approxMB: 274 }
+            : { pkgs: ['kokoro', 'soundfile', 'onnxruntime'], approxMB: 53 },
+        allPkgs: ['kokoro', 'soundfile', 'onnxruntime', 'onnxruntime-gpu'],
         needsTorch: true,
-        approxMB: 30,
+        approxMB: 53,
         maxPython: '<3.13',
         venv: 'venv-kokoro',
     },
@@ -894,6 +977,29 @@ function resolveIndex(device, presence) {
     return TORCH_INDEX.cpu;
 }
 /**
+ * Is a better ONNX Runtime build available for this machine?
+ *
+ * The CPU wheel is installed and the machine has a card: the GPU build is a
+ * 244 MB download away, and it is the difference between an ONNX model
+ * running on the card and running on the processor.
+ *
+ * Answered per group, because the two copies are in different environments:
+ * the shared one runs the ONNX transcriber and the Kokoro one runs the ONNX
+ * voice. A machine can have one and not the other.
+ */
+export function onnxGpuUpgradeGroups(status, presence, device) {
+    if (!wantsOnnxGpu(device, presence))
+        return [];
+    const out = [];
+    const shared = status.onnx.find((o) => o.venv === 'venv');
+    if (shared && !shared.providers.includes('CUDAExecutionProvider'))
+        out.push('onnxruntime');
+    const kokoro = status.onnx.find((o) => o.venv === 'venv-kokoro');
+    if (kokoro && !kokoro.providers.includes('CUDAExecutionProvider'))
+        out.push('kokoro');
+    return out;
+}
+/**
  * Asks the venv what it actually has, in one interpreter launch rather than
  * one per package. Probes are importlib lookups, not real imports, except torch
  * — which genuinely has to load to report CUDA, so that one is slower.
@@ -913,12 +1019,28 @@ function buildProbe() {
     const names = [...new Set(RUNTIME_GROUPS.map((g) => g.probe))];
     return `
 import json, importlib.util
-out = {"packages": {}, "torch": None}
+out = {"packages": {}, "torch": None, "onnx_providers": [], "ctranslate2_cuda": None}
 for name in ${JSON.stringify(names)}:
     try:
         out["packages"][name] = True if importlib.util.find_spec(name) else False
     except Exception:
         out["packages"][name] = False
+try:
+    # Which build of ONNX Runtime this is. The CPU wheel and the GPU wheel
+    # import under the same name, so "installed" cannot tell them apart — and
+    # the difference is the whole question when someone asks why their ONNX
+    # model is still on the CPU.
+    import onnxruntime as _ort
+    out["onnx_providers"] = list(_ort.get_available_providers())
+except Exception:
+    pass
+try:
+    # Faster Whisper's device is CTranslate2's decision, not torch's. A CUDA
+    # torch does not make a CPU-only CTranslate2 wheel transcribe on the card.
+    import ctranslate2
+    out["ctranslate2_cuda"] = int(ctranslate2.get_cuda_device_count())
+except Exception:
+    pass
 try:
     import torch
     out["torch"] = {
@@ -1013,13 +1135,19 @@ export function llamaServerPath() {
     }
     return null;
 }
-function installedLlamaKind() {
-    const p = llamaServerPath();
-    if (!p)
+/**
+ * The backend a llama-server binary was built with, read off the shared
+ * libraries beside it rather than off its name.
+ *
+ * Takes the binary as an argument because the server can be overridden with
+ * LLAMACPP_SERVER; asking about the managed install would describe a different
+ * file from the one about to be spawned.
+ */
+export function llamaKindAt(bin) {
+    if (!bin)
         return null;
     try {
-        const dir = path.dirname(p);
-        const entries = readdirSync(dir);
+        const entries = readdirSync(path.dirname(bin));
         // CUDA first: a CUDA build bundles its own copy of the Vulkan loader's
         // neighbour libraries in some builds, and the name that proves the build is
         // the CUDA one is the ggml backend it was compiled against.
@@ -1032,6 +1160,10 @@ function installedLlamaKind() {
     catch {
         return null;
     }
+}
+/** What kind of llama.cpp build this app installed, if any. */
+export function installedLlamaKind() {
+    return llamaKindAt(llamaServerPath());
 }
 /** Whether a Vulkan-capable GPU is actually usable on this machine. */
 export function hasVulkan() {
@@ -1096,6 +1228,44 @@ export function cudaRuntimeVersion() {
 export function hasNvidiaGpu() {
     return spawnSync('nvidia-smi', ['-L'], { stdio: 'ignore' }).status === 0;
 }
+/**
+ * The pinned Linux CUDA archive's minimum compute capability.
+ *
+ * b11706's `libggml-cuda.so` carries only `sm_120a` kernels (Blackwell). The
+ * archive installs cleanly on a T4 and then dies before loading a model, so the
+ * installer must not choose it for an older card. A source build is the only
+ * way to get CUDA on compute 7.5–9.0 with this pin; the CPU build at least
+ * works.
+ */
+export const LLAMA_CUDA_MIN_COMPUTE = 12;
+/** Parse nvidia-smi's `compute_cap` column, e.g. "7.5", or null. */
+export function parseComputeCapability(raw) {
+    const first = raw.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
+    if (!first)
+        return null;
+    const value = Number(first);
+    return Number.isFinite(value) && value > 0 ? value : null;
+}
+/** This machine's NVIDIA compute capability, or null when it cannot be read. */
+export function nvidiaComputeCapability() {
+    const smi = spawnSync('nvidia-smi', ['--query-gpu=compute_cap', '--format=csv,noheader,nounits'], { encoding: 'utf8' });
+    if (smi.status !== 0 || !smi.stdout)
+        return null;
+    return parseComputeCapability(String(smi.stdout));
+}
+/**
+ * Whether the pinned CUDA archive has kernels for this GPU.
+ *
+ * Conservative on an unreadable capability: a CPU build that works beats a CUDA
+ * build that crashes on the first chat. The next pin needs this constant
+ * revisited if upstream starts publishing fat binaries again.
+ */
+export function computeCapabilitySupportsLlamaCuda(compute) {
+    return compute !== null && compute >= LLAMA_CUDA_MIN_COMPUTE;
+}
+export function llamaCudaUsable() {
+    return computeCapabilitySupportsLlamaCuda(nvidiaComputeCapability());
+}
 async function llamaCppInstalled() {
     const p = llamaServerPath();
     if (!p)
@@ -1108,24 +1278,36 @@ async function llamaCppInstalled() {
         return false;
     }
 }
-/** Non-null when a better (GPU) build is available than the one installed. */
+/** The build this machine should be running, or null when nothing is installed.
+ *
+ * This is deliberately not called an "upgrade": a CUDA build with no kernels
+ * for the card has to be replaced by the CPU build, which is a downgrade in
+ * name only because only one of the two can serve a chat.
+ */
 export async function llamaCppUpgradeKind() {
     const kind = installedLlamaKind();
     if (kind === null)
         return null; // nothing installed yet — install handles it
     const best = bestLlamaKind();
-    if (!best || best === 'cpu')
-        return null;
-    return kind === 'cpu' ? best : null;
+    return best === kind ? null : best;
 }
-/** The GPU build this machine should be running, or 'cpu'. */
+/** The build this machine should be running, or 'cpu'. */
 function bestLlamaKind() {
     // CUDA before Vulkan. An NVIDIA card has no usable Vulkan story here (no
     // render node in a container, and the CPU build is what the Vulkan check then
     // falls back to), so an NVIDIA machine that reached the CPU build is exactly
     // the case this fixes. On a card that answers both, CUDA is the native path.
-    if (hasNvidiaGpu())
-        return 'cuda';
+    if (hasNvidiaGpu()) {
+        // b11706's Linux CUDA archive is Blackwell-only. Choosing it on a T4
+        // produces a binary that unpacks, then crashes in the CUDA backend before
+        // the first token. Vulkan is the next-best GPU path where it exists (not in
+        // a T4 container); otherwise the CPU build is the one that works.
+        if (llamaCudaUsable())
+            return 'cuda';
+        if (hasVulkan())
+            return 'vulkan';
+        return 'cpu';
+    }
     if (hasVulkan())
         return 'vulkan';
     return 'cpu';
@@ -1263,10 +1445,19 @@ function runVenvProbe(py) {
         child.on('close', () => {
             clearTimeout(timer);
             try {
-                resolve(JSON.parse(out.trim().split('\n').pop() ?? '{}'));
+                const parsed = JSON.parse(out.trim().split('\n').pop() ?? '{}');
+                // The probe script is Python and names its fields in snake_case; this
+                // is where they become the camelCase the rest of the app uses. A key
+                // that is not mapped here is a field that silently reads as empty.
+                resolve({
+                    packages: parsed.packages ?? {},
+                    torch: parsed.torch ?? null,
+                    onnxProviders: Array.isArray(parsed.onnx_providers) ? parsed.onnx_providers : [],
+                    ctranslate2Cuda: typeof parsed.ctranslate2_cuda === 'number' ? parsed.ctranslate2_cuda : null,
+                });
             }
             catch {
-                resolve({ packages: {}, torch: null });
+                resolve({ packages: {}, torch: null, onnxProviders: [], ctranslate2Cuda: null });
             }
         });
     });
@@ -1333,6 +1524,17 @@ export async function runtimeStatus(busy = false) {
             deviceName: t.name,
         });
     }
+    // Which build of ONNX Runtime each environment has, read off the runtime
+    // itself. Two environments can disagree — the shared one runs the ONNX
+    // transcriber and the Kokoro one runs the ONNX voice — and both answers
+    // are wanted, because they are different pieces of work.
+    const onnx = [];
+    for (const [name, probe] of [['venv', main], ...side]) {
+        const providers = probe?.onnxProviders ?? [];
+        if (!providers.length)
+            continue;
+        onnx.push({ venv: name, label: venvLabel(name), providers });
+    }
     // Every group is detected the same way, from the same table the installer
     // writes to. A new group is installable and detectable in the same commit.
     const installed = {};
@@ -1349,11 +1551,24 @@ export async function runtimeStatus(busy = false) {
             installed[g.id] = (await whisperCppInstalled()) ? 'installed' : null;
             continue;
         }
+        if (g.installer === 'stable-diffusion-cpp') {
+            installed[g.id] = (await sdCppInstalled()) ? 'installed' : null;
+            continue;
+        }
         if (g.id === 'torch') {
             installed[g.id] = main?.torch?.version ?? null;
             continue;
         }
         const probe = venvName(g) === 'venv' ? main : (side.get(venvName(g)) ?? null);
+        // `find_spec('onnxruntime')` answers yes for an empty namespace directory
+        // left behind when one wheel uninstalls the other's files. That was exactly
+        // the state a GPU install left behind: the page said "Installed", the
+        // model failed to load, and no execution provider was ever reported. The
+        // provider list is the only answer that requires the package to import.
+        if (g.probe === 'onnxruntime') {
+            installed[g.id] = probe?.onnxProviders?.length ? 'installed' : null;
+            continue;
+        }
         installed[g.id] = probe?.packages?.[g.probe] ? 'installed' : null;
     }
     return {
@@ -1371,6 +1586,8 @@ export async function runtimeStatus(busy = false) {
             deviceName: main?.torch?.name ?? null,
         },
         torches,
+        onnx,
+        ctranslate2Cuda: main?.ctranslate2Cuda ?? null,
         busy,
     };
 }
@@ -2060,12 +2277,13 @@ async function aptInstall(pkg, why, onProgress, { password, onNeedsPrivilege }) 
  */
 /** Does this group's install go through pip, and so need a Python environment? */
 function usesPython(group) {
-    // Ollama, llama.cpp and whisper.cpp ship their own installers. None of them
-    // imports a package, none reads an interpreter, and none is blocked by a
-    // Python that cannot build a venv.
+    // Ollama, llama.cpp, whisper.cpp and stable-diffusion.cpp ship their own
+    // installers. None of them imports a package, none reads an interpreter, and
+    // none is blocked by a Python that cannot build a venv.
     return (group.installer !== 'ollama' &&
         group.installer !== 'llama-cpp' &&
-        group.installer !== 'whisper-cpp');
+        group.installer !== 'whisper-cpp' &&
+        group.installer !== 'stable-diffusion-cpp');
 }
 export async function installRuntimes({ groups, device, onProgress, password, onNeedsPrivilege, }) {
     // Only the groups that actually go through pip. Ollama and llama.cpp have
@@ -2171,10 +2389,51 @@ export async function installRuntimes({ groups, device, onProgress, password, on
         for (const g of list) {
             if (g.id === 'torch')
                 continue;
-            if (!g.pkgs.length)
+            // What this group installs depends on the machine for some groups: the
+            // ONNX Runtime GPU wheel and the CPU wheel are different packages with
+            // the same import name.
+            const plan = g.deviceInstall
+                ? g.deviceInstall(device, presence)
+                : { pkgs: g.pkgs, approxMB: g.approxMB };
+            if (!plan.pkgs.length)
                 continue;
+            // The two ONNX Runtime builds install the same import package, so the
+            // one that is not wanted has to go before the other arrives. Left in
+            // place they overwrite each other's files, and a later Remove would
+            // then delete the build that is actually in use.
+            const rival = plan.pkgs.some((p) => p.startsWith('onnxruntime-gpu'))
+                ? 'onnxruntime'
+                : plan.pkgs.includes('onnxruntime')
+                    ? 'onnxruntime-gpu'
+                    : null;
+            if (rival) {
+                onProgress(`Removing the old ONNX Runtime build (${rival})…`);
+                await runPip(py, ['-m', 'pip', 'uninstall', '-y', '--disable-pip-version-check', '--no-input', rival], g.label);
+            }
             onProgress(`Installing ${g.label} into ${where}…`);
-            await runPip(py, [...common, ...g.pkgs], g.label);
+            // Both ONNX wheels install the same `onnxruntime` package. Uninstalling
+            // the rival can delete files that the wanted wheel's dist-info still
+            // claims are present, after which pip says "Requirement already
+            // satisfied" and leaves an import that has no providers at all. Reinstall
+            // the wanted wheel over itself so its files come back, then install the
+            // group's other packages normally. `--no-deps` is deliberate: the rival
+            // only shares the ONNX package, not numpy/protobuf, so there is nothing
+            // else that needs replacing.
+            const onnxPkg = plan.pkgs.find((p) => /^onnxruntime(?:-gpu)?(?:[<>=!~].*)?$/.test(p));
+            if (rival && onnxPkg) {
+                onProgress(`Reinstalling ${onnxPkg} so the new build is complete…`);
+                await runPip(py, [...common, '--force-reinstall', '--no-deps', onnxPkg], g.label);
+                const others = plan.pkgs.filter((p) => p !== onnxPkg);
+                // The repair above deliberately skipped dependencies. On a fresh venv
+                // there are none yet, so ask pip for the same wheel again without
+                // --no-deps: it sees the wheel installed and fills in numpy/protobuf
+                // and the rest. Doing this in the same command as the group's other
+                // packages keeps it to one extra invocation.
+                await runPip(py, [...common, onnxPkg, ...others], g.label);
+            }
+            else {
+                await runPip(py, [...common, ...plan.pkgs], g.label);
+            }
             onProgress(`${g.label} installed.`);
         }
     }
@@ -2192,6 +2451,10 @@ export async function installRuntimes({ groups, device, onProgress, password, on
         }
         if (g.installer === 'whisper-cpp') {
             await installWhisperCpp(onProgress);
+            continue;
+        }
+        if (g.installer === 'stable-diffusion-cpp') {
+            await installStableDiffusionCpp(onProgress);
         }
     }
     if (listed.size === 0)
@@ -2506,7 +2769,7 @@ async function installLlamaCpp(onProgress) {
         return;
     }
     if (await llamaCppInstalled()) {
-        onProgress('Upgrading llama.cpp to the GPU build…');
+        onProgress('Replacing the installed llama.cpp build…');
     }
     const picked = llamaAsset();
     if (!picked) {
@@ -2532,6 +2795,13 @@ async function installLlamaCpp(onProgress) {
         cuda: `CUDA ${cudaTag()}`,
         cpu: 'CPU',
     };
+    if (picked.kind === 'cpu' && hasNvidiaGpu()) {
+        const compute = nvidiaComputeCapability();
+        if (compute !== null && !computeCapabilitySupportsLlamaCuda(compute)) {
+            onProgress(`The pinned Linux CUDA build has only Blackwell (sm_120) kernels, and ` +
+                `this card is compute ${compute}; installing the CPU build instead.`);
+        }
+    }
     onProgress(`Fetching llama.cpp ${LLAMA_BUILD} (${KIND_LABEL[picked.kind]} build)…`);
     const url = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${asset}`;
     // The CUDA build links against libcudart and friends, which upstream ships as
@@ -2677,6 +2947,120 @@ async function installWhisperCpp(onProgress) {
             ' Its ggml-*.bin models in Get models can transcribe here.'
         : 'whisper.cpp installed. Its ggml-*.bin models in Get models can transcribe here.');
 }
+/**
+ * Downloads and unpacks the pinned stable-diffusion.cpp build.
+ *
+ * Same contract as llama.cpp and whisper.cpp: app-local, no root, no Python.
+ * The release archive is flat, but the code still searches for the CLI rather
+ * than assuming that, because upstream has nested its assets before.
+ */
+async function installStableDiffusionCpp(onProgress) {
+    if (await sdCppInstalled()) {
+        onProgress('stable-diffusion.cpp is already installed.');
+        return;
+    }
+    const picked = sdCppAsset(hasVulkan());
+    if (!picked) {
+        throw new Error('The bundled stable-diffusion.cpp installer covers Linux and Windows ' +
+            'x64, and Apple silicon. This platform has no published archive; see ' +
+            'the project releases for a manual build.');
+    }
+    // A half-finished tree would otherwise be found by the status probe and win
+    // over the fresh download.
+    await rm(sdCppDir(), { recursive: true, force: true });
+    await mkdir(sdCppDir(), { recursive: true });
+    const kind = picked.kind === 'vulkan' ? 'Vulkan' : picked.kind === 'metal' ? 'Metal' : 'CPU';
+    onProgress(`Fetching stable-diffusion.cpp ${SDCPP_BUILD} (${kind} build)…`);
+    const url = `https://github.com/leejet/stable-diffusion.cpp/releases/download/${SDCPP_BUILD}/${picked.name}`;
+    const res = await fetch(url, { redirect: 'follow' });
+    if (!res.ok)
+        throw new Error(`Could not download ${picked.name} (HTTP ${res.status}).`);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    const archive = path.join(sdCppDir(), picked.name);
+    await writeFile(archive, bytes);
+    onProgress(`Unpacking ${(bytes.length / 1024 / 1024).toFixed(0)} MB…`);
+    await unpackZip(archive, sdCppDir());
+    const cli = await findFileUnder(sdCppDir(), sdCppCliName());
+    if (!cli) {
+        await rm(sdCppDir(), { recursive: true, force: true });
+        throw new Error('The build unpacked, but no sd-cli binary was found. The archive layout ' +
+            'may have changed; fetch it by hand from the stable-diffusion.cpp releases.');
+    }
+    await chmod(cli, 0o755);
+    // Shared libraries sit beside the binary and are resolved from there, so the
+    // marker records that directory rather than the archive root.
+    const cliDir = path.dirname(cli);
+    await writeFile(path.join(sdCppDir(), 'build.txt'), path.relative(runtimesDir(), cliDir));
+    await rm(archive, { force: true });
+    onProgress(`stable-diffusion.cpp installed (${kind}). Stable Diffusion 3.5 Medium in ` +
+        'Get models can generate images here.');
+}
+/** Depth-first search for one exact file name under a directory. */
+async function findFileUnder(root, name) {
+    const stack = [root];
+    while (stack.length) {
+        const dir = stack.pop();
+        let entries;
+        try {
+            entries = (await readdir(dir, { withFileTypes: true }));
+        }
+        catch {
+            continue;
+        }
+        for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isFile() && e.name === name)
+                return full;
+            if (e.isDirectory())
+                stack.push(full);
+        }
+    }
+    return null;
+}
+/**
+ * Extracts a zip on every supported platform.
+ *
+ * Windows uses PowerShell as it already does for whisper.cpp. Linux and macOS
+ * have `unzip` in their base install; the Python fallback covers minimal
+ * containers where it was stripped out but the app's Python still exists.
+ */
+async function unpackZip(archive, dest) {
+    const attempts = process.platform === 'win32'
+        ? [
+            {
+                bin: 'powershell',
+                args: [
+                    '-NoProfile',
+                    '-NonInteractive',
+                    '-Command',
+                    `Expand-Archive -LiteralPath ${JSON.stringify(archive)} -DestinationPath ${JSON.stringify(dest)} -Force`,
+                ],
+            },
+        ]
+        : [
+            { bin: 'unzip', args: ['-oq', archive, '-d', dest] },
+            { bin: 'python3', args: ['-m', 'zipfile', '-e', archive, dest] },
+        ];
+    let lastError = '';
+    for (const attempt of attempts) {
+        try {
+            await new Promise((resolve, reject) => {
+                const child = spawn(attempt.bin, attempt.args, { stdio: ['ignore', 'ignore', 'pipe'] });
+                let err = '';
+                child.stderr.on('data', (b) => (err += String(b)));
+                child.on('error', reject);
+                child.on('close', (code) => code === 0
+                    ? resolve()
+                    : reject(new Error(`${attempt.bin} exited ${code}${err.trim() ? ` — ${err.trim()}` : ''}`)));
+            });
+            return;
+        }
+        catch (err) {
+            lastError = err.message;
+        }
+    }
+    throw new Error(`Could not unpack ${path.basename(archive)}: ${lastError}`);
+}
 /** The file name the CLI has on this platform, exported for the status probe. */
 const whisperCliName = () => (process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli');
 /** Depth-first search for one exact file name under the unpacked trees. */
@@ -2797,7 +3181,21 @@ export async function removeRuntimeGroup(id, onProgress) {
         onProgress('whisper.cpp removed. Its models are left in place for other runtimes.');
         return { removed: id, label: group.label, reason: null };
     }
-    if (!group.pkgs.length) {
+    if (group.installer === 'stable-diffusion-cpp') {
+        onProgress('Removing stable-diffusion.cpp…');
+        // The whole app-local tree goes: binary, shared libraries and the marker.
+        // Downloaded models are separate and stay put.
+        const cli = sdCppCliPath();
+        if (cli)
+            await rm(path.dirname(cli), { recursive: true, force: true });
+        await rm(sdCppDir(), { recursive: true, force: true });
+        onProgress('stable-diffusion.cpp removed. Its models are left in place.');
+        return { removed: id, label: group.label, reason: null };
+    }
+    // A group whose packages depend on the device may have installed either
+    // build, so Remove has to be able to take both.
+    const removable = group.allPkgs ?? group.pkgs;
+    if (!removable.length) {
         return {
             removed: id,
             label: group.label,
@@ -2815,16 +3213,16 @@ export async function removeRuntimeGroup(id, onProgress) {
     // removing the environment — torch and the rest of its tree go with it
     // rather than being left behind in a venv nothing else uses.
     if (name !== 'venv') {
-        onProgress(`Removing the ${group.label} environment (${group.pkgs.join(', ')})…`);
+        onProgress(`Removing the ${group.label} environment (${removable.join(', ')})…`);
         await rm(venvDir(name), { recursive: true, force: true });
         venvVersions.delete(name);
         invalidateRuntimeProbes();
         onProgress(`${group.label} removed.`);
         return { removed: id, label: group.label, reason: null };
     }
-    onProgress(`Removing ${group.label} (${group.pkgs.join(', ')})…`);
+    onProgress(`Removing ${group.label} (${removable.join(', ')})…`);
     await new Promise((resolve, reject) => {
-        const child = spawn(py, ['-m', 'pip', 'uninstall', '-y', '--disable-pip-version-check', '--no-input', ...group.pkgs], { stdio: ['ignore', 'pipe', 'pipe'] });
+        const child = spawn(py, ['-m', 'pip', 'uninstall', '-y', '--disable-pip-version-check', '--no-input', ...removable], { stdio: ['ignore', 'pipe', 'pipe'] });
         const bump = (buf) => {
             for (const line of buf.toString().split(/\r?\n/)) {
                 if (line.trim())
@@ -2877,4 +3275,33 @@ export async function deviceWarning(device) {
                 : 'No AMD GPU detected. ROCm wheels will install but cannot run.';
     }
     return null;
+}
+/** Approximate bytes used by the runtimes folder, for the data-usage readout. */
+export async function runtimeStorageBytes() {
+    const root = runtimesDir();
+    let total = 0;
+    async function walk(dir) {
+        let entries;
+        try {
+            entries = await readdir(dir);
+        }
+        catch {
+            return;
+        }
+        for (const name of entries) {
+            const full = path.join(dir, name);
+            try {
+                const st = await stat(full);
+                if (st.isDirectory())
+                    await walk(full);
+                else
+                    total += st.size;
+            }
+            catch {
+                /* ignore */
+            }
+        }
+    }
+    await walk(root);
+    return total;
 }

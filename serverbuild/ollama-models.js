@@ -7,12 +7,23 @@
  * follow OLLAMA_BASE_URL; it is read per call (not at module load) so tests
  * can point it at a stub.
  */
+import { lstat, readdir, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { parseNDJSON } from './sse.js';
 const defaultBaseUrl = () => process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
-/** Fetch that reports a dead daemon plainly instead of a bare TypeError. */
-async function daemonFetch(path, init, signal) {
-    const timeout = AbortSignal.timeout(30_000);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+/**
+ * Fetch that reports a dead daemon plainly instead of a bare TypeError.
+ *
+ * `timeoutMs` covers ordinary JSON calls, where a daemon that never answers is
+ * a dead end. A model pull is an NDJSON stream that can legitimately stay open
+ * for many minutes; applying the 30-second timer to it aborts the download
+ * halfway through. Pull therefore passes `0`, so the stream is bounded only by
+ * the caller's signal — or by nothing when the caller does not supply one.
+ */
+async function daemonFetch(path, init, signal, timeoutMs = 30_000) {
+    const timeout = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null;
+    const combined = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
     try {
         return await fetch(`${defaultBaseUrl()}${path}`, { ...init, signal: combined });
     }
@@ -24,8 +35,8 @@ async function daemonFetch(path, init, signal) {
         // is working perfectly.
         if (signal?.aborted)
             throw err;
-        if (err instanceof Error && err.name === 'TimeoutError') {
-            throw new Error('Ollama did not answer within 30s — it is busy loading or replying.');
+        if (timeoutMs > 0 && err instanceof Error && err.name === 'TimeoutError') {
+            throw new Error(`Ollama did not answer within ${Math.round(timeoutMs / 1000)}s — it is busy loading or replying.`);
         }
         throw new Error(`Ollama is not reachable at ${defaultBaseUrl()}. Is the daemon running?`);
     }
@@ -55,24 +66,147 @@ export function validateModelName(name) {
         return 'Invalid model name';
     return null;
 }
+/**
+ * Ollama's model store, where the daemon itself looks: OLLAMA_MODELS when set,
+ * ~/.ollama/models otherwise. Two manifest layouts live side by side — the
+ * older `manifests/<registry>/<namespace>/<name>/<tag>` files and, since Ollama
+ * 0.12, `manifests-v2/<registry>/<namespace>/<name>/<tag>` symlinks into
+ * `blobs/` — so both are read.
+ */
+function modelsRoot() {
+    return process.env.OLLAMA_MODELS ?? path.join(homedir(), '.ollama', 'models');
+}
+/** Every file under `dir`; an unreadable or missing tree simply reads as empty. */
+async function walk(dir, depth = 0) {
+    if (depth > 6)
+        return [];
+    let entries;
+    try {
+        entries = await readdir(dir, { withFileTypes: true });
+    }
+    catch {
+        return [];
+    }
+    const files = [];
+    for (const entry of entries) {
+        if (entry.name.startsWith('.'))
+            continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory())
+            files.push(...(await walk(full, depth + 1)));
+        else
+            files.push(full);
+    }
+    return files;
+}
+/**
+ * Size and the details `/api/tags` shows, from the manifest and the config blob
+ * it points at. That blob is also where the daemon's parameter_size,
+ * quantization_level and family come from (model_type, file_type,
+ * model_family), so a disk listing and a daemon listing agree.
+ */
+async function readManifest(file) {
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    const layers = (manifest.layers ?? []).reduce((total, layer) => total + (typeof layer.size === 'number' ? layer.size : 0), 0);
+    const size = layers + (typeof manifest.config?.size === 'number' ? manifest.config.size : 0);
+    const digest = manifest.config?.digest;
+    if (!digest)
+        return { size };
+    try {
+        const blob = JSON.parse(await readFile(path.join(modelsRoot(), 'blobs', digest.replace(':', '-')), 'utf8'));
+        return {
+            size,
+            parameterSize: blob.model_type,
+            quantization: blob.file_type,
+            family: blob.model_family,
+        };
+    }
+    catch {
+        return { size };
+    }
+}
+/** The default registries' host is not part of the name; `library/` is implied. */
+function modelName(file, root, defaultHost) {
+    const parts = path.relative(root, file).split(path.sep);
+    if (parts.length < 4)
+        return null;
+    const [host, namespace] = parts;
+    const tag = parts[parts.length - 1];
+    const name = parts.slice(2, -1).join('/');
+    if (!name || !tag)
+        return null;
+    const prefix = host === defaultHost ? '' : `${host}/`;
+    return `${prefix}${namespace === 'library' ? '' : `${namespace}/`}${name}:${tag}`;
+}
+/**
+ * Installed models read from Ollama's manifest store, with no daemon involved.
+ *
+ * The daemon is this app's own child: it is killed when the app exits. Right
+ * after a restart there is nothing listening, and the chat picker used to be
+ * empty in exactly that state — but picking a model is what starts the daemon,
+ * so it could never start. The manifests hold the same names, sizes and
+ * details `/api/tags` would return.
+ */
+export async function modelsOnDisk() {
+    const root = modelsRoot();
+    const found = new Map();
+    // v2 first: when a model exists in both layouts the daemon reads the v2
+    // manifest (a link into the same blobs), so that size is the current one.
+    for (const [layout, defaultHost] of [
+        ['manifests-v2', 'ollama.com'],
+        ['manifests', 'registry.ollama.ai'],
+    ]) {
+        const dir = path.join(root, layout);
+        for (const file of await walk(dir)) {
+            const name = modelName(file, dir, defaultHost);
+            if (!name || found.has(name))
+                continue;
+            const details = await readManifest(file).catch(() => null);
+            const stat = await lstat(file).catch(() => null);
+            if (!details || !stat)
+                continue;
+            found.set(name, {
+                name,
+                size: details.size,
+                modifiedAt: stat.mtime.toISOString(),
+                parameterSize: details.parameterSize,
+                quantization: details.quantization,
+                family: details.family,
+            });
+        }
+    }
+    return [...found.values()].sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+}
 /** Installed models, most recently modified first (mirrors the chat picker). */
 export async function listLocalModels(signal) {
-    const res = await daemonFetch('/api/tags', {}, signal);
-    const body = await res.text();
-    if (!res.ok)
-        throw daemonError(res, body);
-    const data = JSON.parse(body);
-    return (data.models ?? [])
-        .filter((m) => typeof m.name === 'string')
-        .map((m) => ({
-        name: m.name,
-        size: typeof m.size === 'number' ? m.size : 0,
-        modifiedAt: m.modified_at ?? '',
-        parameterSize: m.details?.parameter_size,
-        quantization: m.details?.quantization_level,
-        family: m.details?.family,
-    }))
-        .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+    try {
+        const res = await daemonFetch('/api/tags', {}, signal);
+        const body = await res.text();
+        if (!res.ok)
+            throw daemonError(res, body);
+        const data = JSON.parse(body);
+        return (data.models ?? [])
+            .filter((m) => typeof m.name === 'string')
+            .map((m) => ({
+            name: m.name,
+            size: typeof m.size === 'number' ? m.size : 0,
+            modifiedAt: m.modified_at ?? '',
+            parameterSize: m.details?.parameter_size,
+            quantization: m.details?.quantization_level,
+            family: m.details?.family,
+        }))
+            .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+    }
+    catch (err) {
+        // A caller's own abort is theirs to interpret; a dead daemon is the case
+        // the manifest store exists for.
+        if (signal?.aborted)
+            throw err;
+        const onDisk = await modelsOnDisk();
+        if (onDisk.length)
+            return onDisk;
+        throw err;
+    }
 }
 /**
  * Pulls a model, yielding progress lines as the daemon reports them
@@ -84,7 +218,7 @@ export async function* pullModel(name, signal) {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name, stream: true }),
-    }, signal);
+    }, signal, 0);
     if (!res.ok)
         throw daemonError(res, await res.text());
     for await (const event of parseNDJSON(res.body)) {

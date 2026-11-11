@@ -32,6 +32,7 @@ import { runtimeStatus } from './runtimes.js';
  * filed under the wrong section.
  */
 const CATALOG_TASK = {
+    vision: 'vision',
     stt: 'speech-to-text',
     tts: 'text-to-speech',
     image: 'image-generation',
@@ -48,12 +49,66 @@ function requiredFiles(entry) {
     return (entry.files ?? []).map((f) => f.name);
 }
 /** The file the runner is pointed at — the weights, not a sidecar. */
-function entryAnchor(entry) {
+function entryAnchor(entry, onDisk) {
     const files = entry.files ?? [];
     // The largest file is the weights in every format here (model.bin, *.safetensors,
     // *.onnx, *.ckpt), so it identifies the model reliably.
     const biggest = files.slice().sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))[0];
-    return biggest?.name ?? files[0]?.name ?? '';
+    if (!biggest)
+        return files[0]?.name ?? '';
+    // Some components come from an auxiliary repository (SD 3.5's VAE). Presence
+    // is keyed by the repo that actually publishes the file, not the card's main
+    // repo, or the VAE would always read as missing.
+    const repo = biggest.repo ?? entry.repo;
+    // Point the runner at the file that is actually present when a slot offers
+    // alternatives. Kokoro's q4f16 export is the case that made this necessary:
+    // the catalog downloads q4, but a Browse download may only have q4f16, and
+    // handing the runner the missing primary name failed before it ever loaded.
+    if (onDisk.has(`${repo}::${biggest.name}`))
+        return biggest.name;
+    for (const alt of biggest.oneOf ?? []) {
+        if (onDisk.has(`${repo}::${alt}`))
+            return alt;
+    }
+    return biggest.name;
+}
+/**
+ * The value a picker stores for this candidate.
+ *
+ * Most catalog entries have one model per repository, so `local:<repo>` stays
+ * the assignment. whisper.cpp's quantisations share a repository, and using
+ * that same value for all of them made a `<select>` mark every option selected
+ * — the browser keeps the last, which was "Whisper tiny — Not downloaded yet"
+ * while the ready file was the small one. The anchor file disambiguates them.
+ */
+export function assignmentValue(model) {
+    return model.id ?? `local:${model.repo}`;
+}
+/**
+ * Whether a saved assignment points at this candidate.
+ *
+ * A stored `local:<repo>` from before unique ids is still honoured: it resolves
+ * to the first ready candidate in that repository, which is the model the user
+ * could actually run. A new selection stores the unique id.
+ */
+export function assignmentMatches(model, value, all) {
+    if (!value)
+        return false;
+    if (value === assignmentValue(model))
+        return true;
+    if (value !== `local:${model.repo}`)
+        return false;
+    const sameRepo = all.filter((m) => m.repo === model.repo && m.task === model.task);
+    const target = sameRepo.find((m) => m.ready) ?? sameRepo[0];
+    return target === model;
+}
+/** Actual on-disk file satisfying one catalog slot, or '' when absent. */
+function presentName(entry, file, onDisk) {
+    for (const name of [file.name, ...(file.oneOf ?? [])]) {
+        if (onDisk.has(`${file.repo ?? entry.repo}::${name}`))
+            return name;
+    }
+    return '';
 }
 /** `model_type` from a repo's config.json, or '' when absent or unreadable. */
 async function modelTypeOf(dir) {
@@ -137,13 +192,24 @@ export async function findKokoroOnnx(dir) {
     catch {
         return null;
     }
+    /* The fp16-typed exports (q4f16, fp16, q8f16, uint8f16) are silent under
+     * ONNX Runtime's CUDA provider: the session reports CUDA, the graph returns
+     * a full-length array of non-finite samples, and the WAV is constant
+     * -32768. The same file computes on the CPU, which is why q4f16 used to be
+     * first and why this only showed up on a machine with a card. The q4 export
+     * keeps its activations in fp32 and produces real audio on both devices, so
+     * it leads; model.onnx (plain fp32) is the reference fallback. The fp16
+     * names stay at the end so a directory that has nothing else still runs on
+     * the CPU rather than being refused. */
     const preferred = [
-        'model_q4f16.onnx',
         'model_q4.onnx',
+        'model.onnx',
         'model_quantized.onnx',
         'model_uint8.onnx',
+        'model_q4f16.onnx',
         'model_fp16.onnx',
-        'model.onnx',
+        'model_q8f16.onnx',
+        'model_uint8f16.onnx',
     ];
     const model = preferred.find((name) => files.includes(name)) ??
         files.filter((name) => /\.onnx$/i.test(name)).sort()[0];
@@ -446,12 +512,47 @@ export async function runnableModels(task, deps = {}) {
     ]);
     const onDisk = new Set(downloads.map((d) => `${d.repo}::${d.file}`));
     const out = [];
-    for (const entry of candidatesFor(task)) {
+    const catalogVisionTags = new Set();
+    const entries = candidatesFor(task);
+    // Only repositories that carry more than one catalog entry need a unique
+    // assignment id. Keeping `local:<repo>` for the rest preserves every
+    // existing assignment, including the vision/tts/image ones.
+    const repoCounts = new Map();
+    for (const entry of entries)
+        repoCounts.set(entry.repo, (repoCounts.get(entry.repo) ?? 0) + 1);
+    for (const entry of entries) {
+        // Vision models pulled from Ollama's registry have no Hub files. Their
+        // presence is the daemon's model list, not the downloader's records.
+        if (task === 'vision' && entry.ollamaTag) {
+            const tag = entry.ollamaTag;
+            catalogVisionTags.add(tag);
+            const installedVision = deps.visionModels ?? [];
+            const present = installedVision.includes(tag);
+            out.push({
+                repo: entry.repo,
+                id: `ollama:${tag}`,
+                label: entry.label,
+                task,
+                file: '',
+                requiredFiles: [],
+                presentFiles: [],
+                runtimes: {},
+                missing: [],
+                blocked: false,
+                reason: present ? '' : 'Not pulled yet.',
+                ready: present,
+            });
+            continue;
+        }
         const needed = requiredFiles(entry);
         if (!needed.length)
             continue;
-        const present = needed.filter((f) => onDisk.has(`${entry.repo}::${f}`));
-        const missingFiles = needed.filter((f) => !onDisk.has(`${entry.repo}::${f}`));
+        const present = (entry.files ?? [])
+            .map((f) => presentName(entry, f, onDisk))
+            .filter(Boolean);
+        const missingFiles = (entry.files ?? [])
+            .filter((f) => !presentName(entry, f, onDisk))
+            .map((f) => f.name);
         const requires = entry.run?.requires ?? [];
         const missingRuntimes = requires.filter((g) => !installed[g]);
         const runtimes = {};
@@ -478,18 +579,49 @@ export async function runnableModels(task, deps = {}) {
         }
         out.push({
             repo: entry.repo,
+            ...(repoCounts.get(entry.repo) > 1
+                ? { id: `local:${entry.repo}#${entryAnchor(entry, onDisk)}` }
+                : {}),
             label: entry.label,
             task,
-            file: entryAnchor(entry),
+            file: entryAnchor(entry, onDisk),
             requiredFiles: needed,
             presentFiles: present,
             runtimes,
             missing: missingRuntimes,
             driver: driverFor(requires),
+            ...(typeof entry.run?.steps === 'number' ? { steps: entry.run.steps } : {}),
+            ...(typeof entry.run?.width === 'number' ? { width: entry.run.width } : {}),
+            ...(typeof entry.run?.height === 'number' ? { height: entry.run.height } : {}),
+            ...(typeof entry.run?.maxWidth === 'number' ? { maxWidth: entry.run.maxWidth } : {}),
+            ...(typeof entry.run?.maxHeight === 'number' ? { maxHeight: entry.run.maxHeight } : {}),
             blocked: false,
             reason,
             ready: !reason,
         });
+    }
+    // A vision model pulled outside the catalog still belongs in the assignment
+    // picker. The daemon's capability probe is the authority: if it says the
+    // model accepts images, it is assignable here even when no card mentions it.
+    if (task === 'vision') {
+        for (const name of deps.visionModels ?? []) {
+            if (catalogVisionTags.has(name))
+                continue;
+            out.push({
+                repo: name,
+                id: `ollama:${name}`,
+                label: name,
+                task,
+                file: '',
+                requiredFiles: [],
+                presentFiles: [],
+                runtimes: {},
+                missing: [],
+                blocked: false,
+                reason: '',
+                ready: true,
+            });
+        }
     }
     // Downloads the catalog does not carry. Grouped by repo because a model can
     // be several files; the catalog's entries are skipped because they already

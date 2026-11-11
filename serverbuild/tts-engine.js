@@ -38,6 +38,15 @@ const scriptsDir = path.resolve(here, '..', 'scripts', 'py');
 const idleMs = () => Number(process.env.TTS_ENGINE_IDLE_MS ?? 10 * 60_000);
 /** How long the model may take to load before the engine is given up on. */
 const loadTimeoutMs = () => Number(process.env.TTS_ENGINE_LOAD_MS ?? 10 * 60_000);
+/**
+ * How long one utterance may take before the engine is written off.
+ *
+ * A request that never gets an answer would otherwise hang the browser's
+ * fetch for ever, and the engine would sit there holding a model for a reply
+ * nobody is waiting for. The engine is released and the request falls back to
+ * the one-shot runner, which has a timeout of its own.
+ */
+const requestMs = () => Number(process.env.TTS_ENGINE_REQUEST_MS ?? 10 * 60_000);
 /** How long an engine that failed to start is left alone before it is retried. */
 const brokenTtlMs = () => Number(process.env.TTS_ENGINE_BROKEN_MS ?? 5 * 60_000);
 class Engine {
@@ -222,7 +231,29 @@ class Engine {
         const id = this.nextId++;
         this.markWorking();
         return new Promise((resolve, reject) => {
-            this.pending.set(id, { resolve, reject, onLog: utterance.onLog });
+            const limit = requestMs();
+            const timer = Number.isFinite(limit) && limit > 0
+                ? setTimeout(() => {
+                    this.pending.delete(id);
+                    // An engine that will not answer is not an engine anybody should
+                    // keep asking. It is let go of here, and the request falls back to
+                    // the one-shot runner rather than waiting a second time.
+                    this.dead = true;
+                    void this.release();
+                    reject(new Error(`the voice engine did not answer within ${Math.round(limit / 1000)}s`));
+                }, limit)
+                : null;
+            timer?.unref?.();
+            const settle = (fn) => {
+                if (timer)
+                    clearTimeout(timer);
+                fn();
+            };
+            this.pending.set(id, {
+                resolve: (value) => settle(() => resolve(value)),
+                reject: (err) => settle(() => reject(err)),
+                onLog: utterance.onLog,
+            });
             const line = JSON.stringify({
                 id,
                 text: utterance.text,
@@ -233,14 +264,14 @@ class Engine {
             const stdin = this.child.stdin;
             if (!stdin) {
                 this.pending.delete(id);
-                reject(new Error('the voice engine has no way to accept work'));
+                settle(() => reject(new Error('the voice engine has no way to accept work')));
                 return;
             }
             stdin.write(line, (err) => {
                 if (!err)
                     return;
                 this.pending.delete(id);
-                reject(new Error(`the voice engine stopped accepting work: ${err.message}`));
+                settle(() => reject(new Error(`the voice engine stopped accepting work: ${err.message}`)));
             });
         });
     }
@@ -306,6 +337,9 @@ export async function speakViaEngine(spec, utterance) {
             console.error('[tts-engine] stopped mid-request:', message(err));
             return null;
         }
+        // The engine is fine; this one request was not. It goes back to waiting,
+        // with the same deadline as any other idle engine.
+        engine.touchIdle();
         return { ok: false, data: { error: message(err) }, log: engine.log };
     }
 }

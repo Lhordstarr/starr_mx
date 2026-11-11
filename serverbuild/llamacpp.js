@@ -20,8 +20,8 @@ import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { listDownloads } from './huggingface.js';
 import { CATALOG } from './model-catalog.js';
-import { hasVulkan, llamaServerPath } from './runtimes.js';
-import { attachChild, finishProcess, registerProcess, registerStopHandler, unregisterStopHandler, } from './processes.js';
+import { llamaCudaUsable, llamaKindAt, llamaServerPath } from './runtimes.js';
+import { attachChild, finishProcess, registerProcess, registerStopHandler, setProcessDevice, setProcessWarm, unregisterStopHandler, } from './processes.js';
 /**
  * Where the managed server listens. Deliberately not upstream's default of
  * 9931: anyone running their own llama-server gets that port, and a collision
@@ -239,10 +239,30 @@ function clearIdle() {
 /** Restarts the countdown: the server is shut down only once nothing is using it. */
 function touchIdle() {
     clearIdle();
+    const jobId = serving?.jobId;
     const ms = idleMs();
-    if (!Number.isFinite(ms) || ms <= 0)
+    if (!Number.isFinite(ms) || ms <= 0) {
+        if (jobId)
+            setProcessWarm(jobId, false);
         return;
+    }
+    const until = Date.now() + ms;
+    if (jobId)
+        setProcessWarm(jobId, true, until);
     idleTimer = setTimeout(() => { console.error('[llama-debug] timer fired at', Date.now(), 'ms was', ms); void stopLlamaServer(); }, ms);
+}
+/** A chat request is in flight: the server is working, not idle. */
+export function markLlamaBusy() {
+    if (!serving)
+        return;
+    clearIdle();
+    if (serving.jobId)
+        setProcessWarm(serving.jobId, false);
+}
+/** The request is done: restart the idle clock and publish its deadline. */
+export function markLlamaIdle() {
+    if (serving)
+        touchIdle();
 }
 /**
  * Stops the managed server, politely first.
@@ -346,6 +366,14 @@ async function start(bin, model, onProgress) {
         // this app's API calls.
         '--no-webui',
     ];
+    const kind = llamaKindAt(bin);
+    // Refuse before spawning. The pinned b11706 CUDA archive carries only
+    // Blackwell kernels; on an older card it gets far enough to print a libc
+    // backtrace and exit 1, which is a much worse answer than this sentence.
+    if (kind === 'cuda' && !llamaCudaUsable()) {
+        throw new Error('The installed llama.cpp CUDA build has no kernels for this card. ' +
+            'Reinstall llama.cpp from Settings → Runtimes to replace it with the CPU build.');
+    }
     tail = [];
     const child = spawn(process.execPath, ['-e', SUPERVISOR, bin, ...args], {
         // stdin is the supervisor's death watch, not a conversation partner: the
@@ -405,11 +433,16 @@ async function start(bin, model, onProgress) {
         kind: 'llm',
         script: 'llama-server',
         pid: serverPid > 0 ? serverPid : (child.pid ?? -1),
-        device: hasVulkan() ? 'gpu' : 'cpu',
+        repo: model.repo,
+        device: kind === 'cpu' || kind === null ? 'cpu' : 'gpu',
     });
     serving.jobId = job.id;
     attachChild(job.id, child);
     registerStopHandler(job.id, () => stopLlamaServer(true));
+    // The build is the fact; `hasVulkan()` is not. On a CUDA machine the old
+    // label said CPU while llama-server was loading layers onto the T4.
+    if (kind)
+        setProcessDevice(job.id, kind);
     // The idle timer only starts once the server is genuinely serving.
     touchIdle();
 }
@@ -438,7 +471,7 @@ export async function prepareLlama(modelId, onProgress) {
     }
     if (serving?.model === model.id) {
         console.error('[llama-debug] reuse path, model=', model.id);
-        touchIdle();
+        markLlamaBusy();
         return;
     }
     console.error('[llama-debug] prepare: serving.model=', serving?.model, 'requested=', model.id);
@@ -447,7 +480,7 @@ export async function prepareLlama(modelId, onProgress) {
         // settle before deciding whether this request needs its own.
         await starting.catch(() => undefined);
         if (serving?.model === model.id) {
-            touchIdle();
+            markLlamaBusy();
             return;
         }
     }
@@ -455,6 +488,7 @@ export async function prepareLlama(modelId, onProgress) {
     starting = attempt;
     try {
         await attempt;
+        markLlamaBusy();
     }
     finally {
         if (starting === attempt)

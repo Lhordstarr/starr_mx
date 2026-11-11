@@ -19,7 +19,7 @@ import * as path from 'node:path';
 import { listDownloads } from './huggingface.js';
 import { CATALOG } from './model-catalog.js';
 import { venvPython } from './runtimes.js';
-import { attachChild, finishProcess, registerProcess, registerStopHandler, unregisterStopHandler, } from './processes.js';
+import { attachChild, finishProcess, registerProcess, registerStopHandler, setProcessDevice, setProcessWarm, unregisterStopHandler, } from './processes.js';
 const port = () => Number(process.env.TRANSFORMERS_PORT ?? 9933);
 const idleMs = () => Number(process.env.TRANSFORMERS_IDLE_MS ?? 10 * 60_000);
 const loadTimeoutMs = () => Number(process.env.TRANSFORMERS_LOAD_MS ?? 10 * 60_000);
@@ -263,11 +263,31 @@ function clearIdle() {
 }
 function touchIdle() {
     clearIdle();
+    const jobId = serving?.jobId;
     const ms = idleMs();
-    if (!Number.isFinite(ms) || ms <= 0)
+    if (!Number.isFinite(ms) || ms <= 0) {
+        if (jobId)
+            setProcessWarm(jobId, false);
         return;
+    }
+    const until = Date.now() + ms;
+    if (jobId)
+        setProcessWarm(jobId, true, until);
     idleTimer = setTimeout(() => void stopTransformersServer(), ms);
     idleTimer.unref?.();
+}
+/** A chat request is in flight: the server is working, not idle. */
+export function markTransformersBusy() {
+    if (!serving)
+        return;
+    clearIdle();
+    if (serving.jobId)
+        setProcessWarm(serving.jobId, false);
+}
+/** The request is done: restart the idle clock and publish its deadline. */
+export function markTransformersIdle() {
+    if (serving)
+        touchIdle();
 }
 export async function stopTransformersServer(byUser = false) {
     const current = serving;
@@ -309,8 +329,12 @@ async function waitForReady(child, model) {
         }
         try {
             const res = await fetch(`http://127.0.0.1:${port()}/health`, { signal: AbortSignal.timeout(1500) });
-            if (res.ok)
-                return;
+            if (res.ok) {
+                // The runner resolves "auto" itself. Ask it rather than repeating the
+                // guess here: torch may have fallen back to CPU after the build check.
+                const health = (await res.json().catch(() => null));
+                return typeof health?.device === 'string' ? health.device : null;
+            }
         }
         catch (e) {
             /* not listening yet */
@@ -354,7 +378,7 @@ async function start(bin, model) {
             console.error(`[transformers-chat] server exited (${code ?? signal})${tailSuffix()}`);
         }
     });
-    await waitForReady(child, model);
+    const resolvedDevice = await waitForReady(child, model);
     // Find the real python server pid for the resource manager.
     let serverPid = child.pid ?? -1;
     for (let i = 0; i < 20 && serverPid === (child.pid ?? -1); i += 1) {
@@ -371,11 +395,14 @@ async function start(bin, model) {
         kind: 'llm',
         script: 'chat_transformers.py',
         pid: serverPid > 0 ? serverPid : (child.pid ?? -1),
+        repo: model.repo,
         device: 'auto',
     });
     serving.jobId = job.id;
     attachChild(job.id, child);
     registerStopHandler(job.id, () => stopTransformersServer(true));
+    if (resolvedDevice)
+        setProcessDevice(job.id, resolvedDevice);
     touchIdle();
 }
 export async function prepareTransformers(modelId) {
@@ -388,13 +415,13 @@ export async function prepareTransformers(modelId) {
     if (!bin)
         throw new Error('transformers is not available. Install torch and transformers under Settings → Runtimes, then try again.');
     if (serving?.model === model.id) {
-        touchIdle();
+        markTransformersBusy();
         return;
     }
     if (starting) {
         await starting.catch(() => undefined);
         if (serving?.model === model.id) {
-            touchIdle();
+            markTransformersBusy();
             return;
         }
     }
@@ -402,6 +429,7 @@ export async function prepareTransformers(modelId) {
     starting = attempt;
     try {
         await attempt;
+        markTransformersBusy();
     }
     finally {
         if (starting === attempt)

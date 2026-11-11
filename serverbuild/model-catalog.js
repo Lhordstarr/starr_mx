@@ -133,6 +133,63 @@ export const CATALOG = [
         ],
     },
     {
+        task: 'vision',
+        title: 'Vision & multimedia',
+        note: 'Multimodal models from Ollama’s registry — no Hugging Face download and ' +
+            'no Python stack. Assign one under What each job uses; it turns images ' +
+            'and sampled video frames into text for whichever chat model is active. ' +
+            'Audio is handled by the Speech to text slot, not here. Sizes are the ' +
+            'pulled model and do not include the chat model that will also be loaded.',
+        entries: [
+            {
+                repo: 'ollama/moondream',
+                label: 'Moondream 2 (1.9B)',
+                task: 'vision',
+                blurb: 'The realistic choice on an 8 GB machine: 1.6 GB, fast enough on a CPU, ' +
+                    'and good at describing photos, screenshots and diagrams. Images only.',
+                runtime: 'Ollama',
+                ollamaTag: 'moondream:latest',
+                files: [],
+                run: { kind: 'vision', requires: [] },
+            },
+            {
+                repo: 'ollama/granite3.2-vision',
+                label: 'Granite 3.2 Vision (2B)',
+                task: 'vision',
+                blurb: '2.3 GB. IBM’s document-oriented vision model; charts, tables and dense ' +
+                    'scans are its strongest case. Images only.',
+                runtime: 'Ollama',
+                ollamaTag: 'granite3.2-vision:2b',
+                files: [],
+                run: { kind: 'vision', requires: [] },
+            },
+            {
+                repo: 'ollama/qwen2.5vl',
+                label: 'Qwen2.5-VL (3B)',
+                task: 'vision',
+                blurb: '3.0 GB. The strongest all-rounder here, including video understanding. ' +
+                    'This app samples video into four still frames before asking, so the ' +
+                    'model sees those frames rather than the original stream.',
+                runtime: 'Ollama',
+                ollamaTag: 'qwen2.5vl:3b',
+                files: [],
+                run: { kind: 'vision', requires: [] },
+            },
+            {
+                repo: 'ollama/gemma3',
+                label: 'Gemma 3 (4B)',
+                task: 'vision',
+                blurb: '3.2 GB. A stronger general chat model that also sees images; useful if ' +
+                    'you want one model for both roles. Tight but workable under 8 GB when ' +
+                    'the chat model is unloaded first.',
+                runtime: 'Ollama',
+                ollamaTag: 'gemma3:4b',
+                files: [],
+                run: { kind: 'vision', requires: [] },
+            },
+        ],
+    },
+    {
         task: 'speech-to-text',
         title: 'Speech to text',
         note: 'Ollama has no transcription models — pull returns 404. The CTranslate2 ' +
@@ -281,20 +338,32 @@ export const CATALOG = [
                 label: 'Kokoro 82M (ONNX)',
                 task: 'text-to-speech',
                 blurb: 'The same 82M voice model as the PyTorch checkpoint, exported to ONNX ' +
-                    'Runtime. It runs on the CPU without a CUDA build, so it is the ' +
-                    'portable option rather than the fastest one; the Speak button and ' +
-                    'Studio use it like any other voice. The q4f16 weights, the af_heart ' +
-                    'style table and the phoneme vocabulary are one bundle — the graph ' +
-                    'alone cannot pronounce anything.',
+                    'Runtime. On an NVIDIA machine the ONNX Runtime in the Kokoro ' +
+                    'environment is the GPU build, so the graph runs on the card; ' +
+                    'without one it is the CPU build. The q4 graph — 4-bit weights with ' +
+                    'floating-point activations — is the export that computes correctly ' +
+                    'on both. The fp16 exports are not bundled because the CUDA provider ' +
+                    'turns them into a full-length silent file. The af_heart style table ' +
+                    'and the phoneme vocabulary come with it; the graph alone cannot ' +
+                    'pronounce anything.',
                 runtime: 'onnxruntime (Kokoro)',
                 files: [
-                    { name: 'onnx/model_q4f16.onnx', label: 'q4f16 weights', bytes: 154586422 },
+                    {
+                        name: 'onnx/model_q4.onnx',
+                        label: 'q4 weights',
+                        bytes: 305215966,
+                        // Browse downloads often land on the smaller q4f16 export. The
+                        // runner accepts it on CPU (and refuses it on CUDA because that
+                        // build produces silence), so presence is honest even though the
+                        // catalog still prefers q4 for a fresh download.
+                        oneOf: ['onnx/model_q4f16.onnx'],
+                    },
                     { name: 'voices/af_heart.bin', label: 'af_heart voice', bytes: 522240 },
                     { name: 'tokenizer.json', label: 'phoneme vocabulary', bytes: 3497 },
                     { name: 'config.json', label: 'config.json', bytes: 44 },
                 ],
                 bundle: true,
-                bundleMB: 148,
+                bundleMB: 292,
                 run: { kind: 'tts', requires: ['kokoro'] },
             },
             {
@@ -319,18 +388,55 @@ export const CATALOG = [
     {
         task: 'image-generation',
         title: 'Image generation',
-        note: 'Ollama cannot run diffusion models. The diffusers builds run here once PyTorch and Diffusers are installed; the GGUF build needs ComfyUI, which this app does not install.',
+        note: 'Ollama cannot run diffusion models. The diffusers builds run here once ' +
+            'PyTorch and Diffusers are installed, but SD 3.5 Medium’s full pipeline ' +
+            'does not fit in 8 GB. Its GGUF build runs through stable-diffusion.cpp ' +
+            'from the Runtimes page; that is the route this machine can actually use.',
         entries: [
             {
-                repo: 'city96/stable-diffusion-3.5-medium-gguf',
+                repo: 'second-state/stable-diffusion-3.5-medium-GGUF',
                 label: 'Stable Diffusion 3.5 Medium (GGUF)',
                 task: 'image-generation',
-                blurb: 'A single quantised file, so ComfyUI can load it without the whole ' +
-                    'pipeline tree. Nothing in this app can run it — there is no Run ' +
-                    'button, because offering one that could not work would be worse ' +
-                    'than saying so here.',
-                runtime: 'ComfyUI (external — not installed by this app)',
-                files: [{ name: 'sd3.5_medium-Q4_K_M.gguf', label: 'Q4_K_M', bytes: 1704 * MB }],
+                blurb: 'The whole SD 3.5 Medium pipeline at 4-bit — UNet, T5-XXL, both CLIP ' +
+                    'encoders and the VAE — in 5.2 GB. stable-diffusion.cpp keeps the ' +
+                    'quantised MMDiT and VAE in RAM, streams the 2.75 GB text encoders ' +
+                    'from disk, and runs the UNet on the Vulkan card. That split is what ' +
+                    'fits an 8 GB laptop. The VAE is not in the quantised repo, so this ' +
+                    'card fetches an ungated copy of the official VAE too — no Hugging ' +
+                    'Face token is required. The Run panel starts at 384×384 and eight ' +
+                    'steps: that is the largest canvas that stayed coherent on this ' +
+                    'card, and it takes roughly a quarter of an hour.',
+                runtime: 'stable-diffusion.cpp',
+                files: [
+                    { name: 'sd3.5_medium-Q4_0.gguf', label: 'UNet Q4_0', bytes: 2079836768 },
+                    { name: 't5xxl-Q4_0.gguf', label: 'T5-XXL encoder Q4_0', bytes: 2752841312 },
+                    { name: 'clip_g-Q4_0.gguf', label: 'CLIP-G Q4_0', bytes: 391439360 },
+                    { name: 'clip_l-Q4_0.gguf', label: 'CLIP-L Q4_0', bytes: 69384832 },
+                    {
+                        name: 'vae/diffusion_pytorch_model.safetensors',
+                        label: 'VAE (ungated mirror of the official release)',
+                        bytes: 167666902,
+                        // The official stabilityai repository is gated, and requiring an
+                        // HF token to run a model that is otherwise downloadable would
+                        // break the whole point of the local path. This mirror publishes
+                        // the same 160 MB VAE file without a gate.
+                        repo: 'adamo1139/stable-diffusion-3.5-medium-ungated',
+                    },
+                ],
+                bundle: true,
+                bundleMB: 5208,
+                run: {
+                    kind: 'image',
+                    requires: ['stable-diffusion-cpp'],
+                    // Eight steps at 384 is the largest canvas that came out coherent
+                    // here. A 512 canvas sampled at the same settings decoded to wood
+                    // grain: the card's compute buffers exceed what RADV can handle.
+                    steps: 8,
+                    width: 384,
+                    height: 384,
+                    maxWidth: 384,
+                    maxHeight: 384,
+                },
             },
             {
                 repo: 'stabilityai/sd-turbo',
@@ -395,5 +501,18 @@ export const CATALOG = [
 ];
 /** Flat index for callers that just want every repo mentioned, for validation. */
 export function catalogRepoIds() {
-    return CATALOG.flatMap((s) => s.entries.map((e) => e.repo));
+    const repos = new Set();
+    for (const section of CATALOG) {
+        for (const entry of section.entries) {
+            repos.add(entry.repo);
+            // Auxiliary repositories are part of a catalog model too. Without them
+            // the hub would label the VAE download as a standalone model no job
+            // uses, while the image card fails for lack of it.
+            for (const file of entry.files ?? []) {
+                if (file.repo)
+                    repos.add(file.repo);
+            }
+        }
+    }
+    return [...repos];
 }

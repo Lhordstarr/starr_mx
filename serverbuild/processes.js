@@ -36,6 +36,7 @@ export const SCRIPT_RUNTIMES = {
     'speak_hf.py': ['torch', 'transformers'],
     'speak_onnx.py': ['onnxruntime', 'kokoro'],
     'generate.py': ['torch', 'diffusers'],
+    'sd-cli': ['stable-diffusion-cpp'],
     'llama-server': ['llama-cpp'],
     'whisper-cli': ['whisper-cpp'],
     'chat_transformers.py': ['torch', 'transformers'],
