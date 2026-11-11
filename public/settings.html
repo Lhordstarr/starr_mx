@@ -188,8 +188,13 @@
         </button>
         <button type="button" id="rt-remove" class="btn-danger" hidden>Remove environment</button>
         <span class="spacer"></span>
+        <label class="rt-data-toggle">
+          <input type="checkbox" id="rt-data-usage-toggle">
+          Show data usage
+        </label>
         <span class="rt-total" id="rt-total"></span>
       </div>
+      <div class="rt-data-usage" id="rt-data-usage" hidden></div>
 
       <!-- GPU driver helper. Installing a driver is a system change, so it is
            a button the user presses rather than a block of prose. -->

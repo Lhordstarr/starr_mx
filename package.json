@@ -8,7 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "desktop": "electron desktop/main.mjs",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node serverbuild/server.js",
     "typecheck": "tsc --noEmit",
     "test:stt": "tsx scripts/stt-selftest.ts",
     "test:stt-local": "tsx scripts/stt-local-selftest.ts",

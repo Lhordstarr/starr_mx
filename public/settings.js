@@ -1268,6 +1268,8 @@ function showRuntimeWarning(serverWarning) {
 }
 const rtGpuNote = document.getElementById('rt-gpu-note');
 const rtTotal = document.getElementById('rt-total');
+const rtDataUsageToggle = document.getElementById('rt-data-usage-toggle');
+const rtDataUsage = document.getElementById('rt-data-usage');
 
 /** Which radio in the device group is picked. Starts on CPU and upgrades to
  *  GPU once the server reports a card, so a machine with no GPU never silently
@@ -1291,6 +1293,19 @@ let rtDevice = 'cpu';
 let rtPicked = new Set();
 /** The groups from the last loadRuntimes, so "Install all" can select them. */
 let rtCurrentGroups = [];
+function rtDataUsageEnabled() {
+  try { return localStorage.getItem('rt-data-usage') === '1'; } catch { return false; }
+}
+function setRtDataUsageEnabled(v) {
+  try { localStorage.setItem('rt-data-usage', v ? '1' : '0'); } catch {}
+}
+if (rtDataUsageToggle) {
+  rtDataUsageToggle.checked = rtDataUsageEnabled();
+  rtDataUsageToggle.addEventListener('change', () => {
+    setRtDataUsageEnabled(rtDataUsageToggle.checked);
+    updateRuntimeTotal(rtCurrentGroups);
+  });
+}
 /** Torch as each venv actually has it, from the last runtime read. The total
  *  estimate uses this to count a wheel that will be fetched, not one that is
  *  already there — and not merely once when two environments need it. */
@@ -1679,6 +1694,25 @@ function updateRuntimeTotal(groups) {
   if (install) {
     install.disabled = pick.length === 0;
     install.title = pick.length ? '' : 'Tick at least one runtime to install';
+  }
+
+  if (rtDataUsage) {
+    if (rtDataUsageEnabled() && pick.length) {
+      const storage = estimate.mb; // placeholder: download size stands in for footprint until measured
+      // Prefer the server's per-group storage estimate when it is present.
+      const storageEstimate = pick.reduce((sum, id) => {
+        const g = groups.find((x) => x.id === id);
+        return sum + (g?.storageMB ?? g?.approxMB ?? 0);
+      }, 0);
+      rtDataUsage.hidden = false;
+      rtDataUsage.textContent =
+        `Data usage — internet download ≈ ${estimate.mb} MB; ` +
+        `installed footprint ≈ ${storageEstimate} MB` +
+        (estimate.torchVenvs.length ? ` (PyTorch ×${estimate.torchVenvs.length})` : '');
+    } else {
+      rtDataUsage.hidden = true;
+      rtDataUsage.textContent = '';
+    }
   }
 }
 
@@ -2095,6 +2129,11 @@ async function runRuntimeInstall(password) {
           privilegeAsked = true;
           openPassPrompt((value) => runRuntimeInstall(value || undefined), rtInstall);
         }
+      } else if (event === 'usage') {
+        logAppend(
+          rtLogBody,
+          `Data usage — installed ≈ ${parsed.storageMB} MB this run; runtime storage now ≈ ${parsed.totalStorageMB} MB.\n`,
+        );
       } else if (event === 'error') {
         throw new Error(parsed.message);
       } else if (event === 'done') {

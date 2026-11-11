@@ -98,6 +98,7 @@ import {
   removeRuntimeGroup,
   removeRuntimes,
   runtimeStatus,
+  runtimeStorageBytes,
   venvPythonVersion,
   type RuntimeGroup,
 } from './runtimes.js';
@@ -1097,7 +1098,9 @@ app.get('/api/runtimes', async (_req, res) => {
   // to be the one that will actually be fetched.
   const groups = RUNTIME_GROUPS.map((g) => {
     const plan = g.deviceInstall?.(device, presence);
-    return plan ? { ...g, approxMB: plan.approxMB, devicePkgs: plan.pkgs } : g;
+    return plan
+      ? { ...g, approxMB: plan.approxMB, devicePkgs: plan.pkgs, storageMB: g.storageMB ?? plan.approxMB }
+      : { ...g, storageMB: g.storageMB ?? g.approxMB };
   });
   // Runtime upgrades available for the installed build (e.g. a CPU build on a
   // machine with a GPU). The UI offers a one-click reinstall for these.
@@ -1306,6 +1309,7 @@ app.post('/api/runtimes/install', async (req, res) => {
   try {
     const warning = await deviceWarning(device);
     if (warning) send('progress', warning);
+    const storageBefore = await runtimeStorageBytes();
     await installRuntimes({
       groups: groups as NonNullable<(typeof groups)[0]>[],
       device,
@@ -1322,6 +1326,11 @@ app.post('/api/runtimes/install', async (req, res) => {
         updateTransfer(installId, { label: line.trim().slice(0, 80) });
         send('progress', line);
       },
+    });
+    const storageAfter = await runtimeStorageBytes();
+    send('usage', {
+      storageMB: Math.round((storageAfter - storageBefore) / (1024 * 1024)),
+      totalStorageMB: Math.round(storageAfter / (1024 * 1024)),
     });
     const status = await runtimeStatus(false);
     // Released before the completion is announced, not after. The browser

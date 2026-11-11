@@ -313,6 +313,10 @@ export interface RuntimeGroup {
   unlocks: string[];
   /** Fixed pip specs. Never user input. */
   pkgs: string[];
+  /** Capabilities this group builds on. */
+  needs?: string[];
+  /** Approximate installed footprint on disk. */
+  storageMB?: number;
   /**
    * What this group installs on *this* machine.
    *
@@ -460,6 +464,7 @@ approxMB: 17,
     blurb: 'Loads Whisper for transcription. Without it there is no local STT.',
     unlocks: ['speech-to-text'],
     pkgs: ['transformers', 'accelerate', 'sentencepiece'],
+    needs: ['torch'],
     needsTorch: true,
     approxMB: 45,
   },
@@ -470,6 +475,7 @@ approxMB: 17,
     blurb: 'Runs Stable Diffusion and friends for image generation. Slow on CPU.',
     unlocks: ['image-generation'],
     pkgs: ['diffusers', 'safetensors', 'accelerate'],
+    needs: ['torch'],
     needsTorch: true,
     approxMB: 25,
   },
@@ -544,6 +550,7 @@ approxMB: 17,
     // everywhere else: the GPU wheel on an NVIDIA card, the CPU wheel without
     // one.
     pkgs: ['kokoro', 'soundfile'],
+    needs: ['torch'],
     deviceInstall: (device, presence) =>
       wantsOnnxGpu(device, presence)
         ? { pkgs: ['kokoro', 'soundfile', onnxGpuPackage()], approxMB: 274 }
@@ -3825,4 +3832,29 @@ export async function deviceWarning(device: Device): Promise<string | null> {
         : 'No AMD GPU detected. ROCm wheels will install but cannot run.';
   }
   return null;
+}
+/** Approximate bytes used by the runtimes folder, for the data-usage readout. */
+export async function runtimeStorageBytes(): Promise<number> {
+  const root = runtimesDir();
+  let total = 0;
+  async function walk(dir: string): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      const full = path.join(dir, name);
+      try {
+        const st = await stat(full);
+        if (st.isDirectory()) await walk(full);
+        else total += st.size;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  await walk(root);
+  return total;
 }
