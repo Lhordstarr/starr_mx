@@ -2245,7 +2245,7 @@ async function aptInstall(pkg, why, onProgress, { password, onNeedsPrivilege }) 
        update since it was built fails exactly this way, so the update is run and
        the install retried — the pair is what a person types at a terminal, and
        doing only the second half is what made this need a manual fix. */
-    if (code !== 0 && /unable to locate package|no such package|not found|404\s+Not Found/i.test(tail)) {
+    if (code !== 0 && /unable to locate package|no such package|not found|404\s+Not Found|Failed to fetch|Could not wait|Resource temporarily unavailable|Temporary failure resolving/i.test(tail)) {
         onProgress('Refreshing the package list (apt-get update)…');
         const update = await run(['apt-get', 'update']);
         if (update.code !== 0) {
