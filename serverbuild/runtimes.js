@@ -421,24 +421,34 @@ export async function venvPythonVersion(name = 'venv') {
  * is newer — versioned binaries are tried newest first, then the interpreters
  * uv and pyenv keep out of PATH. RUNTIMES_PYTHON overrides the search.
  */
+/** True when this interpreter can actually build a venv without a distro package. */
+async function hasVenvModule(bin) {
+    return new Promise((resolve) => {
+        const child = spawn(bin, ['-c', 'import venv; print("ok")'], { stdio: ['ignore', 'pipe', 'ignore'] });
+        let out = '';
+        child.stdout.on('data', (c) => (out += String(c)));
+        child.on('error', () => resolve(false));
+        child.on('close', (code) => resolve(code === 0 && out.trim() === 'ok'));
+    });
+}
 async function findInterpreter(bound) {
     const explicit = process.env.RUNTIMES_PYTHON;
     if (explicit) {
         const version = await probeVersion(explicit);
-        return version && pythonSatisfies(version, bound) ? explicit : null;
+        if (!version || !pythonSatisfies(version, bound))
+            return null;
+        if (!(await hasVenvModule(explicit)))
+            return null;
+        return explicit;
     }
     if (!bound) {
-        // Prefer an already-installed versioned interpreter that can build a venv
-        // on its own. The distro default (python3) may be newer than any venv
-        // module that is installed, which would otherwise drag in a deadsnakes
-        // package the network cannot reach.
         for (const minor of ['3.14', '3.13', '3.12', '3.11', '3.10', '3.9']) {
             const name = `python${minor}`;
-            if (await probeVersion(name))
+            if ((await probeVersion(name)) && (await hasVenvModule(name)))
                 return name;
         }
         for (const name of ['python3', 'python']) {
-            if (await probeVersion(name))
+            if ((await probeVersion(name)) && (await hasVenvModule(name)))
                 return name;
         }
         return null;
@@ -446,7 +456,7 @@ async function findInterpreter(bound) {
     for (const minor of ['3.12', '3.11', '3.10', '3.9', '3.8']) {
         const name = `python${minor}`;
         const version = await probeVersion(name);
-        if (version && pythonSatisfies(version, bound))
+        if (version && pythonSatisfies(version, bound) && (await hasVenvModule(name)))
             return name;
     }
     // Managers keep interpreters outside PATH; look where they put them. The
@@ -477,14 +487,14 @@ async function findInterpreter(bound) {
                 bin = path.join(dir, 'python3');
                 version = await probeVersion(bin);
             }
-            if (version && pythonSatisfies(version, bound))
+            if (version && pythonSatisfies(version, bound) && (await hasVenvModule(bin)))
                 return bin;
         }
     }
     // The default interpreter is still worth a try — a bound can be loose.
     for (const name of ['python3', 'python']) {
         const version = await probeVersion(name);
-        if (version && pythonSatisfies(version, bound))
+        if (version && pythonSatisfies(version, bound) && (await hasVenvModule(name)))
             return name;
     }
     return null;
