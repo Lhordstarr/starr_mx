@@ -2285,6 +2285,43 @@ function usesPython(group) {
         group.installer !== 'whisper-cpp' &&
         group.installer !== 'stable-diffusion-cpp');
 }
+/**
+ * The environment an overlay borrows its heavy packages from.
+ *
+ * Kokoro cannot share the main venv because of its Python bound, but it can
+ * still share PyTorch, Transformers and ONNX Runtime by importing them from a
+ * base environment built on the same interpreter. The overlay then carries only
+ * the packages that are genuinely its own.
+ */
+function baseVenvName(name) {
+    return name === 'venv' ? name : `${name}-base`;
+}
+/** Site-packages directory for an environment, or null when it does not exist. */
+async function venvSitePackages(name) {
+    const lib = path.join(venvDir(name), 'lib');
+    let entries;
+    try {
+        entries = await readdir(lib);
+    }
+    catch {
+        return null;
+    }
+    const pydir = entries.find((e) => /^python\d+\.\d+$/.test(e));
+    if (!pydir)
+        return null;
+    return path.join(lib, pydir, 'site-packages');
+}
+/** Makes an overlay environment import the heavy packages from its base. */
+async function ensureOverlayLink(name) {
+    const base = baseVenvName(name);
+    if (base === name)
+        return;
+    const site = await venvSitePackages(name);
+    const baseSite = await venvSitePackages(base);
+    if (!site || !baseSite)
+        return;
+    await writeFile(path.join(site, 'base-packages.pth'), `${baseSite}\n`);
+}
 export async function installRuntimes({ groups, device, onProgress, password, onNeedsPrivilege, }) {
     // Only the groups that actually go through pip. Ollama and llama.cpp have
     // their own installers, so they carry no venv — which matters, because
@@ -2309,7 +2346,7 @@ export async function installRuntimes({ groups, device, onProgress, password, on
         await ensureVenvWithRecovery('venv', undefined, onProgress, { password, onNeedsPrivilege });
     }
     const presence = await detectGpu();
-    const common = ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input'];
+    const common = ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '--cache-dir', path.join(runtimesDir(), 'store')];
     const listed = new Set(groups.map((g) => g.id));
     const runPip = (py, args, label) => new Promise((resolve, reject) => {
         const child = spawn(py, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -2341,6 +2378,28 @@ export async function installRuntimes({ groups, device, onProgress, password, on
             reject(new Error(`${label} failed (pip exited ${code}) — see the log above.`));
         });
     });
+    // Overlay environments borrow their heavy packages from a base environment.
+    // Build those bases first, and put the shared heavy stack into them, so the
+    // overlay only needs its own small packages.
+    const overlayNames = [...members.keys()].filter((n) => baseVenvName(n) !== n);
+    for (const name of overlayNames) {
+        const base = baseVenvName(name);
+        const list = members.get(name);
+        const bound = list.map((g) => g.maxPython).find((b) => b) ?? undefined;
+        await ensureVenvWithRecovery(base, bound, onProgress, { password, onNeedsPrivilege });
+        const py = venvPython(base);
+        const resolved = resolveIndex(device, (await detectGpu()));
+        onProgress(`Installing the shared heavy packages into ${base}…`);
+        await runPip(py, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '--index-url', resolved, 'torch'], 'PyTorch');
+        await runPip(py, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', 'transformers', 'accelerate', 'sentencepiece'], 'Transformers');
+        const onnxGroup = list.find((g) => g.deviceInstall);
+        const plan = onnxGroup?.deviceInstall?.(device, await detectGpu());
+        const onnxPkg = plan?.pkgs.find((p) => /^onnxruntime(?:-gpu)?(?:[<>=!~].*)?$/.test(p));
+        if (onnxPkg) {
+            await runPip(py, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', onnxPkg], 'ONNX Runtime');
+        }
+        await ensureOverlayLink(name);
+    }
     for (const [name, list] of members) {
         const bound = list.map((g) => g.maxPython).find((b) => b) ?? undefined;
         // The shared environment was ensured at the top of this function. Asking
@@ -2350,9 +2409,11 @@ export async function installRuntimes({ groups, device, onProgress, password, on
         if (name !== 'venv') {
             await ensureVenvWithRecovery(name, bound, onProgress, { password, onNeedsPrivilege });
         }
+        await ensureOverlayLink(name);
         const py = venvPython(name);
         const where = name === 'venv' ? 'the environment' : `${list[0].label}'s own environment`;
-        if (list.some((g) => g.id === 'torch' || g.needsTorch)) {
+        const base = baseVenvName(name);
+        if (base === name && list.some((g) => g.id === 'torch' || g.needsTorch)) {
             const resolved = resolveIndex(device, presence);
             let deviceNote;
             if (device === 'cpu')
@@ -2392,18 +2453,28 @@ export async function installRuntimes({ groups, device, onProgress, password, on
             // What this group installs depends on the machine for some groups: the
             // ONNX Runtime GPU wheel and the CPU wheel are different packages with
             // the same import name.
-            const plan = g.deviceInstall
+            const rawPlan = g.deviceInstall
                 ? g.deviceInstall(device, presence)
                 : { pkgs: g.pkgs, approxMB: g.approxMB };
+            // Overlay environments inherit the heavy packages from their base, so
+            // only the packages that are genuinely this group's own are installed
+            // here. Without this, Kokoro would fetch a second PyTorch and a second
+            // ONNX Runtime into its own venv.
+            const heavy = /^(torch|transformers|accelerate|sentencepiece|diffusers|safetensors|onnxruntime)/;
+            const plan = base !== name
+                ? { ...rawPlan, pkgs: rawPlan.pkgs.filter((p) => !heavy.test(p)) }
+                : rawPlan;
             if (!plan.pkgs.length)
                 continue;
             // The two ONNX Runtime builds install the same import package, so the
             // one that is not wanted has to go before the other arrives. Left in
             // place they overwrite each other's files, and a later Remove would
-            // then delete the build that is actually in use.
-            const rival = plan.pkgs.some((p) => p.startsWith('onnxruntime-gpu'))
+            // then delete the build that is actually in use. Overlays do not install
+            // ONNX Runtime at all — it lives in the base — so there is nothing to
+            // swap here.
+            const rival = base === name && plan.pkgs.some((p) => p.startsWith('onnxruntime-gpu'))
                 ? 'onnxruntime'
-                : plan.pkgs.includes('onnxruntime')
+                : base === name && plan.pkgs.includes('onnxruntime')
                     ? 'onnxruntime-gpu'
                     : null;
             if (rival) {
