@@ -428,6 +428,15 @@ async function findInterpreter(bound) {
         return version && pythonSatisfies(version, bound) ? explicit : null;
     }
     if (!bound) {
+        // Prefer an already-installed versioned interpreter that can build a venv
+        // on its own. The distro default (python3) may be newer than any venv
+        // module that is installed, which would otherwise drag in a deadsnakes
+        // package the network cannot reach.
+        for (const minor of ['3.14', '3.13', '3.12', '3.11', '3.10', '3.9']) {
+            const name = `python${minor}`;
+            if (await probeVersion(name))
+                return name;
+        }
         for (const name of ['python3', 'python']) {
             if (await probeVersion(name))
                 return name;
