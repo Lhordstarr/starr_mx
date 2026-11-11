@@ -424,7 +424,7 @@ export async function venvPythonVersion(name = 'venv') {
 /** True when this interpreter can actually build a venv without a distro package. */
 async function hasVenvModule(bin) {
     return new Promise((resolve) => {
-        const child = spawn(bin, ['-c', 'import venv; print("ok")'], { stdio: ['ignore', 'pipe', 'ignore'] });
+        const child = spawn(bin, ['-c', 'import venv, ensurepip; print("ok")'], { stdio: ['ignore', 'pipe', 'ignore'] });
         let out = '';
         child.stdout.on('data', (c) => (out += String(c)));
         child.on('error', () => resolve(false));
