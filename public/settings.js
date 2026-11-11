@@ -946,6 +946,18 @@ function logWorking(text) {
   if (!line) return;
   rtLogStateLabel.textContent = line;
   rtLogStateLabel.title = line;
+
+  // pip reports a real percentage for the wheel it is fetching. Use it when it
+  // is there; otherwise keep the honest indeterminate bar for venv/apt/unpack
+  // steps that have no figure to give.
+  const pct = /(\d{1,3})%/.exec(line);
+  if (pct && rtLogStateBar && rtLogStateBarFill) {
+    rtLogStateBar.classList.remove('bar--live');
+    rtLogStateBarFill.style.width = `${Math.min(100, Number(pct[1]))}%`;
+  } else if (rtLogStateBar) {
+    rtLogStateBar.classList.add('bar--live');
+    if (rtLogStateBarFill) rtLogStateBarFill.style.width = '';
+  }
 }
 
 /** Takes the bar down and leaves the log standing on its own. */
@@ -955,6 +967,10 @@ function logIdle() {
   if (rtLogStateLabel) {
     rtLogStateLabel.textContent = '';
     rtLogStateLabel.removeAttribute('title');
+  }
+  if (rtLogStateBar) {
+    rtLogStateBar.classList.add('bar--live');
+    if (rtLogStateBarFill) rtLogStateBarFill.style.width = '';
   }
 }
 
@@ -1248,6 +1264,8 @@ const rtLog = document.getElementById('rt-log');
 const rtLogBody = document.getElementById('rt-log-body');
 const rtLogState = document.getElementById('rt-log-state');
 const rtLogStateLabel = document.getElementById('rt-log-statelabel');
+const rtLogStateBar = document.querySelector('#rt-log-state .bar');
+const rtLogStateBarFill = rtLogStateBar?.querySelector('i') ?? null;
 const rtWarning = document.getElementById('rt-warning');
 /** Set when the GPU choice cannot actually help the local Python runtimes. */
 let gpuInertReason = '';
